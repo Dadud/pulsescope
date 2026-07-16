@@ -54,6 +54,8 @@ async fn main() {
     // Bundled SDR runtime — ships with the app, no PothosSDR install needed
     setup_sdr_runtime();
 
+    let app_state = AppState::new();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let server_mode = args.iter().any(|a| a == "--server" || a == "--api") || std::env::var("PULSESCOPE_API_ONLY").is_ok();
     // A LAN/headless server must not open physical speakers merely because a
@@ -182,21 +184,9 @@ fn setup_sdr_runtime() {
             tracing::info!(sdr_root = %root.display(), "using bundled SDR runtime");
         }
 
-        // Explicitly register bundled Soapy modules. This matters on Windows:
-        // the core DLL can load while the module directory remains invisible.
-        let modules = root.join("lib/SoapySDR/modules0.8");
-        if modules.exists() { std::env::set_var("SOAPY_SDR_MODULE_PATH", &modules); }
-
-        // SDRplay API is an external prerequisite for RSP1B/RSP2. Keep the
-        // bundled runtime self-contained for other hardware, but add the
-        // installed API directory when present so sdrPlaySupport.dll loads.
-        let sdrplay_api = std::path::PathBuf::from(r"C:\Program Files\SDRplay\API\x64");
-        let mut extra_path = bin.display().to_string();
-        if sdrplay_api.exists() { extra_path.push(';'); extra_path.push_str(&sdrplay_api.display().to_string()); }
-
-        // Prepend runtime DLL paths to PATH.
+        // Prepend bin/ to PATH so DLLs resolve (SoapySDR.dll, driver DLLs, rtl_433.exe)
         if let Ok(path) = std::env::var("PATH") {
-            let new_path = format!("{};{}", extra_path, path);
+            let new_path = format!("{};{}", bin.display(), path);
             std::env::set_var("PATH", &new_path);
         }
 
