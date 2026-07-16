@@ -39,3 +39,6 @@ screenshots/
 # Temp WAV files
 *.wav
 *.log
+build_direwolf_llvm.bat
+test_pthread.c
+test_pthread.o
