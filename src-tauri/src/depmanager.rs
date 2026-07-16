@@ -206,6 +206,30 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         download_url: Some("https://github.com/martinber/noaa-apt/releases/download/v1.4.1/noaa-apt-1.4.1-x86_64-windows-gnu.zip"),
         extract_subdir: Some("noaa-apt"),
     },
+    // TetraEar: TETRA decoder with voice decoding
+    DecoderManifest {
+        name: "tetraear",
+        exe_name: "TETRA_Decoder_Modern.exe",
+        description: "TETRA digital trunked radio decoder with voice (GUI app)",
+        github: Some(("syrex1013", "TetraEar")),
+        search_dirs: &["", "tetraear"],
+        input_type: InputType::Direct,
+        protocol: "tetra",
+        download_url: Some("https://github.com/syrex1013/TetraEar/releases/download/v2.2/TetraEar-v2.2-Windows-x64.zip"),
+        extract_subdir: Some("tetraear"),
+    },
+    // iridiumlive: Iridium satellite burst decoder
+    DecoderManifest {
+        name: "iridiumlive",
+        exe_name: "IridiumLive.exe",
+        description: "Iridium satellite burst detector and demodulator (1616 MHz)",
+        github: Some(("microp11", "iridiumlive")),
+        search_dirs: &["", "windows-x64"],
+        input_type: InputType::Direct,
+        protocol: "iridium",
+        download_url: Some("https://github.com/microp11/iridiumlive/releases/download/v1.3/windows-x64.zip"),
+        extract_subdir: Some("iridiumlive/windows-x64"),
+    },
 ];
 
 /// Result of probing for a decoder.
