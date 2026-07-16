@@ -46,6 +46,9 @@ async fn main() {
 
     tracing::info!("PulseScope starting up");
 
+    // Bundled SDR runtime — ships with the app, no PothosSDR install needed
+    setup_sdr_runtime();
+
     let app_state = AppState::new();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -106,6 +109,78 @@ fn static_ui_dir() -> Option<PathBuf> {
         PathBuf::from("./build"),
     ];
     candidates.into_iter().find(|p| p.exists())
+}
+
+/// Locate the bundled SDR runtime directory.
+///
+/// PulseScope ships `sdr-runtime/` next to the binary containing SoapySDR.dll,
+/// all device module DLLs (RTL-SDR, Airspy, HackRF, bladeRF, LimeSDR, SDRplay,
+/// UHD, etc.), driver DLLs, and rtl_433/rtl_adsb. This eliminates the need for
+/// users to install PothosSDR separately.
+///
+/// In dev mode the directory is at `<workspace>/sdr-runtime/`. In a packaged
+/// install it's next to the .exe.
+fn bundled_sdr_root() -> Option<PathBuf> {
+    // 1. Explicit override
+    if let Ok(p) = std::env::var("PULSESCOPE_SDR_ROOT") {
+        let pb = PathBuf::from(p);
+        if pb.join("bin/SoapySDR.dll").exists() || pb.join("SoapySDR.dll").exists() {
+            return Some(pb);
+        }
+    }
+    // 2. Next to the running executable (packaged install)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("sdr-runtime");
+            if candidate.join("bin/SoapySDR.dll").exists() {
+                return Some(candidate);
+            }
+            // Also check without bin/ prefix
+            if candidate.join("SoapySDR.dll").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 3. Relative to CWD (dev mode)
+    for rel in &["./sdr-runtime", "../sdr-runtime", "../../sdr-runtime"] {
+        let candidate = PathBuf::from(rel);
+        if candidate.join("bin/SoapySDR.dll").exists() || candidate.join("SoapySDR.dll").exists() {
+            return Some(candidate);
+        }
+    }
+    // 4. Fall back to system PothosSDR if installed
+    if std::path::Path::new(r"C:\Program Files\PothosSDR\bin\SoapySDR.dll").exists() {
+        return Some(PathBuf::from(r"C:\Program Files\PothosSDR"));
+    }
+    None
+}
+
+/// Set up environment variables so SoapySDR finds the bundled runtime.
+/// Called at startup before any SDR operations.
+fn setup_sdr_runtime() {
+    if let Some(root) = bundled_sdr_root() {
+        let bin = if root.join("bin").exists() { root.join("bin") } else { root.clone() };
+
+        // Point SoapySDR at the bundled root
+        if std::env::var("SOAPY_SDR_ROOT").is_err() {
+            std::env::set_var("SOAPY_SDR_ROOT", &root);
+            tracing::info!(sdr_root = %root.display(), "using bundled SDR runtime");
+        }
+
+        // Prepend bin/ to PATH so DLLs resolve (SoapySDR.dll, driver DLLs, rtl_433.exe)
+        if let Ok(path) = std::env::var("PATH") {
+            let new_path = format!("{};{}", bin.display(), path);
+            std::env::set_var("PATH", &new_path);
+        }
+
+        // Set PKG_CONFIG_PATH for build-time discovery (harmless at runtime)
+        let pkgconfig = root.join("lib/pkgconfig");
+        if pkgconfig.exists() {
+            std::env::set_var("PKG_CONFIG_PATH", &pkgconfig);
+        }
+    } else {
+        tracing::warn!("No SDR runtime found — install PothosSDR or bundle sdr-runtime/");
+    }
 }
 
 /// Load PEM certificate chain and private key from environment variables when
