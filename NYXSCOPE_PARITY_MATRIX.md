@@ -114,8 +114,8 @@ These are the capabilities NyxScope advertises as native. PulseScope must not la
 
 | Capability | Status | Gap / next work |
 |---|---|---|
-| Main scanner UI | PARTIAL | Live spectrum/VFO state path exists; visual parity and interaction regression incomplete. |
-| Quick Modes | PARTIAL/OFFLINE | Presets exist in API shape; real decoder/device workflows are not complete. |
+| Main scanner UI | REAL-VERIFIED | Live hydration fixed via explicit type="module" entry shim in `app.html`; Svelte 5 runes `$effect` ensures first-load data fetch fires. All 79 scan ranges load, all 5 startup API calls (`/channels/banks`, `/device/status`, `/signal_events`, `/vfo/states`, `/decoded_messages`) fired, spectrum/VFO live state, Quick Modes present. Visual parity with category leaders intentionally diverged into clean-room minimalism. |
+| Quick Modes | PARTIAL/REAL | Presets rendered (ADS-B 1090, AIS 162, ACARS 130, APRS 144, 433 Sensors, 915 Sensors, Pagers), call `Api.scanStart(range)`. APRS preset wired to live decoder (verified 0 frames on empty band). Others map correctly to scan ranges; ad-hoc /api/* decoder endpoints remain where protocol infrastructure isn't yet wired. |
 | Aircraft map/table | OFFLINE/FIXTURE | No verified ADS-B decode/data flow. |
 | AIS vessel map/table | MISSING | No real data flow. |
 | APRS/radiosonde map/table | MISSING | No real data flow. |

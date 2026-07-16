@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Api, openEvents, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
+  import { browser } from '$app/environment';
 
   let banks: ScanRange[] = $state([]);
   let activeRange: string | null = $state(null);
@@ -45,6 +46,23 @@
 
 
   onMount(async () => {
+    if (!browser) return;
+    await loadInitial();
+    ws = openEvents(handleEvent);
+  });
+
+  // Even when the route is mounted by the hash router without a
+  // visible navigation event, Svelte 5 runes still fire `$effect`
+  // on the client. Use it as a belt-and-suspenders to ensure the
+  // initial data load always runs at least once in the browser.
+  $effect(() => {
+    if (browser && banks.length === 0 && !notice.startsWith('init')) {
+      notice = 'init…';
+      loadInitial().finally(() => { notice = notice === 'init…' ? '' : notice; });
+    }
+  });
+
+  async function loadInitial() {
     try {
       const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
       banks = bankList;
@@ -57,9 +75,9 @@
       messages = await Api.decodedMessages(100);
     } catch (e) {
       console.warn('init failed', e);
+      notice = `init failed: ${e}`;
     }
-    ws = openEvents(handleEvent);
-  });
+  }
 
   function handleEvent(ev: ScannerEvent) {
     switch (ev.kind) {
