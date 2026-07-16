@@ -182,6 +182,30 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         download_url: None,
         extract_subdir: None,
     },
+    // SatDump: multi-satellite decoder (NOAA APT, GOES HRIT/LRIT, Meteor-M, Iridium, etc.)
+    DecoderManifest {
+        name: "satdump",
+        exe_name: "satdump.exe",
+        description: "Multi-satellite decoder: NOAA APT, GOES HRIT/LRIT, Meteor-M, Iridium, Inmarsat",
+        github: Some(("SatDump", "SatDump")),
+        search_dirs: &["", "satdump"],
+        input_type: InputType::FileIq,
+        protocol: "satellite",
+        download_url: Some("https://github.com/SatDump/SatDump/releases/download/1.2.2/SatDump-Windows_x64_Portable.zip"),
+        extract_subdir: Some("satdump"),
+    },
+    // noaa-apt: dedicated NOAA APT weather satellite image decoder
+    DecoderManifest {
+        name: "noaa-apt",
+        exe_name: "noaa-apt-console.exe",
+        description: "NOAA APT weather satellite image decoder (137 MHz, WAV input)",
+        github: Some(("martinber", "noaa-apt")),
+        search_dirs: &["", "noaa-apt"],
+        input_type: InputType::StdinAudioS16,
+        protocol: "noaa_apt",
+        download_url: Some("https://github.com/martinber/noaa-apt/releases/download/v1.4.1/noaa-apt-1.4.1-x86_64-windows-gnu.zip"),
+        extract_subdir: Some("noaa-apt"),
+    },
 ];
 
 /// Result of probing for a decoder.
