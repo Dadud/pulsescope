@@ -72,8 +72,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "acarsdec"],
         input_type: InputType::FileIq,
         protocol: "acars",
-        download_url: None,
-        extract_subdir: None,
+        download_url: Some("https://github.com/Dadud/pulsescope/releases/download/decoder-deps-v1/acarsdec.zip"),
+        extract_subdir: Some("acarsdec"),
     },
     // direwolf: official wb2osz 1.8.1 x64 release
     DecoderManifest {
@@ -96,8 +96,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "nrsc5"],
         input_type: InputType::FileIq,
         protocol: "hd_radio",
-        download_url: None,
-        extract_subdir: None,
+        download_url: Some("https://github.com/Dadud/pulsescope/releases/download/decoder-deps-v1/nrsc5.zip"),
+        extract_subdir: Some("nrsc5"),
     },
     // dump978-fa: UAT 978 MHz, Cygwin build from ImagoTrigger
     DecoderManifest {
@@ -120,8 +120,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dumpvdl2"],
         input_type: InputType::FileIq,
         protocol: "vdl2",
-        download_url: None,
-        extract_subdir: None,
+        download_url: Some("https://github.com/Dadud/pulsescope/releases/download/decoder-deps-v1/dumpvdl2.zip"),
+        extract_subdir: Some("dumpvdl2"),
     },
     // dump1090: ADS-B 1090 MHz, Windows-native from gvanem fork
     DecoderManifest {
