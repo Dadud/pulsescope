@@ -98,6 +98,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/signal_id/fingerprints/match", post(signal_id_fp_match))
         .route("/signal_id/polyphase_extract", post(signal_id_polyphase))
         .route("/signal_id/segment_bursts", post(signal_id_segment))
+        .route("/signal_id/classify", post(signal_id_classify))
+        .route("/signal_id/auto_decode", post(signal_id_auto_decode))
         // ── decoded messages ─────────────────────────────────────────────
         .route("/decoded_messages", get(decoded_messages))
         .route("/rtl433_messages", get(rtl433_messages))
@@ -583,14 +585,184 @@ async fn decoded_messages(State(s): State<ApiState>, Query(q): Query<LimitQ>) ->
 }
 #[derive(Deserialize)] struct LimitQ { limit: Option<u32> }
 
-async fn signal_id_fps(State(s): State<ApiState>) -> Json<Value> { if !s.0.device.status().connected { return Json(json!([])); } Json(json!([{"id":"mock-nfm","name":"Analog NFM","family":"analog","mode":"nfm","bandwidth_hz":12500,"confidence":0.96},{"id":"mock-tone-a","name":"PulseScope Test Tone A","family":"test-signal","mode":"iq","frequency_offset_hz":103093,"confidence":0.99}])) }
-async fn signal_id_fp_one(State(s): State<ApiState>, Path(id): Path<String>) -> Json<Value> { let all=signal_id_fps(State(s)).await; let rows=all.0.as_array().cloned().unwrap_or_default(); Json(rows.into_iter().find(|v|v.get("id").and_then(|x|x.as_str())==Some(&id)).unwrap_or_else(||json!({"error":"fingerprint not found"}))) }
-async fn signal_id_fp_delete(Path(_id): Path<i64>) -> impl IntoResponse { Json(json!({"ok": false, "error":"built-in fingerprints cannot be deleted"})) }
-async fn signal_id_fp_match(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { if !s.0.device.status().connected { return Json(json!({"result":"unknown","confidence":0.0})); } let mode=v.get("mode").and_then(|x|x.as_str()).unwrap_or("nfm"); if mode.eq_ignore_ascii_case("nfm") { Json(json!({"result":"Analog NFM","fingerprint_id":"mock-nfm","confidence":0.96})) } else { Json(json!({"result":"unknown","confidence":0.12})) } }
-async fn signal_id_polyphase(Json(v): Json<Value>) -> impl IntoResponse { let sample_rate=v.get("sample_rate_hz").and_then(|x|x.as_u64()).unwrap_or(0); let center=v.get("center_freq_hz").and_then(|x|x.as_u64()).unwrap_or(0); if sample_rate==0 { return Json(json!({"ok":false,"error":"sample_rate_hz is required"})); } Json(json!({"ok":true,"sample_rate_hz":sample_rate,"center_freq_hz":center,"output_rate_hz":sample_rate/2,"phase_count":4,"extractor":"deterministic-polyphase"})) }
-async fn signal_id_file() -> impl IntoResponse { Json(json!({"ok":false,"error":"file upload requires a configured capture path"})) }
-async fn signal_id_segment(Json(v): Json<Value>) -> impl IntoResponse { let samples=v.get("samples").and_then(|x|x.as_u64()).unwrap_or(0); if samples==0 { return Json(json!({"ok":false,"error":"samples is required"})); } let burst_len=(samples/4).max(1); Json(json!({"ok":true,"sample_count":samples,"burst_count":4,"bursts":[{"start":0,"length":burst_len},{"start":burst_len,"length":burst_len},{"start":burst_len*2,"length":burst_len},{"start":burst_len*3,"length":samples.saturating_sub(burst_len*3)}]})) }
-async fn identify_protocol(Json(v): Json<Value>) -> impl IntoResponse { let mode=v.get("mode").and_then(|x|x.as_str()).unwrap_or("").to_ascii_lowercase(); let protocol=match mode.as_str() { "nfm"|"fm"=>"analog_nfm", "wfm"=>"analog_wfm", "am"=>"analog_am", "pocsag"=>"pocsag", "p25"=>"p25", "dmr"=>"dmr", _=>"unknown" }; Json(json!({"result":protocol,"confidence":if protocol=="unknown" {0.0} else {0.96},"input_mode":mode})) }
+async fn signal_id_fps(State(s): State<ApiState>) -> Json<Value> {
+    // Built-in band fingerprints derived from the classifier priors + recent classified hits.
+    let mut fps = vec![
+        json!({"id":"adsb-1090","name":"ADS-B 1090","family":"aviation","mode":"am","frequency_hz":1090000000u64,"bandwidth_hz":1000000,"confidence":0.95,"decoder":"dump1090"}),
+        json!({"id":"ais-162","name":"AIS Marine","family":"marine","mode":"nfm","frequency_hz":161975000u64,"bandwidth_hz":25000,"confidence":0.92,"decoder":"AIS-catcher"}),
+        json!({"id":"noaa-wx","name":"NOAA Weather Radio","family":"weather","mode":"nfm","frequency_hz":162550000u64,"bandwidth_hz":25000,"confidence":0.88,"decoder":"native_nfm"}),
+        json!({"id":"fm-broadcast","name":"FM Broadcast + RDS","family":"analog","mode":"wfm","frequency_hz":100700000u64,"bandwidth_hz":200000,"confidence":0.85,"decoder":"native_wfm_rds"}),
+        json!({"id":"noaa-apt","name":"NOAA APT","family":"satellite","mode":"nfm","frequency_hz":137100000u64,"bandwidth_hz":40000,"confidence":0.82,"decoder":"noaa-apt"}),
+        json!({"id":"goes-hrit","name":"GOES HRIT/LRIT","family":"satellite","mode":"nfm","frequency_hz":1694100000u64,"bandwidth_hz":1500000,"confidence":0.88,"decoder":"satdump"}),
+        json!({"id":"acars","name":"ACARS","family":"aviation","mode":"am","frequency_hz":131550000u64,"bandwidth_hz":6500,"confidence":0.78,"decoder":"acarsdec"}),
+        json!({"id":"pocsag-900","name":"POCSAG Paging","family":"paging","mode":"nfm","frequency_hz":929612500u64,"bandwidth_hz":25000,"confidence":0.78,"decoder":"multimon-ng"}),
+        json!({"id":"ism-433","name":"ISM 433 Sensors","family":"ism","mode":"nfm","frequency_hz":433920000u64,"bandwidth_hz":25000,"confidence":0.80,"decoder":"rtl_433"}),
+        json!({"id":"p25-800","name":"P25 Trunked 800","family":"land_mobile","mode":"nfm","frequency_hz":851012500u64,"bandwidth_hz":12500,"confidence":0.72,"decoder":"dsd-fme"}),
+        json!({"id":"aprs-144","name":"APRS 144.390","family":"amateur","mode":"nfm","frequency_hz":144390000u64,"bandwidth_hz":12500,"confidence":0.90,"decoder":"direwolf"}),
+        json!({"id":"analog-nfm","name":"Analog NFM","family":"analog","mode":"nfm","bandwidth_hz":12500,"confidence":0.60,"decoder":"native_nfm"}),
+    ];
+    // Append high-confidence recent classifications as live fingerprints
+    if let Ok(events) = s.0.db.recent_signal_events(50) {
+        for e in events {
+            if e.top_confidence >= 0.7 && e.sub_protocol != "unknown" && !e.sub_protocol.is_empty() {
+                fps.push(json!({
+                    "id": format!("live-{}-{}", e.sub_protocol, e.frequency_hz),
+                    "name": format!("{} @ {:.3} MHz", e.sub_protocol, e.frequency_hz as f64 / 1e6),
+                    "family": e.top_family,
+                    "mode": "auto",
+                    "frequency_hz": e.frequency_hz,
+                    "bandwidth_hz": e.bandwidth_hz,
+                    "confidence": e.top_confidence,
+                    "protocol": e.sub_protocol,
+                    "source": "live_hit",
+                }));
+            }
+        }
+    }
+    Json(json!(fps))
+}
+async fn signal_id_fp_one(State(s): State<ApiState>, Path(id): Path<String>) -> Json<Value> {
+    let all = signal_id_fps(State(s)).await;
+    let rows = all.0.as_array().cloned().unwrap_or_default();
+    Json(rows.into_iter().find(|v| v.get("id").and_then(|x| x.as_str()) == Some(&id))
+        .unwrap_or_else(|| json!({"error":"fingerprint not found"})))
+}
+async fn signal_id_fp_delete(Path(_id): Path<i64>) -> impl IntoResponse {
+    Json(json!({"ok": false, "error":"built-in fingerprints cannot be deleted"}))
+}
+async fn signal_id_fp_match(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
+    let frequency_hz = v.get("frequency_hz").and_then(|x| x.as_u64())
+        .or_else(|| s.0.scanner.read().as_ref().and_then(|h| h.state.lock().vfo_states.first().map(|vf| vf.frequency_hz)))
+        .unwrap_or(0);
+    let bandwidth_hz = v.get("bandwidth_hz").and_then(|x| x.as_u64()).unwrap_or(12_500) as u32;
+    let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("nfm");
+    let range_name = v.get("range_name").and_then(|x| x.as_str()).unwrap_or("");
+    let snr_db = v.get("snr_db").and_then(|x| x.as_f64()).unwrap_or(15.0) as f32;
+    let c = crate::signal_id::classify(frequency_hz, bandwidth_hz, mode, range_name, snr_db, None);
+    let top = c.candidates.first();
+    Json(json!({
+        "result": c.sub_protocol,
+        "family": c.top_family,
+        "confidence": c.top_confidence,
+        "fingerprint_id": top.map(|t| format!("{}-{}", t.protocol, frequency_hz)).unwrap_or_else(|| "unknown".into()),
+        "decoder": top.map(|t| t.decoder.clone()).unwrap_or_else(|| "none".into()),
+        "reason": top.map(|t| t.reason.clone()).unwrap_or_default(),
+        "candidates": c.candidates,
+        "is_novel": c.is_novel,
+    }))
+}
+async fn signal_id_polyphase(Json(v): Json<Value>) -> impl IntoResponse {
+    let sample_rate = v.get("sample_rate_hz").and_then(|x| x.as_u64()).unwrap_or(0);
+    let center = v.get("center_freq_hz").and_then(|x| x.as_u64()).unwrap_or(0);
+    if sample_rate == 0 {
+        return Json(json!({"ok":false,"error":"sample_rate_hz is required"}));
+    }
+    Json(json!({"ok":true,"sample_rate_hz":sample_rate,"center_freq_hz":center,"output_rate_hz":sample_rate/2,"phase_count":4,"extractor":"deterministic-polyphase"}))
+}
+async fn signal_id_file() -> impl IntoResponse {
+    Json(json!({"ok":false,"error":"file upload requires a configured capture path"}))
+}
+async fn signal_id_segment(Json(v): Json<Value>) -> impl IntoResponse {
+    let samples = v.get("samples").and_then(|x| x.as_u64()).unwrap_or(0);
+    if samples == 0 {
+        return Json(json!({"ok":false,"error":"samples is required"}));
+    }
+    let burst_len = (samples / 4).max(1);
+    Json(json!({"ok":true,"sample_count":samples,"burst_count":4,"bursts":[
+        {"start":0,"length":burst_len},{"start":burst_len,"length":burst_len},
+        {"start":burst_len*2,"length":burst_len},{"start":burst_len*3,"length":samples.saturating_sub(burst_len*3)}
+    ]}))
+}
+
+/// Classify a frequency (and optional live audio) into ranked protocol candidates.
+async fn signal_id_classify(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
+    let frequency_hz = v.get("frequency_hz").and_then(|x| x.as_u64()).unwrap_or(0);
+    let bandwidth_hz = v.get("bandwidth_hz").and_then(|x| x.as_u64()).unwrap_or(12_500) as u32;
+    let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("nfm").to_string();
+    let range_name = v.get("range_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let snr_db = v.get("snr_db").and_then(|x| x.as_f64()).unwrap_or(15.0) as f32;
+    let with_audio = v.get("with_audio").and_then(|x| x.as_bool()).unwrap_or(false);
+
+    let classification = if with_audio && s.0.device.status().connected {
+        // Capture ~0.4 s of IQ, demodulate, and run audio feature detectors
+        let status = s.0.device.status();
+        let count = ((status.sample_rate as f64) * 0.4) as usize;
+        match s.0.device.read_iq(count.max(4096)) {
+            Ok(iq) if iq.len() > 2048 => {
+                use crate::demod::{demodulate, mix_down, Mode};
+                let mut phase = 0.0f64;
+                let offset = frequency_hz as f64 - status.center_freq_hz as f64;
+                let baseband = mix_down(&iq, offset, status.sample_rate, &mut phase);
+                let mut prev = None;
+                let pcm = demodulate(Mode::parse(&mode), &baseband, &mut prev);
+                crate::signal_id::classify(
+                    frequency_hz, bandwidth_hz, &mode, &range_name, snr_db,
+                    Some((&pcm, status.sample_rate as f32)),
+                )
+            }
+            _ => crate::signal_id::classify(frequency_hz, bandwidth_hz, &mode, &range_name, snr_db, None),
+        }
+    } else {
+        crate::signal_id::classify(frequency_hz, bandwidth_hz, &mode, &range_name, snr_db, None)
+    };
+
+    Json(json!({
+        "ok": true,
+        "classification": classification,
+        "action": crate::signal_id::recommended_action(&classification),
+    }))
+}
+
+/// Classify then return the recommended decoder action (does not spawn sidecars yet —
+/// caller can POST /decoders/install/:name or use existing scan endpoints).
+async fn signal_id_auto_decode(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
+    let frequency_hz = v.get("frequency_hz").and_then(|x| x.as_u64()).unwrap_or(0);
+    let bandwidth_hz = v.get("bandwidth_hz").and_then(|x| x.as_u64()).unwrap_or(12_500) as u32;
+    let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("nfm");
+    let range_name = v.get("range_name").and_then(|x| x.as_str()).unwrap_or("");
+    let snr_db = v.get("snr_db").and_then(|x| x.as_f64()).unwrap_or(15.0) as f32;
+    let c = crate::signal_id::classify(frequency_hz, bandwidth_hz, mode, range_name, snr_db, None);
+    let action = crate::signal_id::recommended_action(&c);
+    // If a native decoder already produced text, persist it
+    if c.decode_success && !c.decode_summary.is_empty() {
+        let msg = crate::db::DecodedMessage {
+            id: None,
+            frequency_hz,
+            protocol: c.decode_protocol.clone(),
+            message_type: "auto".into(),
+            address: String::new(),
+            function_code: String::new(),
+            content: c.decode_summary.clone(),
+            raw: c.decode_summary.clone(),
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        };
+        let _ = s.0.db.insert_decoded_message(&msg);
+    }
+    Json(json!({
+        "ok": true,
+        "classification": c,
+        "action": action,
+        "hint": "Use action.decoder with POST /decoders/install/:name if missing, then the matching /scan/* endpoint",
+    }))
+}
+
+async fn identify_protocol(Json(v): Json<Value>) -> impl IntoResponse {
+    let frequency_hz = v.get("frequency_hz").and_then(|x| x.as_u64()).unwrap_or(0);
+    let bandwidth_hz = v.get("bandwidth_hz").and_then(|x| x.as_u64()).unwrap_or(12_500) as u32;
+    let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("nfm");
+    let range_name = v.get("range_name").and_then(|x| x.as_str()).unwrap_or("");
+    let snr_db = v.get("snr_db").and_then(|x| x.as_f64()).unwrap_or(15.0) as f32;
+    let c = crate::signal_id::classify(frequency_hz, bandwidth_hz, mode, range_name, snr_db, None);
+    Json(json!({
+        "result": c.sub_protocol,
+        "confidence": c.top_confidence,
+        "family": c.top_family,
+        "input_mode": mode,
+        "decoder": c.candidates.first().map(|x| x.decoder.clone()).unwrap_or_else(|| "none".into()),
+        "candidates": c.candidates,
+    }))
+}
 async fn talkgroups(State(s): State<ApiState>) -> impl IntoResponse {
     match s.0.db.list_talkgroups() { Ok(v) => Json(serde_json::to_value(v).unwrap()), Err(e) => Json(json!({"error": e.to_string()})) }
 }
@@ -1066,7 +1238,53 @@ async fn vfo_diagnostics(State(s): State<ApiState>) -> impl IntoResponse {
 }
 async fn vfo_identify(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
     let v = s.0.scanner.read().as_ref().and_then(|h| h.state.lock().vfo_states.iter().find(|v| v.id as i64 == id).cloned());
-    match v { Some(v) => Json(json!({"result":"identified","vfo_id":v.id,"frequency_hz":v.frequency_hz,"mode":v.mode,"strength_db":v.strength_db,"squelch_open":v.squelch_open,"classification":if v.mode.eq_ignore_ascii_case("nfm") {"analog_nfm"} else {"unknown"}})), None => Json(json!({"result":"unknown","error":"vfo not found"})) }
+    let Some(v) = v else {
+        return Json(json!({"result":"unknown","error":"vfo not found"}));
+    };
+    let range_name = s.0.scanner.read().as_ref()
+        .and_then(|h| h.state.lock().active_range.clone())
+        .unwrap_or_default();
+    let snr_db = if v.squelch_open { 18.0 } else { 8.0 };
+    let status = s.0.device.status();
+
+    let classification = if status.connected {
+        let count = ((status.sample_rate as f64) * 0.35) as usize;
+        match s.0.device.read_iq(count.max(4096)) {
+            Ok(iq) if iq.len() > 2048 => {
+                use crate::demod::{demodulate, mix_down, Mode};
+                let mut phase = 0.0f64;
+                let offset = v.frequency_hz as f64 - status.center_freq_hz as f64;
+                let baseband = mix_down(&iq, offset, status.sample_rate, &mut phase);
+                let mut prev = None;
+                let pcm = demodulate(Mode::parse(&v.mode), &baseband, &mut prev);
+                crate::signal_id::classify(
+                    v.frequency_hz, 12_500, &v.mode, &range_name, snr_db,
+                    Some((&pcm, status.sample_rate as f32)),
+                )
+            }
+            _ => crate::signal_id::classify(v.frequency_hz, 12_500, &v.mode, &range_name, snr_db, None),
+        }
+    } else {
+        crate::signal_id::classify(v.frequency_hz, 12_500, &v.mode, &range_name, snr_db, None)
+    };
+
+    Json(json!({
+        "result": "identified",
+        "vfo_id": v.id,
+        "frequency_hz": v.frequency_hz,
+        "mode": v.mode,
+        "strength_db": v.strength_db,
+        "squelch_open": v.squelch_open,
+        "classification": classification.sub_protocol,
+        "family": classification.top_family,
+        "confidence": classification.top_confidence,
+        "decoder": classification.candidates.first().map(|c| c.decoder.clone()).unwrap_or_else(|| "none".into()),
+        "features": classification.features,
+        "candidates": classification.candidates,
+        "decode_success": classification.decode_success,
+        "decode_summary": classification.decode_summary,
+        "action": crate::signal_id::recommended_action(&classification),
+    }))
 }
 async fn vfo_rds(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
     let v = s.0.scanner.read().as_ref().and_then(|h| h.state.lock().vfo_states.iter().find(|v| v.id as i64 == id).cloned());
