@@ -171,8 +171,68 @@ pub struct BlacklistEntry {
 
 impl Db {
     pub fn insert_signal_event(&self, frequency_hz: u64, _strength_db: f32, snr_db: f32, bandwidth_hz: u32, range_name: &str, timestamp_ms: i64) -> anyhow::Result<i64> {
+        // Backward-compatible path: no classification provided.
+        self.insert_classified_signal_event(
+            frequency_hz,
+            snr_db,
+            bandwidth_hz,
+            range_name,
+            timestamp_ms,
+            "unknown",
+            "unknown",
+            0.0,
+            "",
+            false,
+            "",
+            "",
+            false,
+            true,
+        )
+    }
+
+    /// Insert a signal event with full auto-classification fields populated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_classified_signal_event(
+        &self,
+        frequency_hz: u64,
+        snr_db: f32,
+        bandwidth_hz: u32,
+        range_name: &str,
+        timestamp_ms: i64,
+        signal_class: &str,
+        top_family: &str,
+        top_confidence: f32,
+        sub_protocol: &str,
+        decode_success: bool,
+        decode_protocol: &str,
+        decode_summary: &str,
+        likely_proprietary: bool,
+        is_novel: bool,
+    ) -> anyhow::Result<i64> {
         let c = self.conn();
-        c.execute("INSERT INTO signal_events (frequency_hz, signal_class, top_family, top_confidence, bandwidth_hz, snr_db, decode_success, decode_protocol, decode_summary, likely_proprietary, waterfall_psd, range_name, timestamp_ms, is_novel) VALUES (?1,'unknown','unknown',0.0,?2,?3,0,'','',0,'',?4,?5,1)", rusqlite::params![frequency_hz as i64, bandwidth_hz as i64, snr_db, range_name, timestamp_ms])?;
+        c.execute(
+            "INSERT INTO signal_events (
+                frequency_hz, signal_class, top_family, top_confidence, sub_protocol,
+                bandwidth_hz, snr_db, decode_success, decode_protocol, decode_summary,
+                likely_proprietary, waterfall_psd, range_name, timestamp_ms, is_novel
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'',?12,?13,?14)",
+            rusqlite::params![
+                frequency_hz as i64,
+                signal_class,
+                top_family,
+                top_confidence,
+                sub_protocol,
+                bandwidth_hz as i64,
+                snr_db,
+                if decode_success { 1i64 } else { 0i64 },
+                decode_protocol,
+                decode_summary,
+                if likely_proprietary { 1i64 } else { 0i64 },
+                range_name,
+                timestamp_ms,
+                if is_novel { 1i64 } else { 0i64 },
+            ],
+        )?;
         Ok(c.last_insert_rowid())
     }
 

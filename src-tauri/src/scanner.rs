@@ -21,6 +21,7 @@ use crate::config::{ScanRange, ScannerConfig};
 use crate::demod::{decimate_average, decimate_complex_average, demodulate, low_pass_complex, mix_down, resample_linear, Mode};
 use crate::device::DeviceLayer;
 use crate::db::Db;
+use crate::signal_id;
 use crate::state::{RecordingState, ScannerEvent};
 use crate::sidecar::SidecarRegistry;
 
@@ -274,8 +275,45 @@ async fn scanner_loop(
                 let offset = bin as f64 / bins.len() as f64 - 0.5;
                 let frequency_hz = (status.center_freq_hz as f64 + offset * status.sample_rate as f64).max(0.0) as u64;
                 let bandwidth_hz = (status.sample_rate / bins.len().max(1) as u32).max(1);
-                let _ = db.insert_signal_event(frequency_hz, *peak, snr, bandwidth_hz, &range_name, now_ms());
-                let _ = events_tx.send(ScannerEvent::SignalHit { frequency_hz, strength_db: *peak, snr_db: snr, bandwidth_hz });
+                // Prefer the active range's channel BW when available (more accurate than FFT bin width)
+                let mode = active_range.as_ref().map(|r| r.mode.as_str()).unwrap_or("nfm");
+                let channel_bw = active_range.as_ref().map(|r| r.channel_bw_hz).unwrap_or(bandwidth_hz);
+                let classification = signal_id::classify(
+                    frequency_hz,
+                    channel_bw,
+                    mode,
+                    &range_name,
+                    snr,
+                    None, // audio analysis happens on VFO identify / auto-decode path
+                );
+                let top = classification.candidates.first();
+                let decoder = top.map(|c| c.decoder.clone()).unwrap_or_else(|| "none".into());
+                let _ = db.insert_classified_signal_event(
+                    frequency_hz,
+                    snr,
+                    channel_bw,
+                    &range_name,
+                    now_ms(),
+                    &classification.signal_class,
+                    &classification.top_family,
+                    classification.top_confidence,
+                    &classification.sub_protocol,
+                    classification.decode_success,
+                    &classification.decode_protocol,
+                    &classification.decode_summary,
+                    classification.likely_proprietary,
+                    classification.is_novel,
+                );
+                let _ = events_tx.send(ScannerEvent::SignalHit {
+                    frequency_hz,
+                    strength_db: *peak,
+                    snr_db: snr,
+                    bandwidth_hz: channel_bw,
+                    protocol: classification.sub_protocol.clone(),
+                    family: classification.top_family.clone(),
+                    confidence: classification.top_confidence,
+                    decoder,
+                });
                 last_signal_hit = Instant::now();
             }
         }
