@@ -46,65 +46,85 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         input_type: InputType::StdinU8Iq,
         protocol: "rtl_433",
     },
-    // multimon-ng: modern community fork ships Windows binaries
+    // multimon-ng: c0ne fork ships pre-built Windows x64 binary
     DecoderManifest {
         name: "multimon-ng",
         exe_name: "multimon-ng.exe",
-        description: "POCSAG, FLEX, AFSK, ZVEI, DTMF, EAS, Flex from audio",
-        github: Some(("ZanoroyAo", "multimon-ng")),
-        search_dirs: &["", "bin"],
+        description: "POCSAG512/1200/2400, FLEX, EAS, AFSK, ZVEI, DTMF, MORSE_CW from audio",
+        github: Some(("EliasOenal", "multimon-ng")),
+        search_dirs: &["", "bin", "multimon-ng-win"],
         input_type: InputType::StdinAudioS16,
         protocol: "pocsag",
     },
-    // acarsdec: Eddware builds Windows binaries from TLeconte source
+    // acarsdec: recovered from Nyx Scope MSI (v3.7), Thierry Leconte upstream
     DecoderManifest {
         name: "acarsdec",
         exe_name: "acarsdec.exe",
         description: "ACARS aircraft messaging (131 MHz)",
-        github: Some(("Eddware", "acarsdec-windows")),
-        search_dirs: &["", "bin"],
-        input_type: InputType::StdinU8Iq,
+        github: Some(("TLeconte", "acarsdec")),
+        search_dirs: &["", "bin", "acarsdec"],
+        input_type: InputType::FileIq,
         protocol: "acars",
     },
-    // direwolf: official wb2osz repo ships x86_64 Windows zip
+    // direwolf: official wb2osz 1.8.1 x64 release
     DecoderManifest {
         name: "direwolf",
         exe_name: "direwolf.exe",
-        description: "AX.25 / APRS packet TNC (144 MHz)",
+        description: "AX.25 / APRS packet TNC — 300/1200/2400/4800/9600 baud (144 MHz)",
         github: Some(("wb2osz", "direwolf")),
-        search_dirs: &["", "bin"],
+        search_dirs: &["", "bin", "direwolf", "direwolf/direwolf-1.8.1-a231971_x86_64"],
         input_type: InputType::StdinAudioS16,
         protocol: "aprs",
     },
-    // nrsc5: no Windows release official; build from source
+    // nrsc5: HD Radio / NRSC-5 decoder, Windows binary from LTCAshraven fork
     DecoderManifest {
         name: "nrsc5",
         exe_name: "nrsc5.exe",
         description: "HD Radio (NRSC-5) FM band IBOC decoder",
         github: Some(("theori-io", "nrsc5")),
-        search_dirs: &["", "bin"],
+        search_dirs: &["", "bin", "nrsc5"],
         input_type: InputType::FileIq,
         protocol: "hd_radio",
     },
-    // dump978: mutability ships Linux-only; community WinBuild exists
+    // dump978-fa: UAT 978 MHz, Cygwin build from ImagoTrigger
     DecoderManifest {
         name: "dump978",
-        exe_name: "dump978.exe",
+        exe_name: "dump978-fa.exe",
         description: "UAT 978 MHz ADS-B aircraft tracking",
         github: Some(("mutability", "dump978")),
-        search_dirs: &["", "bin"],
+        search_dirs: &["", "bin", "dump978/adsb_uat_win-main/new/978-fa"],
         input_type: InputType::StdinU8Iq,
         protocol: "uat978",
     },
-    // dumpvdl2: jacketizer Win build
+    // dumpvdl2: VDL Mode 2, recovered from Nyx Scope MSI (v2.6.0)
     DecoderManifest {
         name: "dumpvdl2",
         exe_name: "dumpvdl2.exe",
         description: "VDL Mode 2 aircraft datalink (136 MHz)",
         github: Some(("szpajder", "dumpvdl2")),
-        search_dirs: &["", "bin"],
-        input_type: InputType::StdinU8Iq,
+        search_dirs: &["", "bin", "dumpvdl2"],
+        input_type: InputType::FileIq,
         protocol: "vdl2",
+    },
+    // dump1090: ADS-B 1090 MHz, Windows-native from gvanem fork
+    DecoderManifest {
+        name: "dump1090",
+        exe_name: "dump1090.exe",
+        description: "1090 MHz ADS-B Mode-S receiver and decoder",
+        github: Some(("gvanem", "Dump1090")),
+        search_dirs: &["", "bin", "dump1090/Dump1090-main"],
+        input_type: InputType::Direct,
+        protocol: "adsb",
+    },
+    // readsb: ADS-B 1090 MHz, Cygwin build from ImagoTrigger
+    DecoderManifest {
+        name: "readsb",
+        exe_name: "readsb.exe",
+        description: "ADS-B Mode-S/Beast receiver (Cygwin build, supports RTL-SDR)",
+        github: Some(("wiedehopf", "readsb")),
+        search_dirs: &["", "bin", "dump978/adsb_uat_win-main/new/readsb"],
+        input_type: InputType::Direct,
+        protocol: "adsb",
     },
     // dsd-fme: lwvmobile fork ships Windows Cygwin builds with all vocoders
     DecoderManifest {
