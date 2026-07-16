@@ -72,8 +72,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "acarsdec"],
         input_type: InputType::FileIq,
         protocol: "acars",
-        download_url: Some("https://github.com/Dadud/pulsescope/releases/download/decoder-deps-v1/acarsdec.zip"),
-        extract_subdir: Some("acarsdec"),
+        download_url: None,
+        extract_subdir: None,
     },
     // direwolf: official wb2osz 1.8.1 x64 release
     DecoderManifest {
@@ -96,8 +96,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "nrsc5"],
         input_type: InputType::FileIq,
         protocol: "hd_radio",
-        download_url: Some("https://github.com/Dadud/pulsescope/releases/download/decoder-deps-v1/nrsc5.zip"),
-        extract_subdir: Some("nrsc5"),
+        download_url: None,
+        extract_subdir: None,
     },
     // dump978-fa: UAT 978 MHz, Cygwin build from ImagoTrigger
     DecoderManifest {
@@ -120,8 +120,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dumpvdl2"],
         input_type: InputType::FileIq,
         protocol: "vdl2",
-        download_url: Some("https://github.com/Dadud/pulsescope/releases/download/decoder-deps-v1/dumpvdl2.zip"),
-        extract_subdir: Some("dumpvdl2"),
+        download_url: None,
+        extract_subdir: None,
     },
     // dump1090: ADS-B 1090 MHz, Windows-native from gvanem fork
     DecoderManifest {
@@ -146,26 +146,6 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         protocol: "adsb",
         download_url: Some("https://github.com/ImagoTrigger/adsb_uat_win/archive/refs/heads/main.zip"),
         extract_subdir: Some("dump978/adsb_uat_win-main/new/readsb"),
-    },
-    // dump1090: ADS-B 1090 MHz, Windows-native from gvanem fork
-    DecoderManifest {
-        name: "dump1090",
-        exe_name: "dump1090.exe",
-        description: "1090 MHz ADS-B Mode-S receiver and decoder",
-        github: Some(("gvanem", "Dump1090")),
-        search_dirs: &["", "bin", "dump1090/Dump1090-main"],
-        input_type: InputType::Direct,
-        protocol: "adsb",
-    },
-    // readsb: ADS-B 1090 MHz, Cygwin build from ImagoTrigger
-    DecoderManifest {
-        name: "readsb",
-        exe_name: "readsb.exe",
-        description: "ADS-B Mode-S/Beast receiver (Cygwin build, supports RTL-SDR)",
-        github: Some(("wiedehopf", "readsb")),
-        search_dirs: &["", "bin", "dump978/adsb_uat_win-main/new/readsb"],
-        input_type: InputType::Direct,
-        protocol: "adsb",
     },
     // dsd-fme: lwvmobile fork ships Windows Cygwin builds with all vocoders
     DecoderManifest {
@@ -201,54 +181,6 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         protocol: "adsb",
         download_url: None,
         extract_subdir: None,
-    },
-    // SatDump: multi-satellite decoder (NOAA APT, GOES HRIT/LRIT, Meteor-M, Iridium, etc.)
-    DecoderManifest {
-        name: "satdump",
-        exe_name: "satdump.exe",
-        description: "Multi-satellite decoder: NOAA APT, GOES HRIT/LRIT, Meteor-M, Iridium, Inmarsat",
-        github: Some(("SatDump", "SatDump")),
-        search_dirs: &["", "satdump"],
-        input_type: InputType::FileIq,
-        protocol: "satellite",
-        download_url: Some("https://github.com/SatDump/SatDump/releases/download/1.2.2/SatDump-Windows_x64_Portable.zip"),
-        extract_subdir: Some("satdump"),
-    },
-    // noaa-apt: dedicated NOAA APT weather satellite image decoder
-    DecoderManifest {
-        name: "noaa-apt",
-        exe_name: "noaa-apt-console.exe",
-        description: "NOAA APT weather satellite image decoder (137 MHz, WAV input)",
-        github: Some(("martinber", "noaa-apt")),
-        search_dirs: &["", "noaa-apt"],
-        input_type: InputType::StdinAudioS16,
-        protocol: "noaa_apt",
-        download_url: Some("https://github.com/martinber/noaa-apt/releases/download/v1.4.1/noaa-apt-1.4.1-x86_64-windows-gnu.zip"),
-        extract_subdir: Some("noaa-apt"),
-    },
-    // TetraEar: TETRA decoder with voice decoding
-    DecoderManifest {
-        name: "tetraear",
-        exe_name: "TETRA_Decoder_Modern.exe",
-        description: "TETRA digital trunked radio decoder with voice (GUI app)",
-        github: Some(("syrex1013", "TetraEar")),
-        search_dirs: &["", "tetraear"],
-        input_type: InputType::Direct,
-        protocol: "tetra",
-        download_url: Some("https://github.com/syrex1013/TetraEar/releases/download/v2.2/TetraEar-v2.2-Windows-x64.zip"),
-        extract_subdir: Some("tetraear"),
-    },
-    // iridiumlive: Iridium satellite burst decoder
-    DecoderManifest {
-        name: "iridiumlive",
-        exe_name: "IridiumLive.exe",
-        description: "Iridium satellite burst detector and demodulator (1616 MHz)",
-        github: Some(("microp11", "iridiumlive")),
-        search_dirs: &["", "windows-x64"],
-        input_type: InputType::Direct,
-        protocol: "iridium",
-        download_url: Some("https://github.com/microp11/iridiumlive/releases/download/v1.3/windows-x64.zip"),
-        extract_subdir: Some("iridiumlive/windows-x64"),
     },
 ];
 
