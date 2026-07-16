@@ -47,19 +47,39 @@
   ];
 
 
-  onMount(() => {
+  onMount(async () => {
     if (!browser) return;
-    let poll: number | undefined;
-    void (async () => {
-      await loadInitial();
-      // Start the reliable HTTP frame path before the optional socket.
-      poll = window.setInterval(() => { void pollSpectrum(); }, 250);
-      await pollSpectrum();
-      try { ws = openEvents(handleEvent); }
-      catch (e) { console.warn('event ws unavailable; using spectrum polling', e); }
-    })();
-    return () => { if (poll !== undefined) window.clearInterval(poll); ws?.close(); ws = null; };
+    await loadInitial();
+    ws = openEvents(handleEvent);
   });
+
+  // Even when the route is mounted by the hash router without a
+  // visible navigation event, Svelte 5 runes still fire `$effect`
+  // on the client. Use it as a belt-and-suspenders to ensure the
+  // initial data load always runs at least once in the browser.
+  $effect(() => {
+    if (browser && banks.length === 0 && !notice.startsWith('init')) {
+      notice = 'init…';
+      loadInitial().finally(() => { notice = notice === 'init…' ? '' : notice; });
+    }
+  });
+
+  async function loadInitial() {
+    try {
+      const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
+      banks = bankList;
+      deviceLabel = status.label;
+      connected = status.connected;
+      centerFreqHz = Number(status.center_freq_hz ?? 0);
+      sampleRateHz = Number(status.sample_rate ?? 1);
+      signalHistory = storedSignals;
+      vfos = await Api.vfoStates();
+      messages = await Api.decodedMessages(100);
+    } catch (e) {
+      console.warn('init failed', e);
+      notice = `init failed: ${e}`;
+    }
+  }
 
   // Even when the route is mounted by the hash router without a
   // visible navigation event, Svelte 5 runes still fire `$effect`
