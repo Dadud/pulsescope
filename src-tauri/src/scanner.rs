@@ -21,7 +21,6 @@ use crate::config::{ScanRange, ScannerConfig};
 use crate::demod::{decimate_average, decimate_complex_average, demodulate, low_pass_complex, mix_down, resample_linear, Mode};
 use crate::device::DeviceLayer;
 use crate::db::Db;
-use crate::adsb::AdsbDecoder;
 use crate::signal_id;
 use crate::state::{RecordingState, ScannerEvent};
 use crate::sidecar::SidecarRegistry;

@@ -60,23 +60,23 @@ const BAND_PRIORS: &[BandPrior] = &[
     BandPrior { start: 490_000, end: 518_000, protocol: "navtex", family: "marine", decoder: "native_navtex", confidence: 0.70, reason: "NAVTEX 490/518 kHz", proprietary: false },
     BandPrior { start: 88_000_000, end: 108_000_000, protocol: "fm_broadcast", family: "analog", decoder: "native_wfm_rds", confidence: 0.85, reason: "FM broadcast band", proprietary: false },
     BandPrior { start: 118_000_000, end: 137_000_000, protocol: "aircraft_am", family: "aviation", decoder: "native_am", confidence: 0.80, reason: "VHF airband", proprietary: false },
-    BandPrior { start: 129_000_000, end: 132_000_000, protocol: "acars", family: "aviation", decoder: "native_acars", confidence: 0.78, reason: "ACARS channel allocation", proprietary: false },
-    BandPrior { start: 136_000_000, end: 137_000_000, protocol: "vdl2", family: "aviation", decoder: "native_vdl2", confidence: 0.72, reason: "VDL Mode 2 band", proprietary: false },
+    BandPrior { start: 129_000_000, end: 132_000_000, protocol: "acars", family: "aviation", decoder: "acarsdec", confidence: 0.78, reason: "ACARS channel allocation", proprietary: false },
+    BandPrior { start: 136_000_000, end: 137_000_000, protocol: "vdl2", family: "aviation", decoder: "dumpvdl2", confidence: 0.72, reason: "VDL Mode 2 band", proprietary: false },
     BandPrior { start: 137_000_000, end: 138_000_000, protocol: "noaa_apt", family: "satellite", decoder: "noaa-apt", confidence: 0.82, reason: "NOAA APT band", proprietary: false },
     BandPrior { start: 144_000_000, end: 148_000_000, protocol: "amateur_vhf", family: "amateur", decoder: "direwolf", confidence: 0.55, reason: "2m amateur (voice/APRS)", proprietary: false },
     BandPrior { start: 144_390_000, end: 144_400_000, protocol: "aprs", family: "amateur", decoder: "direwolf", confidence: 0.90, reason: "APRS 144.390 MHz", proprietary: false },
     BandPrior { start: 156_000_000, end: 162_000_000, protocol: "marine_vhf", family: "marine", decoder: "native_nfm", confidence: 0.70, reason: "Marine VHF", proprietary: false },
-    BandPrior { start: 161_975_000, end: 162_025_000, protocol: "ais", family: "marine", decoder: "native_ais", confidence: 0.92, reason: "AIS channels", proprietary: false },
+    BandPrior { start: 161_975_000, end: 162_025_000, protocol: "ais", family: "marine", decoder: "AIS-catcher", confidence: 0.92, reason: "AIS channels", proprietary: false },
     BandPrior { start: 162_400_000, end: 162_550_000, protocol: "noaa_weather", family: "weather", decoder: "native_nfm", confidence: 0.88, reason: "NOAA Weather Radio", proprietary: false },
     BandPrior { start: 400_000_000, end: 406_000_000, protocol: "radiosonde", family: "weather", decoder: "rtl_433", confidence: 0.75, reason: "Radiosonde band", proprietary: false },
     BandPrior { start: 433_050_000, end: 434_790_000, protocol: "ism_433", family: "ism", decoder: "rtl_433", confidence: 0.80, reason: "ISM 433 MHz", proprietary: false },
-    BandPrior { start: 454_000_000, end: 461_000_000, protocol: "pocsag", family: "paging", decoder: "native_pocsag", confidence: 0.65, reason: "UHF pager allocation", proprietary: false },
+    BandPrior { start: 454_000_000, end: 461_000_000, protocol: "pocsag", family: "paging", decoder: "multimon-ng", confidence: 0.65, reason: "UHF pager allocation", proprietary: false },
     BandPrior { start: 462_550_000, end: 467_725_000, protocol: "frs_gmrs", family: "land_mobile", decoder: "native_nfm", confidence: 0.70, reason: "FRS/GMRS", proprietary: false },
     BandPrior { start: 851_000_000, end: 869_000_000, protocol: "p25_trunked", family: "land_mobile", decoder: "dsd-fme", confidence: 0.72, reason: "800 MHz trunked public safety", proprietary: false },
     BandPrior { start: 902_000_000, end: 928_000_000, protocol: "ism_915", family: "ism", decoder: "rtl_433", confidence: 0.75, reason: "ISM 915 MHz", proprietary: false },
     BandPrior { start: 929_000_000, end: 932_000_000, protocol: "pocsag", family: "paging", decoder: "multimon-ng", confidence: 0.78, reason: "900 MHz paging", proprietary: false },
-    BandPrior { start: 978_000_000, end: 978_200_000, protocol: "uat978", family: "aviation", decoder: "native_uat978", confidence: 0.90, reason: "ADS-B UAT 978", proprietary: false },
-    BandPrior { start: 1_090_000_000, end: 1_090_200_000, protocol: "adsb", family: "aviation", decoder: "native_adsb", confidence: 0.95, reason: "ADS-B 1090 MHz", proprietary: false },
+    BandPrior { start: 978_000_000, end: 978_200_000, protocol: "uat978", family: "aviation", decoder: "dump978", confidence: 0.90, reason: "ADS-B UAT 978", proprietary: false },
+    BandPrior { start: 1_090_000_000, end: 1_090_200_000, protocol: "adsb", family: "aviation", decoder: "dump1090", confidence: 0.95, reason: "ADS-B 1090 MHz", proprietary: false },
     BandPrior { start: 1_525_000_000, end: 1_559_000_000, protocol: "inmarsat", family: "satellite", decoder: "satdump", confidence: 0.70, reason: "Inmarsat L-band DL", proprietary: false },
     BandPrior { start: 1_574_000_000, end: 1_577_000_000, protocol: "gps_l1", family: "satellite", decoder: "satdump", confidence: 0.80, reason: "GPS L1 / Galileo E1", proprietary: false },
     BandPrior { start: 1_616_000_000, end: 1_626_500_000, protocol: "iridium", family: "satellite", decoder: "iridiumlive", confidence: 0.82, reason: "Iridium band", proprietary: false },
@@ -509,15 +509,15 @@ fn family_for(proto: &str) -> &'static str {
 
 fn decoder_for(proto: &str) -> &'static str {
     match proto {
-        "adsb" => "native_adsb",
-        "uat978" => "native_uat978",
-        "acars" => "native_acars",
-        "vdl2" => "native_vdl2",
-        "ais" => "native_ais",
+        "adsb" => "dump1090",
+        "uat978" => "dump978",
+        "acars" => "acarsdec",
+        "vdl2" => "dumpvdl2",
+        "ais" => "AIS-catcher",
         "noaa_apt" => "noaa-apt",
         "goes_hrit" | "inmarsat" | "gps_l1" | "satellite" => "satdump",
         "iridium" => "iridiumlive",
-        "pocsag" | "flex" | "dtmf" => "native_pocsag",
+        "pocsag" | "flex" | "dtmf" => "multimon-ng",
         "aprs" => "direwolf",
         "p25" | "dmr" | "p25_trunked" | "nxdn" | "dstar" | "ysf" | "m17" => "dsd-fme",
         "ism_433" | "ism_915" | "radiosonde" => "rtl_433",
@@ -559,7 +559,7 @@ mod tests {
         let c = classify(1_090_000_000, 1_000_000, "am", "ADS-B 1090", 25.0, None);
         assert_eq!(c.sub_protocol, "adsb");
         assert!(c.top_confidence >= 0.9);
-        assert_eq!(c.candidates[0].decoder, "native_adsb");
+        assert_eq!(c.candidates[0].decoder, "dump1090");
     }
 
     #[test]
