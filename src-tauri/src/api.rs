@@ -227,7 +227,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/sidecars/status", get(sidecars_status))
         .route("/sidecars/:name/stderr", get(sidecar_stderr))
         .route("/decoders/scan", get(decoders_scan))
-        .route("/decoders/install/:name", post(decoders_install_url))
+        .route("/decoders/install/:name", post(decoders_install))
         .route("/sidecars/start_all", post(sidecars_start_all))
         .route("/receiver_location", get(rx_location).put(rx_location_put))
         .route("/aircraft/lookup", get(aircraft_lookup))
@@ -348,8 +348,31 @@ async fn auth_gate(
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-async fn health() -> impl IntoResponse {
-    Json(json!({"status": "ok", "name": "pulsescope", "version": env!("CARGO_PKG_VERSION")}))
+async fn health(State(s): State<ApiState>) -> impl IntoResponse {
+    // Check prerequisites so the UI can guide the user
+    let soapy_root = std::env::var("SOAPY_SDR_ROOT").unwrap_or_else(|_| {
+        if cfg!(windows) { r"C:\Program Files\PothosSDR".into() } else { "/usr/local".into() }
+    });
+    let soapy_installed = std::path::Path::new(&soapy_root)
+        .join(if cfg!(windows) { "bin/SoapySDR.dll" } else { "lib/libSoapySDR.so" })
+        .exists();
+
+    let sdrplay_installed = std::path::Path::new(r"C:\Program Files\SDRplay\API\x64\sdrplay_api.dll").exists();
+
+    let decoders = crate::depmanager::scan_all(&s.0.data_dir);
+    let decoders_found = decoders.iter().filter(|d| d.found).count();
+
+    Json(json!({
+        "status": "ok",
+        "name": "pulsescope",
+        "version": env!("CARGO_PKG_VERSION"),
+        "prerequisites": {
+            "soapysdr": soapy_installed,
+            "sdrplay_api": sdrplay_installed,
+            "decoders_found": decoders_found,
+            "decoders_total": decoders.len(),
+        }
+    }))
 }
 
 async fn get_settings(State(s): State<ApiState>) -> impl IntoResponse {
@@ -700,10 +723,15 @@ async fn decoders_scan(State(s): State<ApiState>) -> Json<Value> {
     Json(serde_json::to_value(crate::depmanager::scan_all(&s.0.data_dir)).unwrap())
 }
 
-async fn decoders_install_url(Path(name): Path<String>) -> Json<Value> {
-    match crate::depmanager::install_instructions(&name) {
-        Some(guide) => Json(json!({"ok": true, "name": name, "guide": guide})),
-        None => Json(json!({"ok": false, "error": format!("unknown decoder: {name}")})),
+async fn decoders_install(State(s): State<ApiState>, Path(name): Path<String>) -> Json<Value> {
+    let data_dir = s.0.data_dir.clone();
+    let install_name = name.clone();
+    match tokio::task::spawn_blocking(move || {
+        crate::depmanager::download_decoder(&install_name, &data_dir)
+    }).await {
+        Ok(Ok(path)) => Json(json!({"ok": true, "name": name, "path": path})),
+        Ok(Err(error)) => Json(json!({"ok": false, "name": name, "error": error})),
+        Err(error) => Json(json!({"ok": false, "name": name, "error": format!("installer task failed: {error}")})),
     }
 }
 
