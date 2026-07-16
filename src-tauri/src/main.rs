@@ -25,6 +25,7 @@ mod scanner;
 mod sidecar;
 mod aprs;
 mod voice_decoder;
+mod signal_id;
 mod state;
 
 use std::net::SocketAddr;
