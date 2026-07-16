@@ -2,7 +2,6 @@
 //! sidecar binaries. Each decoder has a manifest entry describing where to
 //! find it, what format it ships in, and how PulseScope should invoke it.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,6 +19,10 @@ pub struct DecoderManifest {
     /// Input is via stdin unless noted.
     pub input_type: InputType,
     pub protocol: &'static str,
+    /// Direct download URL for auto-install (zip or single exe)
+    pub download_url: Option<&'static str>,
+    /// Subdirectory within the extracted archive where the exe lives
+    pub extract_subdir: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +48,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin"],
         input_type: InputType::StdinU8Iq,
         protocol: "rtl_433",
+        download_url: None,
+        extract_subdir: None,
     },
     // multimon-ng: c0ne fork ships pre-built Windows x64 binary
     DecoderManifest {
@@ -55,6 +60,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "multimon-ng-win"],
         input_type: InputType::StdinAudioS16,
         protocol: "pocsag",
+        download_url: Some("https://github.com/c0ne/multimon-ng/raw/master/multimon-ng_1.1.8_x64.zip"),
+        extract_subdir: Some("multimon-ng-win"),
     },
     // acarsdec: recovered from Nyx Scope MSI (v3.7), Thierry Leconte upstream
     DecoderManifest {
@@ -65,6 +72,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "acarsdec"],
         input_type: InputType::FileIq,
         protocol: "acars",
+        download_url: None,
+        extract_subdir: None,
     },
     // direwolf: official wb2osz 1.8.1 x64 release
     DecoderManifest {
@@ -75,6 +84,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "direwolf", "direwolf/direwolf-1.8.1-a231971_x86_64"],
         input_type: InputType::StdinAudioS16,
         protocol: "aprs",
+        download_url: Some("https://github.com/wb2osz/direwolf/releases/download/1.8.1/direwolf-1.8.1-a231971_x86_64.zip"),
+        extract_subdir: Some("direwolf"),
     },
     // nrsc5: HD Radio / NRSC-5 decoder, Windows binary from LTCAshraven fork
     DecoderManifest {
@@ -85,6 +96,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "nrsc5"],
         input_type: InputType::FileIq,
         protocol: "hd_radio",
+        download_url: None,
+        extract_subdir: None,
     },
     // dump978-fa: UAT 978 MHz, Cygwin build from ImagoTrigger
     DecoderManifest {
@@ -95,6 +108,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dump978/adsb_uat_win-main/new/978-fa"],
         input_type: InputType::StdinU8Iq,
         protocol: "uat978",
+        download_url: Some("https://github.com/ImagoTrigger/adsb_uat_win/archive/refs/heads/main.zip"),
+        extract_subdir: Some("dump978/adsb_uat_win-main/new/978-fa"),
     },
     // dumpvdl2: VDL Mode 2, recovered from Nyx Scope MSI (v2.6.0)
     DecoderManifest {
@@ -105,6 +120,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dumpvdl2"],
         input_type: InputType::FileIq,
         protocol: "vdl2",
+        download_url: None,
+        extract_subdir: None,
     },
     // dump1090: ADS-B 1090 MHz, Windows-native from gvanem fork
     DecoderManifest {
@@ -115,6 +132,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dump1090/Dump1090-main"],
         input_type: InputType::Direct,
         protocol: "adsb",
+        download_url: Some("https://github.com/gvanem/Dump1090/archive/refs/heads/main.zip"),
+        extract_subdir: Some("dump1090/Dump1090-main"),
     },
     // readsb: ADS-B 1090 MHz, Cygwin build from ImagoTrigger
     DecoderManifest {
@@ -125,6 +144,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dump978/adsb_uat_win-main/new/readsb"],
         input_type: InputType::Direct,
         protocol: "adsb",
+        download_url: Some("https://github.com/ImagoTrigger/adsb_uat_win/archive/refs/heads/main.zip"),
+        extract_subdir: Some("dump978/adsb_uat_win-main/new/readsb"),
     },
     // dsd-fme: lwvmobile fork ships Windows Cygwin builds with all vocoders
     DecoderManifest {
@@ -135,6 +156,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin", "dsd-fme-portable/dsd-fme"],
         input_type: InputType::StdinAudioS16,
         protocol: "p25",
+        download_url: Some("https://github.com/lwvmobile/dsd-fme/releases/download/20260715/dsd-fme-x86-64-cygwin-portable-20260715.zip"),
+        extract_subdir: Some("dsd-fme/dsd-fme-portable"),
     },
     DecoderManifest {
         name: "AIS-catcher",
@@ -144,6 +167,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["", "bin"],
         input_type: InputType::Direct,
         protocol: "ais",
+        download_url: Some("https://github.com/jvde-github/AIS-catcher/releases/download/v0.70/AIS-catcher.SDRPLAY.x64.zip"),
+        extract_subdir: Some("AIS-catcher"),
     },
     // rtl_adsb is bundled with PothosSDR — no install needed
     DecoderManifest {
@@ -154,6 +179,8 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         search_dirs: &["bin"],
         input_type: InputType::StdinU8Iq,
         protocol: "adsb",
+        download_url: None,
+        extract_subdir: None,
     },
 ];
 
@@ -205,6 +232,10 @@ pub fn scan_all(data_dir: &Path) -> Vec<DecoderStatus> {
 
 fn find_decoder(decoder: &DecoderManifest, data_dir: &Path, pothos_bin: &Path) -> (bool, Option<PathBuf>, String) {
     // 1. Data dir (downloaded decoders)
+    if let Some(subdir) = decoder.extract_subdir {
+        let exe = data_dir.join("decoders").join(subdir).join(decoder.exe_name);
+        if exe.exists() { return (true, Some(exe), "pulsescope/decoders".into()); }
+    }
     for subdir in decoder.search_dirs {
         let dir = if subdir.is_empty() { data_dir.join("decoders") } else { data_dir.join("decoders").join(subdir) };
         let exe = dir.join(decoder.exe_name);
@@ -246,6 +277,108 @@ fn find_decoder(decoder: &DecoderManifest, data_dir: &Path, pothos_bin: &Path) -
     }
 
     (true, None, "not_found".into())
+}
+
+/// Download and install a decoder archive into the PulseScope data directory.
+///
+/// Archives are extracted below the first component of `extract_subdir`. This
+/// keeps each upstream archive isolated while preserving its internal layout.
+pub fn download_decoder(name: &str, data_dir: &Path) -> Result<String, String> {
+    let decoder = KNOWN_DECODERS
+        .iter()
+        .find(|decoder| decoder.name == name)
+        .ok_or_else(|| format!("unknown decoder: {name}"))?;
+    let url = decoder
+        .download_url
+        .ok_or_else(|| format!("automatic installation is not available for {name}"))?;
+    let extract_subdir = decoder
+        .extract_subdir
+        .ok_or_else(|| format!("no extraction directory is configured for {name}"))?;
+
+    if !url.to_ascii_lowercase().split(['?', '#']).next().unwrap_or(url).ends_with(".zip") {
+        return Err(format!("unsupported decoder archive format for {name}: {url}"));
+    }
+
+    let response = reqwest::blocking::get(url)
+        .map_err(|error| format!("failed to download {name}: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("failed to download {name}: {error}"))?;
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("failed to read {name} download: {error}"))?;
+    let reader = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|error| format!("invalid zip archive for {name}: {error}"))?;
+
+    let archive_root = extract_subdir
+        .split(['/', '\\'])
+        .next()
+        .filter(|component| !component.is_empty())
+        .ok_or_else(|| format!("invalid extraction directory for {name}"))?;
+    let destination = data_dir.join("decoders").join(archive_root);
+    std::fs::create_dir_all(&destination)
+        .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("failed to read zip entry {index} for {name}: {error}"))?;
+        let Some(relative_path) = entry.enclosed_name() else {
+            return Err(format!("unsafe path in {name} archive: {}", entry.name()));
+        };
+        let output_path = destination.join(relative_path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&output_path)
+                .map_err(|error| format!("failed to create {}: {error}", output_path.display()))?;
+            continue;
+        }
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        }
+        let mut output = std::fs::File::create(&output_path)
+            .map_err(|error| format!("failed to create {}: {error}", output_path.display()))?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|error| format!("failed to extract {}: {error}", output_path.display()))?;
+    }
+
+    let expected_exe_path = data_dir
+        .join("decoders")
+        .join(extract_subdir)
+        .join(decoder.exe_name);
+    let exe_path = if expected_exe_path.is_file() {
+        expected_exe_path
+    } else {
+        // Some release zips add a versioned top-level folder (for example,
+        // direwolf-1.8.1-...). Accept that packaging detail while still
+        // requiring the manifest's exact executable to be present.
+        find_executable(&destination, decoder.exe_name).ok_or_else(|| {
+            format!(
+                "downloaded {name}, but {} was not found after extraction",
+                decoder.exe_name
+            )
+        })?
+    };
+    Ok(exe_path.to_string_lossy().into_owned())
+}
+
+fn find_executable(directory: &Path, exe_name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(directory).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path.file_name().and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(exe_name))
+        {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_executable(&path, exe_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 /// Generate download instructions for a decoder.
