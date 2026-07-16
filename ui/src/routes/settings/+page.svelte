@@ -1,0 +1,124 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { Api } from '$lib/api';
+
+  let cfg = $state<any>(null);
+  let status = $state<any>(null);
+  let saving = $state(false);
+  let saved = $state(false);
+  let banks = $state<any[]>([]);
+
+  onMount(async () => {
+    try {
+      cfg = await Api.settings();
+      status = await Api.deviceStatus();
+      banks = await Api.banks();
+    } catch (e) { console.warn(e); }
+  });
+
+  async function save() {
+    saving = true; saved = false;
+    try { await Api.setSettings(cfg); saved = true; } catch (e) { console.warn(e); }
+    saving = false;
+    setTimeout(() => (saved = false), 1500);
+  }
+
+  let deviceKey = $state('driver=mock');
+  let deviceLabel = $state('Mock Source (Test Tones)');
+  async function connect() {
+    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); } catch (e) { console.warn(e); }
+  }
+  async function saveBank(bank: any) {
+    try { const result = await Api.updateChannelBank(bank.name, { enabled: bank.enabled, dwell_ms: Number(bank.dwell_ms), hold_ms: Number(bank.hold_ms), max_vfos: Number(bank.max_vfos), squelch_db: Number(bank.squelch_db) }); const index = banks.findIndex((item) => item.name === bank.name); if (index >= 0) banks[index] = result.bank; } catch (e) { console.warn(e); }
+  }
+</script>
+
+<div class="settings-page">
+  <h1>Settings</h1>
+
+  <section class="card">
+    <h2>Device</h2>
+    {#if status}
+      <div class="row"><span>Status:</span><b>{status.connected ? 'Connected' : 'Disconnected'}</b></div>
+      <div class="row"><span>Driver:</span><code>{status.driver}</code></div>
+      <div class="row"><span>Sample rate:</span><code>{(status.sample_rate / 1e6).toFixed(2)} Msps</code></div>
+    {/if}
+    <div class="row">
+      <input bind:value={deviceKey} placeholder="driver=rtlsdr,serial=…" style="flex:1" />
+      <input bind:value={deviceLabel} placeholder="Label" style="flex:1" />
+      <button class="primary" onclick={connect}>Connect</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Per-band scan overrides</h2>
+    {#each banks as bank (bank.name)}
+      <div class="bank-row">
+        <label><input type="checkbox" bind:checked={bank.enabled} /> {bank.name}</label>
+        <input aria-label="{bank.name} dwell milliseconds" type="number" min="1" bind:value={bank.dwell_ms} />
+        <input aria-label="{bank.name} hold milliseconds" type="number" min="0" bind:value={bank.hold_ms} />
+        <input aria-label="{bank.name} squelch dB" type="number" step="0.5" bind:value={bank.squelch_db} />
+        <button onclick={() => saveBank(bank)}>Save</button>
+      </div>
+    {/each}
+  </section>
+
+  {#if cfg}
+    <section class="card">
+      <h2>Scanner</h2>
+      <div class="row">
+        <label for="fft-size">FFT size</label>
+        <input id="fft-size" type="number" bind:value={cfg.scanner.fft_size} />
+      </div>
+      <div class="row">
+        <label for="update-rate">Update rate (Hz)</label>
+        <input id="update-rate" type="number" bind:value={cfg.scanner.update_rate_hz} />
+      </div>
+      <div class="row">
+        <label for="max-vfos">Max VFOs</label>
+        <input id="max-vfos" type="number" bind:value={cfg.scanner.max_vfos} />
+      </div>
+      <div class="row">
+        <label for="squelch">Squelch (dB)</label>
+        <input id="squelch" type="number" step="0.5" bind:value={cfg.scanner.squelch_db} />
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Audio</h2>
+      <div class="row">
+        <label for="master-volume">Master volume</label>
+        <input id="master-volume" type="range" min="0" max="1" step="0.01" bind:value={cfg.audio.master_volume} />
+      </div>
+      <div class="row">
+        <label for="output-rate">Output sample rate</label>
+        <input id="output-rate" type="number" bind:value={cfg.audio.sample_rate} />
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Receiver location</h2>
+      <div class="row"><label for="latitude">Latitude</label><input id="latitude" type="number" step="0.0001" bind:value={cfg.receiver_location.latitude_deg} /></div>
+      <div class="row"><label for="longitude">Longitude</label><input id="longitude" type="number" step="0.0001" bind:value={cfg.receiver_location.longitude_deg} /></div>
+      <div class="row"><label for="altitude">Altitude (m)</label><input id="altitude" type="number" bind:value={cfg.receiver_location.altitude_m} /></div>
+    </section>
+
+    <button class="primary" onclick={save} disabled={saving}>
+      {saving ? 'Saving…' : 'Save'}
+    </button>
+    {#if saved}<span class="ok">✓ Saved</span>{/if}
+  {/if}
+</div>
+
+<style>
+  .settings-page { padding: 16px; overflow-y: auto; height: 100%; max-width: 720px; }
+  h1 { margin: 0 0 16px; }
+  .card { margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 6px 0; }
+  .row label, .row span { width: 140px; color: var(--fg-dim); font-size: 12px; }
+  .row b, .row code { font-family: var(--mono); }
+  .ok { color: var(--ok); margin-left: 8px; }
+  .bank-row { display: grid; grid-template-columns: 1.5fr 110px 110px 100px auto; gap: 6px; align-items: center; margin: 7px 0; }
+  .bank-row label { color: var(--fg); font-size: 12px; }
+  .bank-row input[type=number] { min-width: 0; }
+</style>

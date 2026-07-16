@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: asset: http://asset.localhost; connect-src 'self' http://127.0.0.1:8765 ws://127.0.0.1:8765 http://localhost:8765 ws://localhost:8765 ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; font-src 'self' data:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
+    },
+    "windows": [
+      {
+        "fullscreen": false,
+        "height": 800,
+        "minHeight": 600,
+        "minWidth": 900,
+        "resizable": true,
+        "title": "PulseScope",
+        "width": 1280
+      }
+    ]
+  },
+  "build": {
+    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/build"
+  },
+  "bundle": {
+    "active": true,
+    "category": "Utility",
+    "copyright": "2026 PulseScope contributors (MIT)",
+    "icon": [
+      "../assets/icon-128.png",
+      "../assets/icon-256.png",
+      "../assets/icon-512.png",
+      "../assets/icon.ico"
+    ],
+    "longDescription": "Wideband receiver + multi-VFO scanner UI that orchestrates the open-source SDR decoder ecosystem through a local WebSocket API.",
+    "shortDescription": "Open-source desktop SDR scanner",
+    "targets": "all"
+  },
+  "identifier": "dev.pulsescope.desktop",
+  "productName": "PulseScope",
+  "version": "0.1.0"
+}

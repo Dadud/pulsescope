@@ -1,0 +1,41 @@
+# Generated artifacts
+target/
+node_modules/
+ui/node_modules/
+ui/build/
+ui/.svelte-kit/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Decoder binaries (downloaded separately)
+decoders/
+*.zip
+
+# Test fixtures
+playback-test.cf32
+*.cf32
+screenshots/
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Temp WAV files
+*.wav
+*.log

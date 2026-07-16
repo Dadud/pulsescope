@@ -1,0 +1,86 @@
+[package]
+name = "pulsescope"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Open-source desktop SDR scanner — Tauri + Rust frontend to the open-source decoder ecosystem"
+authors = ["PulseScope contributors"]
+homepage = "https://github.com/pulsescope/pulsescope"
+repository = "https://github.com/pulsescope/pulsescope"
+
+[lib]
+name = "pulsescope_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri 2 — desktop app shell + IPC
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-store = "2"
+tauri-plugin-os = "2"
+
+# Async runtime + utilities
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+async-trait = "0.1"
+
+# HTTP server bound to 127.0.0.1:<port> — the same architecture as the
+# category-defining SDR scanners: the frontend talks to a local WS+HTTP API.
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TLS termination for server-mode HTTPS via `axum-server` (pure Rust,
+# rustls-backed; no system openssl required).
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+toml = "0.8"
+
+# DSP primitives (clean-room, no third-party scanner code)
+rustfft = "6.0"
+realfft = "3.4"
+apodize = "1.0"
+
+# SDR device layer — SoapySDR bindings (Boost License for the lib).
+# Optional at build time: with the `soapysdr` feature off, PulseScope
+# builds against the in-tree Mock source only, which is enough for UI
+# development without an SDR dev environment. Flip the feature on (and
+# have SoapySDR + pkg-config visible) to link real hardware backends.
+soapysdr-sys = { version = "0.7", optional = true }
+
+# Audio playback
+cpal = "0.15"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Misc
+anyhow = "1"
+thiserror = "1"
+once_cell = "1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+which = "7"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+regex = "1"
+
+[features]
+default = ["mock-source"]
+mock-source = []
+soapysdr = ["dep:soapysdr-sys"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,16 @@
+{
+  "name": "pulsescope",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "pnpm --filter pulsescope-ui dev",
+    "build": "pnpm --filter pulsescope-ui build",
+    "preview": "pnpm --filter pulsescope-ui preview",
+    "tauri": "tauri",
+    "tauri:dev": "pnpm exec tauri dev",
+    "tauri:build": "pnpm exec tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

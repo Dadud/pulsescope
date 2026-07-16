@@ -1,0 +1,35 @@
+[Unit]
+Description=PulseScope SDR server
+Documentation=https://github.com/pulsescope/pulsescope
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pulsescope
+Group=pulsescope
+Environment="PULSESCOPE_BIND=0.0.0.0"
+Environment="PULSESCOPE_PORT=8765"
+# Uncomment the next two lines once you have a cert/key in place.
+#Environment="PULSESCOPE_TLS_CERT=/etc/pulsescope/tls/cert.pem"
+#Environment="PULSESCOPE_TLS_KEY=/etc/pulsescope/tls/key.pem"
+# PULSESCOPE_AUTH_TOKEN and other secrets belong in /etc/pulsescope/pulsescope.env (mode 600)
+EnvironmentFile=-/etc/pulsescope/pulsescope.env
+WorkingDirectory=/var/lib/pulsescope
+ExecStartPre=/usr/bin/install -d -opulsescope -gpulsescope /var/lib/pulsescope/decoders /var/lib/pulsescope/recordings
+ExecStart=/usr/local/bin/pulsescope --server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pulsescope
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/pulsescope
+
+[Install]
+WantedBy=multi-user.target
