@@ -284,6 +284,244 @@ pub fn detect_dtmf(samples: &[f32], sample_rate: f32) -> Option<String> {
     if result.is_empty() { None } else { Some(result) }
 }
 
+// ── RTTY / SSTV / NAVTEX ───────────────────────────────────────────────────
+
+const ITA2_LETTERS: [char; 32] = [
+    '\0', 'E', '\n', 'A', ' ', 'S', 'I', 'U', '\r', 'D', 'R', 'J', 'N', 'F', 'C', 'K',
+    'T', 'Z', 'L', 'W', 'H', 'Y', 'P', 'Q', 'O', 'B', 'G', '\0', 'M', 'X', 'V', '\0',
+];
+const ITA2_FIGURES: [char; 32] = [
+    '\0', '3', '\n', '-', ' ', '\'', '8', '7', '\r', '$', '4', '\'', ',', '!', ':', '(',
+    '5', '+', ')', '2', '#', '6', '0', '1', '9', '?', '&', '\0', '.', '/', ';', '\0',
+];
+
+fn ita2_push(out: &mut String, code: u8, figures: &mut bool) {
+    match code & 0x1f {
+        0x1b => *figures = true,
+        0x1f => *figures = false,
+        value => {
+            let c = if *figures { ITA2_FIGURES[value as usize] } else { ITA2_LETTERS[value as usize] };
+            if c != '\0' && c != '\r' { out.push(c); }
+        }
+    }
+}
+
+fn fsk_bit_at(samples: &[f32], center: f32, samples_per_bit: f32, mark: f32, space: f32, sample_rate: f32) -> Option<bool> {
+    let width = (samples_per_bit * 0.72).round().max(8.0) as usize;
+    let middle = center.round() as isize;
+    let start = middle - width as isize / 2;
+    if start < 0 || start as usize + width > samples.len() { return None; }
+    let block = &samples[start as usize..start as usize + width];
+    Some(goertzel_magnitude(block, mark, sample_rate) > goertzel_magnitude(block, space, sample_rate))
+}
+
+/// Decode asynchronous Baudot/ITA-2 RTTY audio. Mark and space may be any
+/// pair (the common shifts are 170, 450 and 850 Hz); standard 45.45, 50 and
+/// 75 baud signals are supported, including fractional samples per symbol.
+pub fn decode_rtty(samples: &[f32], sample_rate: f32, mark_freq: f32, space_freq: f32, baud_rate: f32) -> Option<String> {
+    if sample_rate <= 0.0 || baud_rate <= 0.0 || mark_freq <= 0.0 || space_freq <= 0.0 || mark_freq == space_freq { return None; }
+    let spb = sample_rate / baud_rate;
+    if spb < 8.0 || (samples.len() as f32) < spb * 8.0 { return None; }
+    let energy = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
+    if energy < 1e-9 { return None; }
+
+    // RTTY idles on mark. Search a fine timing grid for mark-to-space start
+    // transitions, then sample the five LSB-first data bits at their centres.
+    let step = (spb / 8.0).max(1.0);
+    let mut cursor = spb * 0.5;
+    let mut previous = fsk_bit_at(samples, cursor, spb, mark_freq, space_freq, sample_rate).unwrap_or(true);
+    let mut codes = Vec::new();
+    while cursor + spb * 7.0 < samples.len() as f32 {
+        cursor += step;
+        let current = match fsk_bit_at(samples, cursor, spb, mark_freq, space_freq, sample_rate) { Some(v) => v, None => break };
+        if previous && !current {
+            let start = cursor - step * 0.5;
+            let start_ok = fsk_bit_at(samples, start + spb * 0.5, spb, mark_freq, space_freq, sample_rate) == Some(false);
+            let stop_ok = fsk_bit_at(samples, start + spb * 6.5, spb, mark_freq, space_freq, sample_rate) == Some(true);
+            if start_ok && stop_ok {
+                let mut code = 0u8;
+                let mut complete = true;
+                for bit in 0..5 {
+                    match fsk_bit_at(samples, start + spb * (1.5 + bit as f32), spb, mark_freq, space_freq, sample_rate) {
+                        Some(true) => code |= 1 << bit,
+                        Some(false) => {}
+                        None => complete = false,
+                    }
+                }
+                if complete {
+                    codes.push(code);
+                    cursor = start + spb * 7.0;
+                    previous = true;
+                    continue;
+                }
+            }
+        }
+        previous = current;
+    }
+
+    let mut out = String::new();
+    let mut figures = false;
+    for code in codes { ita2_push(&mut out, code, &mut figures); }
+    let text = out.trim_matches('\0').to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SstvMode {
+    Scottie1,
+    Scottie2,
+    Martin1,
+    Martin2,
+    Robot36,
+    Robot72,
+    Pd120,
+    Pd180,
+    Pd240,
+    Pd290,
+}
+
+/// Detect an SSTV mode from repeated 1200-Hz horizontal sync pulses.  The
+/// four standard SSTV signalling levels (1200 sync, 1500 black/separator,
+/// 1900 grey and 2300 white Hz) are compared in each analysis window; mode
+/// classification uses both sync length and measured line period.
+pub fn detect_sstv_mode(samples: &[f32], sample_rate: f32) -> Option<SstvMode> {
+    if sample_rate < 6000.0 || samples.len() < (sample_rate * 0.25) as usize { return None; }
+    let window = (sample_rate * 0.0025).round().max(12.0) as usize;
+    let hop = (sample_rate * 0.001).round().max(1.0) as usize;
+    let tones = [1200.0, 1500.0, 1900.0, 2300.0];
+    let mut sync_flags = Vec::new();
+    let mut positions = Vec::new();
+    let mut offset = 0usize;
+    while offset + window <= samples.len() {
+        let block = &samples[offset..offset + window];
+        let mut powers = [0.0f32; 4];
+        for (i, &tone) in tones.iter().enumerate() { powers[i] = goertzel_magnitude(block, tone, sample_rate); }
+        let mut order = [0usize, 1, 2, 3];
+        order.sort_by(|&a, &b| powers[b].partial_cmp(&powers[a]).unwrap_or(std::cmp::Ordering::Equal));
+        sync_flags.push(order[0] == 0 && powers[0] > powers[order[1]] * 1.8);
+        positions.push(offset + window / 2);
+        offset += hop;
+    }
+
+    let mut pulses: Vec<(f32, f32)> = Vec::new(); // start seconds, duration seconds
+    let mut i = 0usize;
+    while i < sync_flags.len() {
+        if !sync_flags[i] { i += 1; continue; }
+        let begin = i;
+        while i < sync_flags.len() && sync_flags[i] { i += 1; }
+        let run_hops = i - begin;
+        if run_hops >= 2 {
+            pulses.push((positions[begin] as f32 / sample_rate, run_hops as f32 * hop as f32 / sample_rate));
+        }
+    }
+    if pulses.len() < 2 { return None; }
+
+    let mut periods: Vec<f32> = pulses.windows(2).map(|p| p[1].0 - p[0].0).filter(|p| *p > 0.05 && *p < 0.6).collect();
+    if periods.is_empty() { return None; }
+    periods.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let period = periods[periods.len() / 2];
+    let mut durations: Vec<f32> = pulses.iter().map(|p| p.1).collect();
+    durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let duration = durations[durations.len() / 2];
+
+    // Nominal line periods and sync widths in seconds.
+    let candidates = [
+        (SstvMode::Scottie1, 0.42822, 0.009), (SstvMode::Scottie2, 0.27769, 0.009),
+        (SstvMode::Martin1, 0.446446, 0.004862), (SstvMode::Martin2, 0.226798, 0.004862),
+        (SstvMode::Robot36, 0.1500, 0.009), (SstvMode::Robot72, 0.3000, 0.009),
+        (SstvMode::Pd120, 0.1216, 0.020), (SstvMode::Pd180, 0.18304, 0.020),
+        (SstvMode::Pd240, 0.24448, 0.020), (SstvMode::Pd290, 0.2880, 0.020),
+    ];
+    candidates.iter().map(|&(mode, line, sync)| {
+        let line_error = (period - line).abs() / line;
+        // The short analysis window broadens pulse edges, so line timing is
+        // weighted more heavily than measured sync width.
+        let sync_error = (duration - sync).abs() / sync;
+        (mode, line_error + sync_error * 0.15, line_error)
+    }).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+      .and_then(|(mode, _, line_error)| if line_error <= 0.12 { Some(mode) } else { None })
+}
+
+fn ccir476_to_ita2(code: u8) -> Option<u8> {
+    // CCIR 476 is the constant-weight (four marks) recoding of ITA-2.
+    Some(match code {
+        0x6a => 0x00, 0x56 => 0x01, 0x6c => 0x02, 0x47 => 0x03,
+        0x5c => 0x04, 0x4b => 0x05, 0x4d => 0x06, 0x4e => 0x07,
+        0x78 => 0x08, 0x53 => 0x09, 0x55 => 0x0a, 0x17 => 0x0b,
+        0x59 => 0x0c, 0x1b => 0x0d, 0x1d => 0x0e, 0x1e => 0x0f,
+        0x74 => 0x10, 0x63 => 0x11, 0x65 => 0x12, 0x27 => 0x13,
+        0x69 => 0x14, 0x2b => 0x15, 0x2d => 0x16, 0x2e => 0x17,
+        0x71 => 0x18, 0x72 => 0x19, 0x35 => 0x1a, 0x36 => 0x1b,
+        0x39 => 0x1c, 0x3a => 0x1d, 0x3c => 0x1e, 0x5a => 0x1f,
+        _ => return None, // SIA/SIB/RPT and invalid constant-weight words
+    })
+}
+
+/// Decode 100-baud NAVTEX/SITOR-B audio (nominal 1700-Hz centre,
+/// 170-Hz shift). The receiver searches symbol phase, polarity and bit order,
+/// validates CCIR-476's four-of-seven alphabet, and suppresses the repeated
+/// copy sent five characters later by SITOR-B forward-error correction.
+pub fn decode_navtex(samples: &[f32], sample_rate: f32) -> Option<String> {
+    const BAUD: f32 = 100.0;
+    const MARK: f32 = 1785.0;
+    const SPACE: f32 = 1615.0;
+    if sample_rate < 5000.0 || samples.len() < (sample_rate * 0.15) as usize { return None; }
+    let energy = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
+    if energy < 1e-9 { return None; }
+    let spb = sample_rate / BAUD;
+
+    let mut best: Vec<u8> = Vec::new();
+    let mut best_score = 0usize;
+    for phase_step in 0..8 {
+        let phase = spb * (phase_step as f32 / 8.0 + 0.5);
+        let mut bits = Vec::new();
+        let mut center = phase;
+        while let Some(bit) = fsk_bit_at(samples, center, spb, MARK, SPACE, sample_rate) {
+            bits.push(bit);
+            center += spb;
+        }
+        for inverted in [false, true] {
+            for reversed in [false, true] {
+                for alignment in 0..7 {
+                    let mut words = Vec::new();
+                    let mut valid = 0usize;
+                    let mut p = alignment;
+                    while p + 7 <= bits.len() {
+                        let mut word = 0u8;
+                        for bit in 0..7 {
+                            let value = bits[p + bit] ^ inverted;
+                            let shift = if reversed { bit } else { 6 - bit };
+                            if value { word |= 1 << shift; }
+                        }
+                        if word.count_ones() == 4 && ccir476_to_ita2(word).is_some() { valid += 1; }
+                        words.push(word);
+                        p += 7;
+                    }
+                    if valid > best_score { best_score = valid; best = words; }
+                }
+            }
+        }
+    }
+    if best_score < 2 || best_score * 2 < best.len() { return None; }
+
+    let mut selected = Vec::new();
+    for (i, &word) in best.iter().enumerate() {
+        if ccir476_to_ita2(word).is_none() { continue; }
+        // In the SITOR-B interleave a character's second transmission is five
+        // character intervals later. Keep the first valid copy; use the second
+        // when the first was damaged.
+        if i >= 5 && best[i - 5] == word { continue; }
+        selected.push(word);
+    }
+    let mut out = String::new();
+    let mut figures = false;
+    for word in selected {
+        if let Some(code) = ccir476_to_ita2(word) { ita2_push(&mut out, code, &mut figures); }
+    }
+    let text = out.trim_matches(|c: char| c == '\0' || c == '\r' || c == '\n').to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 // ── CTCSS / DCS ────────────────────────────────────────────────────────────
 
 /// Downconvert and decode RDS from a WFM-demodulated multiplex signal.
@@ -686,5 +924,63 @@ mod tests {
         }).collect();
         let (tone, _) = detect_ctcss(&samples, sample_rate).expect("should detect 67 Hz");
         assert!((tone - target).abs() < 2.0, "detected {tone:.1} expected {target}");
+    }
+
+    fn append_fsk_symbol(samples: &mut Vec<f32>, bit: bool, count: usize, mark: f32, space: f32, sample_rate: f32, phase: &mut f32) {
+        let frequency = if bit { mark } else { space };
+        let step = TAU * frequency / sample_rate;
+        for _ in 0..count {
+            samples.push(phase.sin() * 0.7);
+            *phase = (*phase + step).rem_euclid(TAU);
+        }
+    }
+
+    #[test]
+    fn rtty_decodes_ita2_letters() {
+        let sample_rate = 8000.0;
+        let baud = 50.0;
+        let symbol = (sample_rate / baud) as usize;
+        let (mark, space) = (2125.0, 1955.0);
+        let mut samples = Vec::new();
+        let mut phase = 0.0;
+        append_fsk_symbol(&mut samples, true, symbol * 3, mark, space, sample_rate, &mut phase);
+        for code in [0x14u8, 0x01, 0x12, 0x12, 0x18] { // HELLO
+            append_fsk_symbol(&mut samples, false, symbol, mark, space, sample_rate, &mut phase);
+            for bit in 0..5 { append_fsk_symbol(&mut samples, code & (1 << bit) != 0, symbol, mark, space, sample_rate, &mut phase); }
+            append_fsk_symbol(&mut samples, true, symbol * 2, mark, space, sample_rate, &mut phase);
+        }
+        let decoded = decode_rtty(&samples, sample_rate, mark, space, baud).expect("RTTY should decode");
+        assert!(decoded.contains("HELLO"), "decoded '{decoded}'");
+    }
+
+    #[test]
+    fn sstv_classifies_scottie_two_from_sync_period() {
+        let sample_rate = 12_000.0;
+        let period = 0.27769f32;
+        let duration = period * 3.2;
+        let n = (sample_rate * duration) as usize;
+        let samples: Vec<f32> = (0..n).map(|i| {
+            let t = i as f32 / sample_rate;
+            let within_line = t.rem_euclid(period);
+            let freq = if within_line < 0.009 { 1200.0 } else if within_line < 0.020 { 1500.0 } else if within_line < 0.12 { 1900.0 } else { 2300.0 };
+            (TAU * freq * t).sin() * 0.6
+        }).collect();
+        assert_eq!(detect_sstv_mode(&samples, sample_rate), Some(SstvMode::Scottie2));
+    }
+
+    #[test]
+    fn navtex_decodes_ccir476_fec_text() {
+        let sample_rate = 8000.0;
+        let symbol = (sample_rate / 100.0) as usize;
+        let words = [0x69u8, 0x56, 0x65, 0x65, 0x71]; // HELLO in CCIR 476
+        let mut samples = Vec::new();
+        let mut phase = 0.0;
+        for &word in words.iter().chain(words.iter()) { // repeat after five characters
+            for bit in (0..7).rev() {
+                append_fsk_symbol(&mut samples, word & (1 << bit) != 0, symbol, 1785.0, 1615.0, sample_rate, &mut phase);
+            }
+        }
+        let decoded = decode_navtex(&samples, sample_rate).expect("NAVTEX should decode");
+        assert_eq!(decoded, "HELLO", "decoded '{decoded}'");
     }
 }
