@@ -147,6 +147,26 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         download_url: Some("https://github.com/ImagoTrigger/adsb_uat_win/archive/refs/heads/main.zip"),
         extract_subdir: Some("dump978/adsb_uat_win-main/new/readsb"),
     },
+    // dump1090: ADS-B 1090 MHz, Windows-native from gvanem fork
+    DecoderManifest {
+        name: "dump1090",
+        exe_name: "dump1090.exe",
+        description: "1090 MHz ADS-B Mode-S receiver and decoder",
+        github: Some(("gvanem", "Dump1090")),
+        search_dirs: &["", "bin", "dump1090/Dump1090-main"],
+        input_type: InputType::Direct,
+        protocol: "adsb",
+    },
+    // readsb: ADS-B 1090 MHz, Cygwin build from ImagoTrigger
+    DecoderManifest {
+        name: "readsb",
+        exe_name: "readsb.exe",
+        description: "ADS-B Mode-S/Beast receiver (Cygwin build, supports RTL-SDR)",
+        github: Some(("wiedehopf", "readsb")),
+        search_dirs: &["", "bin", "dump978/adsb_uat_win-main/new/readsb"],
+        input_type: InputType::Direct,
+        protocol: "adsb",
+    },
     // dsd-fme: lwvmobile fork ships Windows Cygwin builds with all vocoders
     DecoderManifest {
         name: "dsd-fme",
