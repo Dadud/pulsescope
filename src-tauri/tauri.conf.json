@@ -34,7 +34,10 @@
     ],
     "longDescription": "Wideband receiver + multi-VFO scanner UI that orchestrates the open-source SDR decoder ecosystem through a local WebSocket API.",
     "shortDescription": "Open-source desktop SDR scanner",
-    "targets": "all"
+    "targets": "all",
+    "resources": [
+      "../sdr-runtime/**/*"
+    ]
   },
   "identifier": "dev.pulsescope.desktop",
   "productName": "PulseScope",
