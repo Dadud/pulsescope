@@ -155,7 +155,16 @@ pub enum ScannerEvent {
     /// FFT power-spectrum frame at a fixed update rate (default 20 Hz).
     Spectrum { range: String, bins: Vec<f32> },
     /// Signal that crossed squelch.
-    SignalHit { frequency_hz: u64, strength_db: f32, snr_db: f32, bandwidth_hz: u32 },
+    SignalHit {
+        frequency_hz: u64,
+        strength_db: f32,
+        snr_db: f32,
+        bandwidth_hz: u32,
+        protocol: String,
+        family: String,
+        confidence: f32,
+        decoder: String,
+    },
     /// Latest VFO state snapshot (per VFO: frequency, mode, mute, gain).
     VfoStates(Vec<crate::scanner::VfoState>),
     /// Decoded text message from a sidecar decoder.
