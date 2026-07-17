@@ -27,6 +27,7 @@ decoders/
 *.zip
 
 # Test fixtures
+test-recordings/
 playback-test.cf32
 *.cf32
 screenshots/

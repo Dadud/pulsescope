@@ -303,6 +303,7 @@ pub struct DiscriminatorDecoder {
     phase: f64,
     sum: f64,
     count: usize,
+    dc: f64,
     nrzi: NrziHdlcDecoder,
 }
 
@@ -316,12 +317,18 @@ impl DiscriminatorDecoder {
             phase: 0.0,
             sum: 0.0,
             count: 0,
+            dc: 0.0,
             nrzi: NrziHdlcDecoder::new(),
         })
     }
 
     pub fn push_sample(&mut self, sample: f32) -> Option<Result<AisMessage, AisDecodeError>> {
-        self.sum += sample as f64;
+        // AIS captures commonly contain residual carrier frequency offset.
+        // Track the discriminator DC component so the symbol slicer sees the
+        // GMSK deviation rather than the receiver's static phase slope.
+        let x = sample as f64;
+        self.dc += (x - self.dc) * 0.0005;
+        self.sum += x - self.dc;
         self.count += 1;
         self.phase += 1.0;
         if self.phase + 1e-9 < self.samples_per_symbol {
@@ -345,6 +352,7 @@ impl DiscriminatorDecoder {
         self.phase = 0.0;
         self.sum = 0.0;
         self.count = 0;
+        self.dc = 0.0;
         self.nrzi.reset();
     }
 }
