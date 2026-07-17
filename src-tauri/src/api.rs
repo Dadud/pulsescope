@@ -589,7 +589,7 @@ async fn signal_id_fps(State(s): State<ApiState>) -> Json<Value> {
     // Built-in band fingerprints derived from the classifier priors + recent classified hits.
     let mut fps = vec![
         json!({"id":"adsb-1090","name":"ADS-B 1090 (native Rust)","family":"aviation","mode":"am","frequency_hz":1090000000u64,"bandwidth_hz":1000000,"confidence":0.95,"decoder":"native_adsb"}),
-        json!({"id":"ais-162","name":"AIS Marine","family":"marine","mode":"nfm","frequency_hz":161975000u64,"bandwidth_hz":25000,"confidence":0.92,"decoder":"AIS-catcher"}),
+        json!({"id":"ais-162","name":"AIS Marine","family":"marine","mode":"nfm","frequency_hz":161975000u64,"bandwidth_hz":25000,"confidence":0.92,"decoder":"native_ais"}),
         json!({"id":"noaa-wx","name":"NOAA Weather Radio","family":"weather","mode":"nfm","frequency_hz":162550000u64,"bandwidth_hz":25000,"confidence":0.88,"decoder":"native_nfm"}),
         json!({"id":"fm-broadcast","name":"FM Broadcast + RDS","family":"analog","mode":"wfm","frequency_hz":100700000u64,"bandwidth_hz":200000,"confidence":0.85,"decoder":"native_wfm_rds"}),
         json!({"id":"noaa-apt","name":"NOAA APT","family":"satellite","mode":"nfm","frequency_hz":137100000u64,"bandwidth_hz":40000,"confidence":0.82,"decoder":"noaa-apt"}),
