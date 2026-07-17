@@ -31,6 +31,7 @@ use crate::sidecar::SidecarRegistry;
 pub struct ScannerHandle {
     pub cmd_tx: mpsc::UnboundedSender<ScannerCommand>,
     pub state: Arc<Mutex<ScannerRuntimeState>>,
+    pub iq_consumers: Vec<IqRing>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -141,9 +142,11 @@ impl ScannerHandle {
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
-        let handle = ScannerHandle { cmd_tx: cmd_tx.clone(), state: state.clone() };
+        let capture_ring = IqRing::new("fft", cfg.fft_size.saturating_mul(5).saturating_mul(16));
+        let audio_ring = IqRing::new("audio", 2_000_000);
+        let handle = ScannerHandle { cmd_tx: cmd_tx.clone(), state: state.clone(), iq_consumers: vec![capture_ring.clone(), audio_ring.clone()] };
 
-        tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, cmd_rx, state));
+        tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, cmd_rx, state, capture_ring, audio_ring));
         handle
     }
 }
@@ -161,6 +164,8 @@ async fn scanner_loop(
     events_tx: broadcast::Sender<ScannerEvent>,
     mut cmd_rx: mpsc::UnboundedReceiver<ScannerCommand>,
     state: Arc<Mutex<ScannerRuntimeState>>,
+    capture_ring: IqRing,
+    audio_ring: IqRing,
 ) {
     let mut active_range: Option<ScanRange> = None;
     let poll = Duration::from_micros((1_000_000.0 / cfg.update_rate_hz.max(1.0)) as u64);
@@ -170,8 +175,6 @@ async fn scanner_loop(
     let fft = fft_planner.plan_fft_forward(cfg.fft_size);
     let mut spectrum: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); cfg.fft_size];
     let capture_size = cfg.fft_size.saturating_mul(5);
-    let capture_ring = IqRing::new(capture_size.saturating_mul(16));
-    let audio_ring = IqRing::new(2_000_000);
     let _audio_worker = AudioWorker::start(audio_ring.clone(), audio.clone(), device.clone(), state.clone());
     let _capture_worker = CaptureWorker::start(device.clone(), vec![capture_ring.clone(), audio_ring], cfg.fft_size, playback, iq_network);
 

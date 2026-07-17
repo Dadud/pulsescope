@@ -33,27 +33,34 @@ impl IqNetworkSink {
 pub struct IqRing {
     inner: Arc<Mutex<VecDeque<Complex<f32>>>>,
     capacity: usize,
+    name: Arc<str>,
+    pushed: Arc<AtomicU64>,
+    taken: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl IqRing {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(name: impl Into<Arc<str>>, capacity: usize) -> Self {
         assert!(capacity > 0, "IQ ring capacity must be nonzero");
-        Self { inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity }
+        Self { inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity, name: name.into(), pushed: Arc::new(AtomicU64::new(0)), taken: Arc::new(AtomicU64::new(0)), dropped: Arc::new(AtomicU64::new(0)) }
     }
     pub fn push(&self, samples: &[Complex<f32>]) {
         let mut q = self.inner.lock();
         for &sample in samples {
-            if q.len() == self.capacity { q.pop_front(); }
-            q.push_back(sample);
+            if q.len() == self.capacity { q.pop_front(); self.dropped.fetch_add(1, Ordering::Relaxed); }
+            q.push_back(sample); self.pushed.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn take_exact(&self, count: usize) -> Option<Vec<Complex<f32>>> {
         let mut q = self.inner.lock();
         if q.len() < count { return None; }
-        Some((0..count).map(|_| q.pop_front().expect("length checked")).collect())
+        let out = (0..count).map(|_| q.pop_front().expect("length checked")).collect();
+        self.taken.fetch_add(count as u64, Ordering::Relaxed);
+        Some(out)
     }
     pub fn len(&self) -> usize { self.inner.lock().len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn status(&self) -> serde_json::Value { serde_json::json!({"name":self.name,"capacity_samples":self.capacity,"queued_samples":self.len(),"pushed_samples":self.pushed.load(Ordering::Relaxed),"taken_samples":self.taken.load(Ordering::Relaxed),"dropped_samples":self.dropped.load(Ordering::Relaxed)}) }
 }
 
 pub struct PlaybackReader {
@@ -133,7 +140,7 @@ mod tests {
     use super::*;
     #[test]
     fn preserves_order_and_requires_complete_frames() {
-        let ring = IqRing::new(8);
+        let ring = IqRing::new("test", 8);
         ring.push(&[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0)]);
         assert!(ring.take_exact(3).is_none());
         let frame = ring.take_exact(2).unwrap();
@@ -161,7 +168,7 @@ mod tests {
     }
     #[test]
     fn drops_oldest_when_capture_outpaces_consumer() {
-        let ring = IqRing::new(3);
+        let ring = IqRing::new("test", 3);
         ring.push(&[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0), Complex::new(3.0, 0.0), Complex::new(4.0, 0.0)]);
         let frame = ring.take_exact(3).unwrap();
         assert_eq!(frame.iter().map(|x| x.re).collect::<Vec<_>>(), vec![2.0, 3.0, 4.0]);
