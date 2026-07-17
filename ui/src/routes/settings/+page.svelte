@@ -9,6 +9,10 @@
   let banks = $state<any[]>([]);
   let devices = $state<any[]>([]);
   let deviceError = $state('');
+  let caps = $state<any>(null);
+
+  async function refreshCaps() { try { caps = await Api.deviceCapabilities(); } catch (e) { deviceError = String(e); } }
+  async function control(name: string, value: string | number | boolean) { try { const r = await Api.deviceControl(name, value); caps = r.capabilities; } catch (e) { deviceError = String(e); } }
 
   onMount(async () => {
     try {
@@ -33,7 +37,7 @@
   let deviceLabel = $state('Mock Source (Test Tones)');
   async function connect() {
     deviceError = '';
-    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); }
+    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); await refreshCaps(); }
     catch (e) { deviceError = String(e); }
   }
   async function saveBank(bank: any) {
@@ -62,6 +66,21 @@
     </div>
     {#if deviceError}<div class="device-error" role="alert">{deviceError}</div>{/if}
   </section>
+
+  {#if caps?.connected}
+    <section class="card">
+      <h2>Receiver frontend</h2>
+      {#if caps.agc_supported}<label class="row"><span>RF AGC</span><input type="checkbox" checked={caps.agc_enabled} onchange={(e) => control('agc', e.currentTarget.checked)} /></label>{/if}
+      {#if caps.dc_offset_auto_supported}<label class="row"><span>DC offset auto</span><input type="checkbox" checked={caps.dc_offset_auto} onchange={(e) => control('dc_offset_auto', e.currentTarget.checked)} /></label>{/if}
+      {#if caps.iq_balance_auto_supported}<label class="row"><span>IQ balance auto</span><input type="checkbox" checked={caps.iq_balance_auto} onchange={(e) => control('iq_balance_auto', e.currentTarget.checked)} /></label>{/if}
+      {#if caps.frequency_correction_supported}<label class="row"><span>Frequency correction (PPM)</span><input type="number" step="0.1" value={caps.frequency_correction_ppm} onchange={(e) => control('frequency_correction_ppm', e.currentTarget.value)} /></label>{/if}
+      {#if caps.antennas.length > 1}<label class="row"><span>Antenna</span><select value={caps.antenna} onchange={(e) => control('antenna', e.currentTarget.value)}>{#each caps.antennas as antenna}<option value={antenna}>{antenna}</option>{/each}</select></label>{/if}
+      {#each caps.gain_stages as stage}
+        <label class="row"><span>{stage.name} gain ({stage.value_db.toFixed(1)} dB)</span><input type="range" min={stage.min_db} max={stage.max_db} step={stage.step_db || 1} value={stage.value_db} onchange={(e) => control(`gain:${stage.name}`, e.currentTarget.value)} /></label>
+      {/each}
+      <button onclick={refreshCaps}>Refresh receiver controls</button>
+    </section>
+  {/if}
 
   <section class="card">
     <h2>Per-band scan overrides</h2>
