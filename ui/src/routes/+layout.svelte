@@ -30,6 +30,7 @@
       <li><a href="#/signal-id">Signal ID</a></li>
       <li><a href="#/occupancy">Occupancy</a></li>
       <li><a href="#/recording">Recording</a></li>
+      <li><a href="#/jobs">Jobs</a></li>
       <li><a href="#/cases">Cases</a></li>
       <li><a href="#/aircraft">Aircraft</a></li>
       <li><a href="#/lookups">Lookups</a></li>

@@ -111,6 +111,12 @@ export async function putJson<T = any>(path: string, body: any): Promise<T> {
   return r.json();
 }
 
+export async function deleteJson<T = any>(path: string): Promise<T> {
+  const r = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
+  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  return r.json();
+}
+
 export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
   // Honor auth if PULSESCOPE_AUTH_TOKEN is set or the URL has ?token=...
   const headers = authHeader();
@@ -204,6 +210,9 @@ export const Api = {
   signalPolyphaseExtract: () => postJson('/signal_id/polyphase_extract'),
   spectrumOccupancy: () => getJson('/spectrum_occupancy'),
 
+  jobs: () => getJson<{jobs:any[]}>('/jobs'),
+  createJob: (body:any) => postJson('/jobs', body),
+  deleteJob: (id:number) => deleteJson(`/jobs/${id}`),
   iqRecordingStatus: () => getJson('/iq_recording/status'),
   iqRecordingStart: () => postJson('/iq_recording/start'),
   iqRecordingStop: () => postJson('/iq_recording/stop'),
