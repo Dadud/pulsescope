@@ -6,6 +6,9 @@
 // local server. Treating those origins as equivalent leaves the desktop UI
 // blank/idle because every fetch targets the asset host instead of the API.
 const desktopWebview = typeof window !== 'undefined' && (
+  // Tauri v2 injects one of these regardless of whether WebView2 uses
+  // tauri.localhost, asset:, or plain localhost as its visible origin.
+  '__TAURI_INTERNALS__' in (window as any) || '__TAURI__' in (window as any) ||
   window.location.hostname === 'tauri.localhost' ||
   window.location.hostname.endsWith('.tauri.localhost') ||
   window.location.protocol === 'asset:' ||
@@ -131,7 +134,7 @@ export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
 // remain small and the backend contract has a single source of truth.
 export const Api = {
   health: () => getJson('/health'),
-  spectrum: () => getJson<{ bins: number[] }>('/spectrum'),
+  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),
   createBank: (body: any) => postJson('/channels/banks/create', body),
   deleteBank: (name: string) => postJson('/channels/banks/delete', { name }),

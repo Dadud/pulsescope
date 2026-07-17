@@ -22,6 +22,7 @@
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
+  let waterfallPixels: Uint8ClampedArray | null = null;
   let initialLoadInFlight = false;
 
   const filteredBanks = $derived(
@@ -50,15 +51,17 @@
   onMount(() => {
     if (!browser) return;
     let poll: number | undefined;
+    let statePoll: number | undefined;
     void (async () => {
       await loadInitial();
       // Start the reliable HTTP frame path before the optional socket.
       poll = window.setInterval(() => { void pollSpectrum(); }, 250);
-      await pollSpectrum();
+      statePoll = window.setInterval(() => { void pollRuntime(); }, 1000);
+      await Promise.all([pollSpectrum(), pollRuntime()]);
       try { ws = openEvents(handleEvent); }
       catch (e) { console.warn('event ws unavailable; using spectrum polling', e); }
     })();
-    return () => { if (poll !== undefined) window.clearInterval(poll); ws?.close(); ws = null; };
+    return () => { if (poll !== undefined) window.clearInterval(poll); if (statePoll !== undefined) window.clearInterval(statePoll); ws?.close(); ws = null; };
   });
 
   // Even when the route is mounted by the hash router without a
@@ -93,6 +96,17 @@
     }
   }
 
+  async function pollRuntime() {
+    try {
+      const [status, nextVfos] = await Promise.all([Api.deviceStatus(), Api.vfoStates()]);
+      deviceLabel = status.label;
+      connected = status.connected;
+      centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
+      sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
+      vfos = nextVfos;
+    } catch (e) { console.warn('runtime polling failed', e); }
+  }
+
   async function applySpectrum(bins: number[]) {
     spectrumBins = bins;
     await tick();
@@ -103,6 +117,10 @@
   async function pollSpectrum() {
     try {
       const spectrum = await Api.spectrum();
+      // /spectrum is the reliable non-WS path; keep scanner state synchronized
+      // here as well so a dropped event socket cannot leave dead VFO/UI chrome.
+      activeRange = spectrum?.range ?? activeRange;
+      scanRunning = Boolean(spectrum?.running);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length > 0) {
         spectrumError = '';
         await applySpectrum(spectrum.bins);
@@ -129,8 +147,16 @@
     }
   }
 
+  function ensureCanvasBacking(canvas: HTMLCanvasElement, width: number, height: number) {
+    // Setting canvas width/height clears its bitmap. Keep backing dimensions
+    // outside Svelte's reactive attributes and only initialize them once.
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+  }
+
   function drawSpectrum() {
     if (!canvas || spectrumBins.length === 0) return;
+    ensureCanvasBacking(canvas, 900, 220);
     const ctx = canvas.getContext('2d')!;
     const w = canvas.width;
     const h = canvas.height;
@@ -163,12 +189,17 @@
 
   function drawWaterfall() {
     if (!waterfallCanvas || spectrumBins.length === 0) return;
+    ensureCanvasBacking(waterfallCanvas, 900, 180);
     const ctx = waterfallCanvas.getContext('2d');
     if (!ctx) return;
     const w = waterfallCanvas.width;
     const h = waterfallCanvas.height;
-    ctx.drawImage(waterfallCanvas, 0, 0, w, h - 1, 0, 1, w, h - 1);
-    const row = ctx.createImageData(w, 1);
+    // Keep history outside the canvas. WebView render cycles may clear a
+    // canvas bitmap; this typed buffer makes the waterfall deterministic.
+    if (!waterfallPixels || waterfallPixels.length !== w * h * 4) {
+      waterfallPixels = new Uint8ClampedArray(w * h * 4);
+    }
+    if (h > 1) waterfallPixels.copyWithin(w * 4, 0, w * 4 * (h - 1));
     for (let x = 0; x < w; x++) {
       const index = Math.min(spectrumBins.length - 1, Math.floor((x / w) * spectrumBins.length));
       const value = Math.max(0, Math.min(1, (spectrumBins[index] + 100) / 80));
@@ -176,12 +207,15 @@
       const c = 1 - Math.abs((hue / 60) % 2 - 1);
       const sector = Math.floor(hue / 60);
       const rgb = sector === 0 ? [1, c, 0] : sector === 1 ? [c, 1, 0] : sector === 2 ? [0, 1, c] : sector === 3 ? [0, c, 1] : sector === 4 ? [c, 0, 1] : [1, 0, c];
-      row.data[x * 4] = Math.round(rgb[0] * value * 255);
-      row.data[x * 4 + 1] = Math.round(rgb[1] * value * 255);
-      row.data[x * 4 + 2] = Math.round(rgb[2] * value * 255);
-      row.data[x * 4 + 3] = 255;
+      const pixel = x * 4;
+      waterfallPixels[pixel] = Math.round(rgb[0] * value * 255);
+      waterfallPixels[pixel + 1] = Math.round(rgb[1] * value * 255);
+      waterfallPixels[pixel + 2] = Math.round(rgb[2] * value * 255);
+      waterfallPixels[pixel + 3] = 255;
     }
-    ctx.putImageData(row, 0, 0);
+    const image = ctx.createImageData(w, h);
+    image.data.set(waterfallPixels);
+    ctx.putImageData(image, 0, 0);
   }
 
   async function startScan(name: string) {
@@ -313,9 +347,9 @@
 
     <div class="spectrum-wrap card">
       <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
-      <canvas bind:this={canvas} width="900" height="220"></canvas>
+      <canvas bind:this={canvas}></canvas>
       <h2 class="waterfall-title">Waterfall · live FFT history</h2>
-      <canvas class="waterfall" bind:this={waterfallCanvas} width="900" height="180" aria-label="Live waterfall from FFT bins"></canvas>
+      <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
     </div>
 
     <section class="signal-history card">
@@ -411,7 +445,7 @@
   .scanner-layout {
     display: grid;
     grid-template-columns: 260px 1fr;
-    grid-template-rows: minmax(0, 1fr) 190px;
+    grid-template-rows: minmax(0, 1fr) 140px;
     gap: 8px;
     height: 100%;
     padding: 8px;
@@ -450,18 +484,21 @@
   .settings-link { color: var(--fg); text-decoration: none; font-size: 12px; border-left: 1px solid var(--line-strong); padding-left: 8px; }
 
   .center { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }
-  .device-strip { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-size: 13px; }
+  .device-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 12px; font-size: 13px; }
+  .receiver-readout { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); }
+  .receiver-readout span, .receiver-readout small { color: var(--fg-dim); font-size: 10px; }
+  .receiver-readout strong { color: var(--accent); font-size: 14px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 8px; }
   .dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .vfo-summary { color: var(--fg-dim); }
 
-  .spectrum-wrap { flex: 0 0 auto; min-height: 300px; }
-  .spectrum-wrap canvas { display: block; width: 100%; height: 120px; background: var(--bg); border-radius: 4px; }
+  .spectrum-wrap { flex: 0 0 auto; min-height: 250px; }
+  .spectrum-wrap canvas { display: block; width: 100%; height: 95px; background: var(--bg); border-radius: 4px; }
   .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
-  .waterfall-title { margin-top: 8px !important; }
-  .spectrum-wrap canvas.waterfall { height: 120px; image-rendering: pixelated; }
+  .waterfall-title { margin-top: 6px !important; }
+  .spectrum-wrap canvas.waterfall { height: 95px; image-rendering: pixelated; }
 
-  .signal-history { max-height: 190px; overflow: hidden; }
+  .signal-history { order: 3; max-height: 190px; overflow: hidden; }
   .history-head { display: flex; justify-content: space-between; align-items: center; }
   .history-head h2 { margin-bottom: 0; }
   .history-list { overflow-y: auto; max-height: 145px; }
@@ -469,7 +506,7 @@
   .history-row b { color: var(--accent); }
   .history-empty { color: var(--fg-dim); padding: 8px 0; font-size: 12px; }
 
-  .vfo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+  .vfo-grid { order: 2; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
   .vfo-tile { display: flex; flex-direction: column; gap: 4px; }
   .vfo-freq { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
   .vfo-mode { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -504,4 +541,14 @@
   .log-proto { color: var(--accent-2); text-transform: uppercase; font-size: 10px; }
   .log-content { color: var(--fg); word-break: break-word; white-space: pre-wrap; }
   .log-empty { color: var(--fg-dim); padding: 16px; text-align: center; }
+
+  /* Short laptop / WebView windows: live RF controls beat an empty log dock. */
+  @media (max-height: 850px) {
+    .scanner-layout { grid-template-rows: minmax(0, 1fr); }
+    .log { display: none; }
+    .spectrum-wrap { min-height: 230px; }
+    .spectrum-wrap canvas, .spectrum-wrap canvas.waterfall { height: 80px; }
+    .vfo-tile { padding: 8px; }
+    .signal-history { display: none; }
+  }
 </style>
