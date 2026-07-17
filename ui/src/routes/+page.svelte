@@ -222,7 +222,12 @@
     if (!waterfallPixels || waterfallPixels.length !== w * h * 4) {
       waterfallPixels = new Uint8ClampedArray(w * h * 4);
     }
-    if (h > 1) waterfallPixels.copyWithin(w * 4, 0, w * 4 * (h - 1));
+    // Browser polling is deliberately low-rate on LAN/mobile. Write a small
+    // stripe per accepted FFT frame so the waterfall visibly advances instead
+    // of looking frozen after a single one-pixel row.
+    const rowsPerFrame = 3;
+    const rowBytes = w * 4;
+    if (h > rowsPerFrame) waterfallPixels.copyWithin(rowBytes * rowsPerFrame, 0, rowBytes * (h - rowsPerFrame));
     for (let x = 0; x < w; x++) {
       const index = Math.min(spectrumBins.length - 1, Math.floor((x / w) * spectrumBins.length));
       const value = Math.max(0, Math.min(1, ((spectrumBins[index] + 100) / 80) * waterfallGain));
@@ -237,6 +242,9 @@
       waterfallPixels[pixel + 1] = Math.round(rgb[1] * value * 255);
       waterfallPixels[pixel + 2] = Math.round(rgb[2] * value * 255);
       waterfallPixels[pixel + 3] = 255;
+    }
+    for (let row = 1; row < rowsPerFrame; row++) {
+      waterfallPixels.set(waterfallPixels.subarray(0, rowBytes), row * rowBytes);
     }
     const image = ctx.createImageData(w, h);
     image.data.set(waterfallPixels);
