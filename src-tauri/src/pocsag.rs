@@ -84,6 +84,37 @@ pub struct PocsagDecoder {
     rejected_words: u64,
 }
 
+/// Complex-IQ front end for POCSAG FSK captures. This performs phase
+/// discrimination and hands the resulting baseband stream to the native
+/// symbol slicer; clock recovery remains in `PocsagDecoder`.
+#[derive(Debug)]
+pub struct IqDecoder {
+    decoder: PocsagDecoder,
+    previous: Option<(f32, f32)>,
+}
+
+impl IqDecoder {
+    pub fn new(sample_rate: u32, baud: PocsagBaud) -> Self {
+        Self { decoder: PocsagDecoder::new(sample_rate, baud), previous: None }
+    }
+
+    pub fn push_iq(&mut self, samples: &[(f32, f32)]) -> Vec<PocsagMessage> {
+        let mut audio = Vec::with_capacity(samples.len());
+        for &(i, q) in samples {
+            if !i.is_finite() || !q.is_finite() { self.previous = None; continue; }
+            if let Some((pi, pq)) = self.previous {
+                audio.push((q * pi - i * pq).atan2(i * pi + q * pq));
+            }
+            self.previous = Some((i, q));
+        }
+        self.decoder.push_audio(&audio)
+    }
+
+    pub fn flush(&mut self) -> Vec<PocsagMessage> { self.decoder.flush() }
+    pub fn corrected_words(&self) -> u64 { self.decoder.corrected_words() }
+    pub fn rejected_words(&self) -> u64 { self.decoder.rejected_words() }
+}
+
 impl PocsagDecoder {
     pub fn new(sample_rate: u32, baud: PocsagBaud) -> Self {
         assert!(sample_rate > 0, "sample rate must be non-zero");
