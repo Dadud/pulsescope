@@ -1,8 +1,22 @@
 // api.ts — PulseScope local API client. The Rust backend binds a
 // ws+http server to 127.0.0.1:8765; this module wraps the wire format.
 
-const BASE = typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:${window.location.port || (window.location.protocol === 'https:' ? 443 : 80)}` : 'http://127.0.0.1:8765';
-const WS_BASE = typeof window !== 'undefined' ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:${window.location.port || (window.location.protocol === 'https:' ? 443 : 80)}` : 'ws://127.0.0.1:8765';
+// LAN/web builds use their own origin. Tauri v2 serves frontend assets from
+// tauri.localhost (or an asset scheme), while PulseScope's API is a separate
+// local server. Treating those origins as equivalent leaves the desktop UI
+// blank/idle because every fetch targets the asset host instead of the API.
+const desktopWebview = typeof window !== 'undefined' && (
+  window.location.hostname === 'tauri.localhost' ||
+  window.location.hostname.endsWith('.tauri.localhost') ||
+  window.location.protocol === 'asset:' ||
+  window.location.protocol === 'tauri:'
+);
+const BASE = typeof window === 'undefined' || desktopWebview
+  ? 'http://127.0.0.1:8765'
+  : `${window.location.protocol}//${window.location.hostname}:${window.location.port || (window.location.protocol === 'https:' ? 443 : 80)}`;
+const WS_BASE = typeof window === 'undefined' || desktopWebview
+  ? 'ws://127.0.0.1:8765'
+  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:${window.location.port || (window.location.protocol === 'https:' ? 443 : 80)}`;
 
 /// Resolve the auth token from URL/localStorage and return as a Bearer header.
 /// Caches in localStorage so subsequent requests stay authenticated.
@@ -117,6 +131,7 @@ export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
 // remain small and the backend contract has a single source of truth.
 export const Api = {
   health: () => getJson('/health'),
+  spectrum: () => getJson<{ bins: number[] }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),
   createBank: (body: any) => postJson('/channels/banks/create', body),
   deleteBank: (name: string) => postJson('/channels/banks/delete', { name }),
