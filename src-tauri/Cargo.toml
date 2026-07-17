@@ -84,7 +84,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
 
 [features]
-default = ["mock-source"]
+default = ["mock-source", "soapysdr"]
 mock-source = []
 soapysdr = ["dep:soapysdr-sys"]
 custom-protocol = ["tauri/custom-protocol"]

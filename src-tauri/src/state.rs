@@ -43,11 +43,18 @@ impl AppState {
         let db = Db::open(&data_dir.join("pulsescope.db"))
             .expect("failed to open pulsescope.db");
         let (events_tx, _events_rx) = broadcast::channel(1024);
+        let device = Arc::new(DeviceLayer::new_mock());
+        // Prefer a previously selected physical SDR; otherwise the first real
+        // Soapy device. Mock is a fallback for machines with no hardware.
+        let preferred = (!config.device.last_device_key.trim().is_empty()).then_some(config.device.last_device_key.as_str());
+        if let Err(error) = device.auto_connect(preferred) {
+            tracing::warn!(%error, "physical SDR auto-connect failed; using mock fallback");
+        }
 
         Arc::new(Self {
             config: RwLock::new(config),
             db,
-            device: Arc::new(DeviceLayer::new_mock()),
+            device,
             audio: Arc::new(AudioSink::new()),
             recording: Arc::new(Mutex::new(RecordingState::default())),
             playback: Arc::new(Mutex::new(None)),
