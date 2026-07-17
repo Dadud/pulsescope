@@ -22,6 +22,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use axum::http::{header, Method};
+use tower_http::cors::{Any, CorsLayer};
+
 use crate::state::{AppState, ScannerEvent};
 
 #[derive(Clone)]
@@ -304,6 +307,15 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
             tracing::warn!(ui = %ui_dir.display(), "ui_dir does not exist; static UI disabled");
         }
     }
+
+    // The desktop WebView is tauri.localhost/asset: while the API is loopback.
+    // Explicit CORS is required even though both endpoints live on this machine.
+    top = top.layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
+    );
 
     match (listener, tls) {
         (Some(listener), None) => { serve_plain(listener, top).await?; }
