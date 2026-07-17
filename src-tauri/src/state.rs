@@ -10,7 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
 
 use crate::audio::AudioSink;
-use crate::config::Config;
+use crate::config::{Config, ScanRange};
 use crate::db::Db;
 use crate::device::DeviceLayer;
 use crate::scanner::ScannerHandle;
@@ -66,6 +66,25 @@ impl AppState {
             data_dir,
             started_ms: crate::scanner::now_ms(),
         })
+    }
+
+    /// Start a visible but silent first-run monitor so the desktop never opens
+    /// onto an empty spectrum/VFO dashboard. Audio stays muted until the user
+    /// explicitly unmutes a VFO.
+    pub fn start_default_monitor(self: &Arc<Self>) {
+        if !self.device.status().connected || self.scanner.read().is_some() { return; }
+        let range: Option<ScanRange> = self.config.read().scan_ranges.iter()
+            .find(|r| r.name == "FM Broadcast")
+            .cloned()
+            .or_else(|| self.config.read().scan_ranges.first().cloned());
+        let Some(range) = range else { return; };
+        if self.device.set_sample_rate(range.sample_rate_hz).is_err()
+            || self.device.set_bandwidth(range.channel_bw_hz).is_err()
+            || self.device.set_frequency(range.start_hz).is_err() { return; }
+        let cfg = self.config.read().scanner.clone();
+        let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone());
+        let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
+        *self.scanner.write() = Some(handle);
     }
 
     pub fn default_data_dir() -> PathBuf {
