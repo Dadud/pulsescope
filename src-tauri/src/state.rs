@@ -26,6 +26,9 @@ pub struct AppState {
     pub playback: Arc<Mutex<Option<crate::capture::PlaybackReader>>>,
     pub iq_network: crate::capture::IqNetworkSink,
     pub scanner: RwLock<Option<ScannerHandle>>,
+    /// Exclusive physical SDR lease. Consumers must claim this before retuning
+    /// or creating a capture stream; force takeover is explicit and visible.
+    pub receiver_session: Mutex<ReceiverSession>,
     pub trunking: RwLock<TrunkingRuntime>,
     pub sidecars: SidecarRegistry,
     /// Broadcasts every scanner event (spectrum, signal hit, decoded message,
@@ -60,6 +63,7 @@ impl AppState {
             playback: Arc::new(Mutex::new(None)),
             iq_network: crate::capture::IqNetworkSink::new(),
             scanner: RwLock::new(None),
+            receiver_session: Mutex::new(ReceiverSession::default()),
             trunking: RwLock::new(TrunkingRuntime::default()),
             sidecars: SidecarRegistry::new(),
             events: events_tx,
@@ -94,6 +98,26 @@ impl AppState {
             PathBuf::from("./pulsescope-data")
         }
     }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ReceiverSession {
+    pub owner: Option<String>,
+    pub acquired_ms: Option<i64>,
+    pub takeovers: u64,
+}
+
+impl ReceiverSession {
+    pub fn claim(&mut self, owner: &str, force: bool) -> Result<(), String> {
+        if let Some(current) = &self.owner {
+            if current != owner && !force { return Err(format!("receiver is held by {current}")); }
+            if current != owner { self.takeovers = self.takeovers.saturating_add(1); }
+        }
+        self.owner = Some(owner.to_owned());
+        self.acquired_ms = Some(crate::scanner::now_ms());
+        Ok(())
+    }
+    pub fn release(&mut self, owner: &str) { if self.owner.as_deref() == Some(owner) { self.owner = None; self.acquired_ms = None; } }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]

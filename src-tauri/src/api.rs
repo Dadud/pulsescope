@@ -67,6 +67,9 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/device/status", get(device_status))
         .route("/device/capabilities", get(device_capabilities))
         .route("/device/control", post(device_control))
+        .route("/receiver/session", get(receiver_session))
+        .route("/receiver/session/claim", post(receiver_session_claim))
+        .route("/receiver/session/release", post(receiver_session_release))
         .route("/device/gain", post(device_gain))
         .route("/device/frequency", post(device_frequency))
         .route("/device/sample_rate", post(device_sample_rate))
@@ -434,6 +437,19 @@ async fn device_status(State(s): State<ApiState>) -> impl IntoResponse {
     Json(serde_json::to_value(s.0.device.status()).unwrap())
 }
 
+#[derive(Deserialize)] struct ReceiverSessionReq { owner: String, #[serde(default)] force: bool }
+async fn receiver_session(State(s): State<ApiState>) -> Json<Value> { Json(serde_json::to_value(s.0.receiver_session.lock().clone()).unwrap()) }
+async fn receiver_session_claim(State(s): State<ApiState>, Json(req): Json<ReceiverSessionReq>) -> impl IntoResponse {
+    let mut session = s.0.receiver_session.lock();
+    match session.claim(&req.owner, req.force) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok":true,"session":session.clone()}))),
+        Err(error) => (StatusCode::CONFLICT, Json(json!({"ok":false,"error":error,"session":session.clone()}))),
+    }
+}
+async fn receiver_session_release(State(s): State<ApiState>, Json(req): Json<ReceiverSessionReq>) -> Json<Value> {
+    let mut session = s.0.receiver_session.lock(); session.release(&req.owner); Json(json!({"ok":true,"session":session.clone()}))
+}
+
 async fn device_capabilities(State(s): State<ApiState>) -> impl IntoResponse {
     Json(serde_json::to_value(s.0.device.capabilities()).unwrap())
 }
@@ -487,6 +503,9 @@ async fn scan_config(State(s): State<ApiState>) -> impl IntoResponse {
 
 #[derive(Deserialize)] struct ScanStartReq { range_name: String }
 async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) -> Json<Value> {
+    if let Err(error) = s.0.receiver_session.lock().claim("scanner", false) {
+        return Json(json!({"ok":false,"error":error,"session":s.0.receiver_session.lock().clone()}));
+    }
     let range = {
         let cfg = s.0.config.read();
         cfg.scan_ranges.iter().find(|r| r.name == req.range_name).cloned()
