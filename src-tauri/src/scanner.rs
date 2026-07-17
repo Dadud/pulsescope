@@ -192,7 +192,9 @@ async fn scanner_loop(
                             id: i,
                             frequency_hz: range.start_hz,
                             mode: range.mode.clone(),
-                            muted: false,
+                            // Monitoring is opt-in. Scans must never turn into
+                            // speaker static merely because the app launched.
+                            muted: true,
                             volume: 0.7,
                             audio_agc: true,
                             squelch_open: false,
