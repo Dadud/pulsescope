@@ -534,6 +534,7 @@ async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
     if let Some(cmd_tx) = cmd {
         let _ = cmd_tx.send(crate::scanner::ScannerCommand::Stop);
     }
+    s.0.audio.clear_queue();
     let _ = s.0.sidecars.kill_all().await;
     Json(json!({"ok": true}))
 }

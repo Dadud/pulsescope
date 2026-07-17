@@ -7,11 +7,17 @@
   let saving = $state(false);
   let saved = $state(false);
   let banks = $state<any[]>([]);
+  let devices = $state<any[]>([]);
+  let deviceError = $state('');
 
   onMount(async () => {
     try {
       cfg = await Api.settings();
       status = await Api.deviceStatus();
+      const deviceResult = await Api.devices();
+      devices = deviceResult.devices ?? [];
+      const active = devices.find((d) => d.key === `${status.driver === 'mock' ? 'driver=mock' : status.driver}`) ?? devices.find((d) => d.driver === status.driver);
+      if (active) { deviceKey = active.key; deviceLabel = active.label; }
       banks = await Api.banks();
     } catch (e) { console.warn(e); }
   });
@@ -26,7 +32,9 @@
   let deviceKey = $state('driver=mock');
   let deviceLabel = $state('Mock Source (Test Tones)');
   async function connect() {
-    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); } catch (e) { console.warn(e); }
+    deviceError = '';
+    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); }
+    catch (e) { deviceError = String(e); }
   }
   async function saveBank(bank: any) {
     try { const result = await Api.updateChannelBank(bank.name, { enabled: bank.enabled, dwell_ms: Number(bank.dwell_ms), hold_ms: Number(bank.hold_ms), max_vfos: Number(bank.max_vfos), squelch_db: Number(bank.squelch_db) }); const index = banks.findIndex((item) => item.name === bank.name); if (index >= 0) banks[index] = result.bank; } catch (e) { console.warn(e); }
@@ -44,10 +52,15 @@
       <div class="row"><span>Sample rate:</span><code>{(status.sample_rate / 1e6).toFixed(2)} Msps</code></div>
     {/if}
     <div class="row">
-      <input bind:value={deviceKey} placeholder="driver=rtlsdr,serial=…" style="flex:1" />
+      <select bind:value={deviceKey} aria-label="SDR device" onchange={() => { const d = devices.find((item) => item.key === deviceKey); if (d) deviceLabel = d.label; }} style="flex:1">
+        {#each devices as device}
+          <option value={device.key}>{device.label} · {device.key}</option>
+        {/each}
+      </select>
       <input bind:value={deviceLabel} placeholder="Label" style="flex:1" />
-      <button class="primary" onclick={connect}>Connect</button>
+      <button class="primary" onclick={connect}>{status?.connected ? 'Reconnect' : 'Connect'}</button>
     </div>
+    {#if deviceError}<div class="device-error" role="alert">{deviceError}</div>{/if}
   </section>
 
   <section class="card">
@@ -118,6 +131,7 @@
   .row label, .row span { width: 140px; color: var(--fg-dim); font-size: 12px; }
   .row b, .row code { font-family: var(--mono); }
   .ok { color: var(--ok); margin-left: 8px; }
+  .device-error { color: var(--danger); background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); border-radius: 4px; padding: 8px; font: 12px var(--mono); white-space: pre-wrap; }
   .bank-row { display: grid; grid-template-columns: 1.5fr 110px 110px 100px auto; gap: 6px; align-items: center; margin: 7px 0; }
   .bank-row label { color: var(--fg); font-size: 12px; }
   .bank-row input[type=number] { min-width: 0; }
