@@ -411,6 +411,9 @@ impl Db {
         Ok(self.conn().execute("DELETE FROM recording_annotations WHERE id=?1", [id])?)
     }
 
+    pub fn due_scheduled_jobs(&self, now_ms:i64)->anyhow::Result<Vec<ScheduledJob>> { let c=self.conn(); let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs WHERE enabled=1 AND next_run_ms IS NOT NULL AND next_run_ms<=?1 ORDER BY next_run_ms,id")?; let rows=q.query_map([now_ms],|r|Ok(ScheduledJob{id:Some(r.get(0)?),name:r.get(1)?,kind:r.get(2)?,payload_json:r.get(3)?,enabled:r.get::<_,i64>(4)?!=0,next_run_ms:r.get(5)?,last_run_ms:r.get(6)?,last_status:r.get(7)?,last_error:r.get(8)?,created_ms:r.get(9)?,updated_ms:r.get(10)?}))?; Ok(rows.collect::<Result<Vec<_>,_>>()?) }
+    pub fn mark_scheduled_job(&self,id:i64,status:&str,error:&str,enabled:bool,now_ms:i64)->anyhow::Result<()> { self.conn().execute("UPDATE scheduled_jobs SET enabled=?1,next_run_ms=NULL,last_run_ms=?2,last_status=?3,last_error=?4,updated_ms=?2 WHERE id=?5",rusqlite::params![enabled,now_ms,status,error,id])?;Ok(()) }
+
     pub fn list_scheduled_jobs(&self) -> anyhow::Result<Vec<ScheduledJob>> {
         let c=self.conn(); let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs ORDER BY next_run_ms IS NULL,next_run_ms,id")?;
         let rows=q.query_map([],|r|Ok(ScheduledJob{id:Some(r.get(0)?),name:r.get(1)?,kind:r.get(2)?,payload_json:r.get(3)?,enabled:r.get::<_,i64>(4)?!=0,next_run_ms:r.get(5)?,last_run_ms:r.get(6)?,last_status:r.get(7)?,last_error:r.get(8)?,created_ms:r.get(9)?,updated_ms:r.get(10)?}))?;

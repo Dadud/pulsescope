@@ -63,6 +63,7 @@ async fn main() {
         std::env::set_var("PULSESCOPE_AUDIO_OUTPUT", "0");
     }
     let app_state = AppState::new();
+    app_state.start_job_scheduler();
     let desktop_mode = !server_mode;
     if desktop_mode {
         // Give the desktop an immediate, silent live spectrum and VFO bank.

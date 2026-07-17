@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
@@ -96,6 +97,41 @@ impl AppState {
         let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone());
         let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
         *self.scanner.write() = Some(handle);
+    }
+
+    /// Poll and execute due one-shot scan jobs. Jobs intentionally need an
+    /// explicit duration so they cannot monopolize a receiver indefinitely.
+    pub fn start_job_scheduler(self: &Arc<Self>) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop { tick.tick().await; app.run_due_jobs(); }
+        });
+    }
+
+    fn run_due_jobs(self: &Arc<Self>) {
+        let now = crate::scanner::now_ms();
+        let Ok(jobs) = self.db.due_scheduled_jobs(now) else { return; };
+        for job in jobs {
+            let id = job.id.unwrap_or_default();
+            if job.kind != "scan" {
+                let _ = self.db.mark_scheduled_job(id, "unsupported", "executor currently supports scan jobs only", false, now);
+                continue;
+            }
+            let payload: serde_json::Value = match serde_json::from_str(&job.payload_json) { Ok(v) => v, Err(e) => { let _=self.db.mark_scheduled_job(id,"failed",&format!("invalid payload: {e}"),false,now); continue; } };
+            let Some(range_name) = payload.get("range_name").and_then(|v|v.as_str()) else { let _=self.db.mark_scheduled_job(id,"failed","scan job requires payload.range_name",false,now); continue; };
+            let duration_ms = payload.get("duration_ms").and_then(|v|v.as_u64()).unwrap_or(60_000).clamp(1_000, 3_600_000);
+            let range = self.config.read().scan_ranges.iter().find(|r|r.name==range_name).cloned();
+            let Some(range) = range else { let _=self.db.mark_scheduled_job(id,"failed","unknown scan range",false,now); continue; };
+            if let Some(handle)=self.scanner.read().as_ref() { let _=handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop); }
+            self.audio.clear_queue(); self.receiver_session.lock().release("scanner");
+            let owner=format!("job:{id}");
+            if let Err(error)=self.receiver_session.lock().claim(&owner,false) { let _=self.db.mark_scheduled_job(id,"blocked",&error,true,now); continue; }
+            if self.device.set_sample_rate(range.sample_rate_hz).is_err() || self.device.set_bandwidth(range.channel_bw_hz).is_err() || self.device.set_frequency(range.start_hz).is_err() { self.receiver_session.lock().release(&owner); let _=self.db.mark_scheduled_job(id,"failed","device configuration failed",false,now); continue; }
+            if let Some(handle)=self.scanner.read().as_ref() { let _=handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range }); } else { self.receiver_session.lock().release(&owner); let _=self.db.mark_scheduled_job(id,"failed","scanner runtime unavailable",false,now); continue; }
+            let _=self.db.mark_scheduled_job(id,"running","",false,now);
+            let app=self.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(duration_ms)).await; if let Some(handle)=app.scanner.read().as_ref(){let _=handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop);} app.audio.clear_queue(); app.receiver_session.lock().release(&owner); let _=app.db.mark_scheduled_job(id,"completed","",false,crate::scanner::now_ms()); });
+        }
     }
 
     pub fn default_data_dir() -> PathBuf {
