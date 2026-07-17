@@ -151,6 +151,21 @@ pub struct RecordingAnnotation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduledJob {
+    pub id: Option<i64>,
+    pub name: String,
+    pub kind: String,
+    pub payload_json: String,
+    pub enabled: bool,
+    pub next_run_ms: Option<i64>,
+    pub last_run_ms: Option<i64>,
+    pub last_status: String,
+    pub last_error: String,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpectrumOccupancy {
     pub frequency_bucket_hz: u64,
     pub time_bucket_15min: i64,
@@ -395,6 +410,14 @@ impl Db {
     pub fn delete_annotation(&self, id: i64) -> anyhow::Result<usize> {
         Ok(self.conn().execute("DELETE FROM recording_annotations WHERE id=?1", [id])?)
     }
+
+    pub fn list_scheduled_jobs(&self) -> anyhow::Result<Vec<ScheduledJob>> {
+        let c=self.conn(); let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs ORDER BY next_run_ms IS NULL,next_run_ms,id")?;
+        let rows=q.query_map([],|r|Ok(ScheduledJob{id:Some(r.get(0)?),name:r.get(1)?,kind:r.get(2)?,payload_json:r.get(3)?,enabled:r.get::<_,i64>(4)?!=0,next_run_ms:r.get(5)?,last_run_ms:r.get(6)?,last_status:r.get(7)?,last_error:r.get(8)?,created_ms:r.get(9)?,updated_ms:r.get(10)?}))?;
+        Ok(rows.collect::<Result<Vec<_>,_>>()?)
+    }
+    pub fn create_scheduled_job(&self, job:&ScheduledJob)->anyhow::Result<i64>{let c=self.conn();c.execute("INSERT INTO scheduled_jobs(name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",rusqlite::params![job.name,job.kind,job.payload_json,job.enabled,job.next_run_ms,job.last_run_ms,job.last_status,job.last_error,job.created_ms,job.updated_ms])?;Ok(c.last_insert_rowid())}
+    pub fn delete_scheduled_job(&self,id:i64)->anyhow::Result<usize>{Ok(self.conn().execute("DELETE FROM scheduled_jobs WHERE id=?1",[id])?)}
 
     pub fn list_blacklist(&self) -> anyhow::Result<Vec<BlacklistEntry>> {
         let c = self.conn();

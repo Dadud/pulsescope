@@ -136,5 +136,20 @@ CREATE TABLE IF NOT EXISTS recording_annotations (
     created_ms     INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    kind            TEXT NOT NULL, -- scan | recording | decode
+    payload_json    TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    next_run_ms     INTEGER,
+    last_run_ms     INTEGER,
+    last_status     TEXT NOT NULL DEFAULT 'pending',
+    last_error      TEXT NOT NULL DEFAULT '',
+    created_ms      INTEGER NOT NULL,
+    updated_ms      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due ON scheduled_jobs(enabled, next_run_ms);
+
 -- query planner stats
 ANALYZE;

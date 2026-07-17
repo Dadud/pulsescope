@@ -207,6 +207,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/scan/aero", get(scan_aero))
         .route("/scan/ble", get(scan_ble))
         .route("/scan/lora", get(scan_lora))
+        .route("/jobs", get(jobs_list).post(jobs_create))
+        .route("/jobs/:id", axum::routing::delete(jobs_delete))
         // ── recording ────────────────────────────────────────────────────
         .route("/recording/iq/capture", post(rec_iq_start))
         .route("/recording/iq/stop", post(rec_iq_stop))
@@ -584,6 +586,16 @@ async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
     let _ = s.0.sidecars.kill_all().await;
     Json(json!({"ok": true}))
 }
+
+#[derive(Deserialize)]
+struct JobCreateReq { name:String, kind:String, payload:Value, enabled:Option<bool>, next_run_ms:Option<i64> }
+async fn jobs_list(State(s): State<ApiState>) -> impl IntoResponse { match s.0.db.list_scheduled_jobs(){Ok(jobs)=>(StatusCode::OK,Json(json!({"jobs":jobs}))),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":error.to_string()})))} }
+async fn jobs_create(State(s): State<ApiState>, Json(req): Json<JobCreateReq>) -> impl IntoResponse {
+    if !matches!(req.kind.as_str(),"scan"|"recording"|"decode") { return (StatusCode::BAD_REQUEST,Json(json!({"error":"kind must be scan, recording, or decode"}))); }
+    let now=crate::scanner::now_ms(); let job=crate::db::ScheduledJob{id:None,name:req.name,kind:req.kind,payload_json:req.payload.to_string(),enabled:req.enabled.unwrap_or(true),next_run_ms:req.next_run_ms,last_run_ms:None,last_status:"pending".into(),last_error:String::new(),created_ms:now,updated_ms:now};
+    match s.0.db.create_scheduled_job(&job){Ok(id)=>(StatusCode::CREATED,Json(json!({"ok":true,"id":id}))),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":error.to_string()})))}
+}
+async fn jobs_delete(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse { match s.0.db.delete_scheduled_job(id){Ok(0)=>(StatusCode::NOT_FOUND,Json(json!({"ok":false,"error":"job not found"}))),Ok(_)=>(StatusCode::OK,Json(json!({"ok":true}))),Err(error)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":error.to_string()}))) } }
 
 async fn vfo_states(State(s): State<ApiState>) -> impl IntoResponse {
     let v = s.0.scanner.read().as_ref()
