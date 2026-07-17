@@ -112,6 +112,7 @@ impl AudioWorker {
                     for (dst, sample) in mixed.iter_mut().zip(pcm.iter()) { *dst += *sample * vfo.volume; }
                     active += 1;
                 }
+                if active == 0 { continue; }
                 if active > 1 { for sample in &mut mixed { *sample /= active as f32; } }
                 let decimated_rate = (effective_rate / decimation as u32).max(1);
                 let output = resample_linear(&mixed, decimated_rate, audio.sample_rate());
@@ -209,7 +210,9 @@ async fn scanner_loop(
                 ScannerCommand::Stop => {
                     state.lock().running = false;
                     state.lock().active_range = None;
+                    state.lock().vfo_states.clear();
                     active_range = None;
+                    let _ = events_tx.send(ScannerEvent::VfoStates(Vec::new()));
                     tracing::info!("scanner stopped");
                 }
                 ScannerCommand::SetVfoFrequency { id, frequency_hz } => {
