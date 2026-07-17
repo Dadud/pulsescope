@@ -325,6 +325,40 @@ pub enum BitOrder {
     MsbFirst,
 }
 
+/// Raw-IQ VDL2 front end. VDL Mode 2 uses differential 8-PSK at 31.5 ksym/s;
+/// this performs phase differencing, sector slicing and Gray-symbol expansion.
+/// The HDLC/FCS decoder remains responsible for rejecting bad frames.
+pub struct Vdl2IqDecoder {
+    decoder: Vdl2Decoder,
+    sample_rate: u32,
+    clock: u64,
+    phase_sum: f64,
+    previous: Option<(f32, f32)>,
+}
+
+impl Vdl2IqDecoder {
+    pub fn new(sample_rate: u32) -> Self { Self { decoder: Vdl2Decoder::new(), sample_rate, clock: 0, phase_sum: 0.0, previous: None } }
+    pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
+        for &(i, q) in samples {
+            if let Some((pi, pq)) = self.previous {
+                self.phase_sum += (q * pi - i * pq).atan2(i * pi + q * pq) as f64;
+                self.clock += 31_500;
+                if self.clock >= self.sample_rate as u64 {
+                    self.clock -= self.sample_rate as u64;
+                    let sector = ((self.phase_sum / (std::f64::consts::TAU / 8.0)).round() as i32).rem_euclid(8) as usize;
+                    // Differential 8-PSK Gray ordering: adjacent sectors differ by one bit.
+                    const GRAY: [u8; 8] = [0, 1, 3, 2, 6, 7, 5, 4];
+                    let symbol = GRAY[sector];
+                    self.decoder.feed_bits(&[(symbol & 4) != 0, (symbol & 2) != 0, (symbol & 1) != 0]);
+                    self.phase_sum = 0.0;
+                }
+            }
+            self.previous = Some((i, q));
+        }
+    }
+    pub fn take_messages(&mut self) -> Vec<Vdl2Message> { self.decoder.take_messages() }
+}
+
 /// A complete ACARS block, including its integrity result.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcarsMessage {
