@@ -1,3 +1,41 @@
+<script module lang="ts">
+  import { Api as LiveApi } from '$lib/api';
+
+  let liveHubStarted = false;
+  let liveHubBusy = false;
+  let liveHubTick = 0;
+  /** A singleton browser polling hub. It survives an accidental duplicate
+   * Svelte mount; views only subscribe/unsubscribe from its events. */
+  function ensureLiveHub() {
+    if (liveHubStarted || typeof window === 'undefined') return;
+    liveHubStarted = true;
+    const poll = async () => {
+      if (liveHubBusy) return;
+      liveHubBusy = true;
+      try {
+        const spectrum = await LiveApi.spectrum();
+        window.dispatchEvent(new CustomEvent('pulsescope:spectrum', { detail: spectrum }));
+        if (++liveHubTick % 4 === 0) {
+          const [status, vfos] = await Promise.all([LiveApi.deviceStatus(), LiveApi.vfoStates()]);
+          window.dispatchEvent(new CustomEvent('pulsescope:runtime', { detail: { status, vfos } }));
+        }
+      } catch (error) {
+        window.dispatchEvent(new CustomEvent('pulsescope:poll-error', { detail: String(error) }));
+      } finally { liveHubBusy = false; }
+    };
+    void poll();
+    // requestAnimationFrame remains active for a foreground phone/browser
+    // dashboard, unlike timer intervals which Chromium can freeze after a
+    // handful of callbacks when the page loses scheduler priority.
+    let lastPollAt = 0;
+    const frame = (now: number) => {
+      if (now - lastPollAt >= 250) { lastPollAt = now; void poll(); }
+      window.requestAnimationFrame(frame);
+    };
+    window.requestAnimationFrame(frame);
+  }
+</script>
+
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { Api, openEvents, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
@@ -54,18 +92,37 @@
     if (!browser) return;
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
-    let poll: number | undefined;
-    let statePoll: number | undefined;
+    const onSpectrum = (event: Event) => {
+      const spectrum = (event as CustomEvent).detail;
+      activeRange = spectrum?.range ?? activeRange;
+      scanRunning = Boolean(spectrum?.running);
+      if (Array.isArray(spectrum?.bins) && spectrum.bins.length) {
+        spectrumError = '';
+        void applySpectrum(spectrum.bins);
+      }
+    };
+    const onRuntime = (event: Event) => {
+      const { status, vfos: nextVfos } = (event as CustomEvent).detail;
+      deviceLabel = status.label; connected = status.connected;
+      centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
+      sampleRateHz = Number(status.sample_rate ?? sampleRateHz); vfos = nextVfos;
+    };
+    const onPollError = (event: Event) => { spectrumError = (event as CustomEvent).detail; };
+    window.addEventListener('pulsescope:spectrum', onSpectrum);
+    window.addEventListener('pulsescope:runtime', onRuntime);
+    window.addEventListener('pulsescope:poll-error', onPollError);
+    ensureLiveHub();
     void (async () => {
       await loadInitial();
-      // Start the reliable HTTP frame path before the optional socket.
-      poll = window.setInterval(() => { void pollSpectrum(); }, 250);
-      statePoll = window.setInterval(() => { void pollRuntime(); }, 1000);
-      await Promise.all([pollSpectrum(), pollRuntime()]);
       try { ws = openEvents(handleEvent); }
-      catch (e) { console.warn('event ws unavailable; using spectrum polling', e); }
+      catch (e) { console.warn('event ws unavailable; singleton polling remains active', e); }
     })();
-    return () => { if (poll !== undefined) window.clearInterval(poll); if (statePoll !== undefined) window.clearInterval(statePoll); ws?.close(); ws = null; };
+    return () => {
+      window.removeEventListener('pulsescope:spectrum', onSpectrum);
+      window.removeEventListener('pulsescope:runtime', onRuntime);
+      window.removeEventListener('pulsescope:poll-error', onPollError);
+      ws?.close(); ws = null;
+    };
   });
 
   // Even when the route is mounted by the hash router without a
