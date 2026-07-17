@@ -62,6 +62,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/device/connect", post(device_connect))
         .route("/device/disconnect", post(device_disconnect))
         .route("/device/status", get(device_status))
+        .route("/device/capabilities", get(device_capabilities))
+        .route("/device/control", post(device_control))
         .route("/device/gain", post(device_gain))
         .route("/device/frequency", post(device_frequency))
         .route("/device/sample_rate", post(device_sample_rate))
@@ -418,6 +420,17 @@ async fn device_disconnect(State(s): State<ApiState>) -> impl IntoResponse {
 
 async fn device_status(State(s): State<ApiState>) -> impl IntoResponse {
     Json(serde_json::to_value(s.0.device.status()).unwrap())
+}
+
+async fn device_capabilities(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(serde_json::to_value(s.0.device.capabilities()).unwrap())
+}
+#[derive(Deserialize)] struct DeviceControlReq { control: String, value: String }
+async fn device_control(State(s): State<ApiState>, Json(req): Json<DeviceControlReq>) -> impl IntoResponse {
+    match s.0.device.set_control(&req.control, &req.value) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok":true,"capabilities":s.0.device.capabilities()}))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":error.to_string(),"capabilities":s.0.device.capabilities()}))),
+    }
 }
 
 #[derive(Deserialize)] struct GainReq { gain: String }
