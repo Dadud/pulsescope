@@ -170,6 +170,16 @@
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
     }
 
+    // Active VFO markers make tuning context visible even on a wide span.
+    for (const vfo of vfos) {
+      const normalized = (vfo.frequency_hz - (centerFreqHz - sampleRateHz / 2)) / sampleRateHz;
+      if (normalized < 0 || normalized > 1) continue;
+      const x = normalized * w;
+      ctx.strokeStyle = vfo.muted ? '#64748b' : '#f59e0b';
+      ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.strokeStyle = '#94a3b8'; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h); ctx.stroke(); ctx.setLineDash([]);
+
     // Spectrum trace. Use the immediate canvas path API: it works in both
     // Chromium's Tauri webview and normal browsers without Path2D cloning.
     const n = spectrumBins.length;
@@ -231,6 +241,17 @@
   async function stopScan() {
     scanRunning = false; activeRange = null;
     await Api.scanStop();
+  }
+
+  async function tuneFromSpectrum(event: MouseEvent) {
+    const target = event.currentTarget as HTMLCanvasElement;
+    if (!vfos.length || sampleRateHz <= 0) return;
+    const rect = target.getBoundingClientRect();
+    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const frequencyHz = Math.round(centerFreqHz - sampleRateHz / 2 + fraction * sampleRateHz);
+    await Api.vfoFrequency(vfos[0].id, frequencyHz);
+    notice = `VFO ${vfos[0].id} tuned to ${fmtHz(frequencyHz)}`;
+    window.setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 1800);
   }
 
   async function setVfoFrequency(id: number, event: Event) {
@@ -347,7 +368,7 @@
 
     <div class="spectrum-wrap card">
       <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
-      <canvas bind:this={canvas}></canvas>
+      <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune VFO 0"></canvas>
       <h2 class="waterfall-title">Waterfall · live FFT history</h2>
       <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
     </div>
