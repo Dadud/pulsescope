@@ -54,10 +54,15 @@ async fn main() {
     // Bundled SDR runtime — ships with the app, no PothosSDR install needed
     setup_sdr_runtime();
 
-    let app_state = AppState::new();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let server_mode = args.iter().any(|a| a == "--server" || a == "--api") || std::env::var("PULSESCOPE_API_ONLY").is_ok();
+    // A LAN/headless server must not open physical speakers merely because a
+    // remote browser starts a scan. Desktop mode retains local audio; server
+    // audio is opt-in for explicit lab use.
+    if server_mode && std::env::var("PULSESCOPE_AUDIO_OUTPUT").is_err() {
+        std::env::set_var("PULSESCOPE_AUDIO_OUTPUT", "0");
+    }
+    let app_state = AppState::new();
     let desktop_mode = !server_mode;
     let port: u16 = std::env::var("PULSESCOPE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8765);
     let bind: String = std::env::var("PULSESCOPE_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());

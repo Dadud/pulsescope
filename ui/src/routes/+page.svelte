@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { Api, openEvents, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
   import { browser } from '$app/environment';
 
@@ -9,6 +9,7 @@
   let messages: DecodedMessage[] = $state([]);
   let signalHistory: any[] = $state([]);
   let spectrumBins: number[] = $state([]);
+  let spectrumError = $state('');
   let deviceLabel = $state('—');
   let connected = $state(false);
   let scanRunning = $state(false);
@@ -45,10 +46,18 @@
   ];
 
 
-  onMount(async () => {
+  onMount(() => {
     if (!browser) return;
-    await loadInitial();
-    ws = openEvents(handleEvent);
+    let poll: number | undefined;
+    void (async () => {
+      await loadInitial();
+      // Start the reliable HTTP frame path before the optional socket.
+      poll = window.setInterval(() => { void pollSpectrum(); }, 250);
+      await pollSpectrum();
+      try { ws = openEvents(handleEvent); }
+      catch (e) { console.warn('event ws unavailable; using spectrum polling', e); }
+    })();
+    return () => { if (poll !== undefined) window.clearInterval(poll); ws?.close(); ws = null; };
   });
 
   // Even when the route is mounted by the hash router without a
@@ -56,7 +65,11 @@
   // on the client. Use it as a belt-and-suspenders to ensure the
   // initial data load always runs at least once in the browser.
   $effect(() => {
-    if (browser && banks.length === 0 && !notice.startsWith('init')) {
+    if (!browser) return;
+    // The static-router hydration path reliably runs this effect. Seed the
+    // first FFT frame here; the interval below maintains it afterwards.
+    void pollSpectrum();
+    if (banks.length === 0 && !notice.startsWith('init')) {
       notice = 'init…';
       loadInitial().finally(() => { notice = notice === 'init…' ? '' : notice; });
     }
@@ -79,12 +92,29 @@
     }
   }
 
+  async function applySpectrum(bins: number[]) {
+    spectrumBins = bins;
+    await tick();
+    drawSpectrum();
+    drawWaterfall();
+  }
+
+  async function pollSpectrum() {
+    try {
+      const spectrum = await Api.spectrum();
+      if (Array.isArray(spectrum?.bins) && spectrum.bins.length > 0) {
+        spectrumError = '';
+        await applySpectrum(spectrum.bins);
+      }
+    } catch (e) {
+      spectrumError = String(e);
+    }
+  }
+
   function handleEvent(ev: ScannerEvent) {
     switch (ev.kind) {
       case 'Spectrum':
-        spectrumBins = ev.data.bins;
-        drawSpectrum();
-        drawWaterfall();
+        void applySpectrum(ev.data.bins);
         break;
       case 'VfoStates':
         vfos = ev.data;
@@ -113,28 +143,21 @@
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
     }
 
-    // Spectrum trace
+    // Spectrum trace. Use the immediate canvas path API: it works in both
+    // Chromium's Tauri webview and normal browsers without Path2D cloning.
     const n = spectrumBins.length;
     const min = -100, max = 0;
-    const path = new Path2D();
+    ctx.beginPath();
     for (let i = 0; i < n; i++) {
-      const x = (i / (n - 1)) * w;
+      const x = (i / Math.max(1, n - 1)) * w;
       const norm = Math.max(0, Math.min(1, (spectrumBins[i] - min) / (max - min)));
       const y = h - norm * h;
-      if (i === 0) path.moveTo(x, y);
-      else path.lineTo(x, y);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
-    // fill under curve
-    const fill = new Path2D(path);
-    fill.lineTo(w, h); fill.lineTo(0, h); fill.closePath();
-    const grad = ctx.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, 'rgba(45,212,191,0.4)');
-    grad.addColorStop(1, 'rgba(45,212,191,0)');
-    ctx.fillStyle = grad; ctx.fill(fill);
-
     ctx.strokeStyle = '#2dd4bf';
     ctx.lineWidth = 1.5;
-    ctx.stroke(path);
+    ctx.stroke();
   }
 
   function drawWaterfall() {
@@ -287,7 +310,7 @@
     </div>
 
     <div class="spectrum-wrap card">
-      <h2>Spectrum</h2>
+      <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
       <canvas bind:this={canvas} width="900" height="220"></canvas>
       <h2 class="waterfall-title">Waterfall · live FFT history</h2>
       <canvas class="waterfall" bind:this={waterfallCanvas} width="900" height="180" aria-label="Live waterfall from FFT bins"></canvas>
@@ -424,16 +447,17 @@
   .status-pill.on { color: var(--ok); }
   .settings-link { color: var(--fg); text-decoration: none; font-size: 12px; border-left: 1px solid var(--line-strong); padding-left: 8px; }
 
-  .center { display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+  .center { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }
   .device-strip { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-size: 13px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 8px; }
   .dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .vfo-summary { color: var(--fg-dim); }
 
-  .spectrum-wrap { flex: 1; min-height: 200px; }
-  .spectrum-wrap canvas { width: 100%; height: 200px; background: var(--bg); border-radius: 4px; }
-  .waterfall-title { margin-top: 10px !important; }
-  .spectrum-wrap canvas.waterfall { height: 180px; image-rendering: pixelated; }
+  .spectrum-wrap { flex: 0 0 auto; min-height: 300px; }
+  .spectrum-wrap canvas { display: block; width: 100%; height: 120px; background: var(--bg); border-radius: 4px; }
+  .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
+  .waterfall-title { margin-top: 8px !important; }
+  .spectrum-wrap canvas.waterfall { height: 120px; image-rendering: pixelated; }
 
   .signal-history { max-height: 190px; overflow: hidden; }
   .history-head { display: flex; justify-content: space-between; align-items: center; }

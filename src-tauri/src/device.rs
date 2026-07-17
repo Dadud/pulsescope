@@ -122,21 +122,38 @@ fn discover_soapy_util() -> Vec<DiscoveredDevice> {
     //   4. Platform conventions: PothosSDR (Windows), /usr/local/lib/SoapySDR (Linux/macOS via BrewPkg dir), /usr/bin
     //   5. Bare name `SoapySDRUtil{,exe}` resolved via PATH
     let candidates: Vec<std::path::PathBuf> = build_soapy_discovery_paths();
-
-    let out = candidates.into_iter().find_map(|exe| {
-        if exe.exists() { Command::new(exe).arg("--find").output().ok() } else { None }
-    });
-    let Some(out) = out else { return vec![]; };
-    // Soapy warnings/info can be emitted on stderr; device records are
-    // normally stdout, but combine both so discovery is not locale/runtime
-    // dependent.
-    let mut combined = out.stdout;
-    combined.extend_from_slice(&out.stderr);
-    let text = String::from_utf8_lossy(&combined);
-    let mut rows=Vec::new(); let mut props=std::collections::BTreeMap::new();
-    let mut push=|p:&mut std::collections::BTreeMap<String,String>, rows:&mut Vec<DiscoveredDevice>| { if let Some(driver)=p.get("driver").cloned() { if driver!="audio" { let mut kv=vec![format!("driver={driver}")]; if let Some(serial)=p.get("serial"){kv.push(format!("serial={serial}"));} else if let Some(id)=p.get("device_id"){kv.push(format!("device_id={id}"));} let key=kv.join(","); let label=p.get("label").cloned().unwrap_or_else(||driver.clone()); rows.push(DiscoveredDevice{driver:driver.clone(),label,key,hardware_key:driver}); } } p.clear(); };
-    for line in text.lines() { let line=line.trim(); if line.starts_with("Found device ") { push(&mut props,&mut rows); } else if let Some((k,v))=line.split_once(" = ") { props.insert(k.to_string(),v.to_string()); } }
-    push(&mut props,&mut rows); rows
+    let mut rows=Vec::new();
+    for exe in candidates {
+        let Ok(out) = Command::new(&exe).arg("--find").output() else { continue; };
+        // Soapy warnings/info can be emitted on stderr; device records are
+        // normally stdout, but combine both so discovery is runtime independent.
+        let mut combined = out.stdout;
+        combined.extend_from_slice(&out.stderr);
+        let text = String::from_utf8_lossy(&combined);
+        let mut props=std::collections::BTreeMap::new();
+        let mut push=|p:&mut std::collections::BTreeMap<String,String>, rows:&mut Vec<DiscoveredDevice>| {
+            if let Some(driver)=p.get("driver").cloned() {
+                if driver!="audio" {
+                    let mut kv=vec![format!("driver={driver}")];
+                    if let Some(serial)=p.get("serial"){kv.push(format!("serial={serial}"));}
+                    else if let Some(id)=p.get("device_id"){kv.push(format!("device_id={id}"));}
+                    let key=kv.join(",");
+                    if !rows.iter().any(|d| d.key == key) {
+                        let label=p.get("label").cloned().unwrap_or_else(||driver.clone());
+                        rows.push(DiscoveredDevice{driver:driver.clone(),label,key,hardware_key:driver});
+                    }
+                }
+            }
+            p.clear();
+        };
+        for line in text.lines() {
+            let line=line.trim();
+            if line.starts_with("Found device ") { push(&mut props,&mut rows); }
+            else if let Some((k,v))=line.split_once(" = ") { props.insert(k.to_string(),v.to_string()); }
+        }
+        push(&mut props,&mut rows);
+    }
+    rows
 }
 
 pub struct DeviceLayer { state: Arc<Mutex<DeviceStatus>>, phase: Arc<Mutex<f32>>, #[cfg(feature="soapysdr")] hardware: Arc<Mutex<Option<soapy::Hardware>>> }
