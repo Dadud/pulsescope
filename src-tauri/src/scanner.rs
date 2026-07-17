@@ -21,6 +21,7 @@ use crate::config::{ScanRange, ScannerConfig};
 use crate::demod::{decimate_average, decimate_complex_average, demodulate, low_pass_complex, mix_down, resample_linear, Mode};
 use crate::device::DeviceLayer;
 use crate::db::Db;
+use crate::adsb::AdsbDecoder;
 use crate::signal_id;
 use crate::state::{RecordingState, ScannerEvent};
 use crate::sidecar::SidecarRegistry;
@@ -177,6 +178,7 @@ async fn scanner_loop(
     let window: Vec<f32> = apodize::hanning_iter(cfg.fft_size).map(|x| x as f32).collect();
     let mut last_signal_hit = Instant::now() - Duration::from_secs(2);
     let mut smoothed_noise_floor: Option<f32> = None;
+    let mut native_adsb = AdsbDecoder::new(device.status().sample_rate);
 
     loop {
         // Drain commands
@@ -254,6 +256,40 @@ async fn scanner_loop(
         };
         sidecars.feed_iq(&iq).await;
         recording.lock().write_iq(&iq);
+
+        // Native ADS-B path: only activate on an ADS-B range, so ordinary
+        // scanner traffic never pays the Mode S preamble scan cost.
+        let native_adsb_active = active_range.as_ref()
+            .map(|r| r.name.to_ascii_lowercase().contains("ads-b") || r.name.to_ascii_lowercase().contains("adsb"))
+            .unwrap_or(false);
+        if native_adsb_active {
+            if native_adsb.is_none() {
+                native_adsb = AdsbDecoder::new(device.status().sample_rate);
+            }
+            if let Some(decoder) = native_adsb.as_mut() {
+                decoder.feed_iq(&iq);
+                for message in decoder.take_messages() {
+                    let content = message.callsign.clone()
+                        .or_else(|| message.altitude_ft.map(|a| format!("{a} ft")))
+                        .unwrap_or_default();
+                    let decoded = crate::db::DecodedMessage {
+                        id: None,
+                        frequency_hz: 1_090_000_000,
+                        protocol: "adsb".into(),
+                        message_type: message.message_type.clone(),
+                        address: message.icao.clone(),
+                        function_code: format!("DF{}", message.df),
+                        content: content.clone(),
+                        raw: message.raw_hex.clone(),
+                        encryption: "none".into(),
+                        timestamp_ms: now_ms(),
+                    };
+                    let _ = db.insert_decoded_message(&decoded);
+                    let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
+                }
+            }
+        }
+
         // Window complex IQ in-place, then transform and shift DC to the center.
         for ((dst, sample), w) in spectrum.iter_mut().zip(iq.iter()).zip(window.iter()) {
             *dst = *sample * *w;
