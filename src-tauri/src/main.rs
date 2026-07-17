@@ -64,6 +64,10 @@ async fn main() {
     }
     let app_state = AppState::new();
     let desktop_mode = !server_mode;
+    if desktop_mode {
+        // Give the desktop an immediate, silent live spectrum and VFO bank.
+        app_state.start_default_monitor();
+    }
     let port: u16 = std::env::var("PULSESCOPE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8765);
     let bind: String = std::env::var("PULSESCOPE_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
 

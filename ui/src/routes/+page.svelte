@@ -321,6 +321,7 @@
         <span class="dot" class:on={connected}></span>
         {deviceLabel}
       </div>
+      <div class="receiver-readout"><span>RECEIVER</span><strong>{centerFreqHz > 0 ? fmtHz(centerFreqHz) : 'Tuning…'}</strong><small>{sampleRateHz > 0 ? `${fmtHz(sampleRateHz)} span` : ''}</small></div>
       <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
     </div>
 
