@@ -9,10 +9,6 @@
   let banks = $state<any[]>([]);
   let devices = $state<any[]>([]);
   let deviceError = $state('');
-  let caps = $state<any>(null);
-
-  async function refreshCaps() { try { caps = await Api.deviceCapabilities(); } catch (e) { deviceError = String(e); } }
-  async function control(name: string, value: string | number | boolean) { try { const r = await Api.deviceControl(name, value); caps = r.capabilities; } catch (e) { deviceError = String(e); } }
 
   onMount(async () => {
     try {
@@ -37,7 +33,7 @@
   let deviceLabel = $state('Mock Source (Test Tones)');
   async function connect() {
     deviceError = '';
-    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); await refreshCaps(); }
+    try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); }
     catch (e) { deviceError = String(e); }
   }
   async function saveBank(bank: any) {
