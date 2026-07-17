@@ -1299,14 +1299,23 @@ async fn audio_network_status(State(s): State<ApiState>) -> impl IntoResponse { 
 
 #[derive(Deserialize)] struct AnnotationReq { recording_path: String, offset_ms: i64, text: String }
 async fn playback_start(State(s): State<ApiState>, Json(req): Json<RecordingReq>) -> impl IntoResponse {
-    let Some(path) = req.path else { return (StatusCode::BAD_REQUEST, Json(json!({"error":"path is required"}))); };
+    let claim = s.0.receiver_session.lock().claim("playback", false);
+    if let Err(error) = claim {
+        let session = s.0.receiver_session.lock().clone();
+        return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":error,"session":session})));
+    }
+    let Some(path) = req.path else {
+        s.0.receiver_session.lock().release("playback");
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"path is required"})));
+    };
     match crate::capture::PlaybackReader::open(std::path::PathBuf::from(&path)) {
         Ok(reader) => { *s.0.playback.lock() = Some(reader); (StatusCode::OK, Json(json!({"ok":true,"path":path,"format":"cf32-le"}))) }
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error":error.to_string()}))),
+        Err(error) => { s.0.receiver_session.lock().release("playback"); (StatusCode::BAD_REQUEST, Json(json!({"error":error.to_string()}))) },
     }
 }
 async fn playback_stop(State(s): State<ApiState>) -> impl IntoResponse {
     let previous = s.0.playback.lock().take().map(|r| r.status());
+    s.0.receiver_session.lock().release("playback");
     (StatusCode::OK, Json(json!({"ok":true,"previous":previous})))
 }
 async fn playback_status(State(s): State<ApiState>) -> impl IntoResponse {
