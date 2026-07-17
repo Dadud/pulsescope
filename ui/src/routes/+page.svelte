@@ -596,6 +596,22 @@
   .log-content { color: var(--fg); word-break: break-word; white-space: pre-wrap; }
   .log-empty { color: var(--fg-dim); padding: 16px; text-align: center; }
 
+  @media (max-width: 760px) {
+    .scanner-layout { display:flex; flex-direction:column; height:auto; min-height:100%; padding:6px; gap:6px; overflow:visible; }
+    .banks { max-height:220px; order:2; }
+    .center { order:1; overflow:visible; padding:0; }
+    .command-strip { align-items:flex-start; flex-direction:column; gap:6px; }
+    .device-strip { gap:6px; flex-wrap:wrap; padding:7px; }
+    .receiver-readout { order:-1; width:100%; justify-content:space-between; }
+    .spectrum-wrap { min-height:0; }
+    .spectrum-wrap canvas, .spectrum-wrap canvas.waterfall { height:110px; }
+    .waterfall-head { flex-wrap:wrap; }
+    .waterfall-head h2 { min-width:180px; }
+    .vfo-grid { grid-template-columns:1fr; }
+    .signal-history { display:none; }
+    .log { display:none; }
+  }
+
   /* Short laptop / WebView windows: live RF controls beat an empty log dock. */
   @media (max-height: 850px) {
     .scanner-layout { grid-template-rows: minmax(0, 1fr); }
