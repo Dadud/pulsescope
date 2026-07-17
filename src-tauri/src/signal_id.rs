@@ -76,7 +76,7 @@ const BAND_PRIORS: &[BandPrior] = &[
     BandPrior { start: 902_000_000, end: 928_000_000, protocol: "ism_915", family: "ism", decoder: "rtl_433", confidence: 0.75, reason: "ISM 915 MHz", proprietary: false },
     BandPrior { start: 929_000_000, end: 932_000_000, protocol: "pocsag", family: "paging", decoder: "multimon-ng", confidence: 0.78, reason: "900 MHz paging", proprietary: false },
     BandPrior { start: 978_000_000, end: 978_200_000, protocol: "uat978", family: "aviation", decoder: "dump978", confidence: 0.90, reason: "ADS-B UAT 978", proprietary: false },
-    BandPrior { start: 1_090_000_000, end: 1_090_200_000, protocol: "adsb", family: "aviation", decoder: "dump1090", confidence: 0.95, reason: "ADS-B 1090 MHz", proprietary: false },
+    BandPrior { start: 1_090_000_000, end: 1_090_200_000, protocol: "adsb", family: "aviation", decoder: "native_adsb", confidence: 0.95, reason: "ADS-B 1090 MHz", proprietary: false },
     BandPrior { start: 1_525_000_000, end: 1_559_000_000, protocol: "inmarsat", family: "satellite", decoder: "satdump", confidence: 0.70, reason: "Inmarsat L-band DL", proprietary: false },
     BandPrior { start: 1_574_000_000, end: 1_577_000_000, protocol: "gps_l1", family: "satellite", decoder: "satdump", confidence: 0.80, reason: "GPS L1 / Galileo E1", proprietary: false },
     BandPrior { start: 1_616_000_000, end: 1_626_500_000, protocol: "iridium", family: "satellite", decoder: "iridiumlive", confidence: 0.82, reason: "Iridium band", proprietary: false },
@@ -509,7 +509,7 @@ fn family_for(proto: &str) -> &'static str {
 
 fn decoder_for(proto: &str) -> &'static str {
     match proto {
-        "adsb" => "dump1090",
+        "adsb" => "native_adsb",
         "uat978" => "dump978",
         "acars" => "acarsdec",
         "vdl2" => "dumpvdl2",
@@ -559,7 +559,7 @@ mod tests {
         let c = classify(1_090_000_000, 1_000_000, "am", "ADS-B 1090", 25.0, None);
         assert_eq!(c.sub_protocol, "adsb");
         assert!(c.top_confidence >= 0.9);
-        assert_eq!(c.candidates[0].decoder, "dump1090");
+        assert_eq!(c.candidates[0].decoder, "native_adsb");
     }
 
     #[test]

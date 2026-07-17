@@ -14,6 +14,7 @@ pub mod scanner;
 pub mod sidecar;
 pub mod depmanager;
 pub mod aprs;
+pub mod adsb;
 pub mod voice_decoder;
 pub mod signal_id;
 pub mod state;

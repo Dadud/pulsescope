@@ -588,7 +588,7 @@ async fn decoded_messages(State(s): State<ApiState>, Query(q): Query<LimitQ>) ->
 async fn signal_id_fps(State(s): State<ApiState>) -> Json<Value> {
     // Built-in band fingerprints derived from the classifier priors + recent classified hits.
     let mut fps = vec![
-        json!({"id":"adsb-1090","name":"ADS-B 1090","family":"aviation","mode":"am","frequency_hz":1090000000u64,"bandwidth_hz":1000000,"confidence":0.95,"decoder":"dump1090"}),
+        json!({"id":"adsb-1090","name":"ADS-B 1090 (native Rust)","family":"aviation","mode":"am","frequency_hz":1090000000u64,"bandwidth_hz":1000000,"confidence":0.95,"decoder":"native_adsb"}),
         json!({"id":"ais-162","name":"AIS Marine","family":"marine","mode":"nfm","frequency_hz":161975000u64,"bandwidth_hz":25000,"confidence":0.92,"decoder":"AIS-catcher"}),
         json!({"id":"noaa-wx","name":"NOAA Weather Radio","family":"weather","mode":"nfm","frequency_hz":162550000u64,"bandwidth_hz":25000,"confidence":0.88,"decoder":"native_nfm"}),
         json!({"id":"fm-broadcast","name":"FM Broadcast + RDS","family":"analog","mode":"wfm","frequency_hz":100700000u64,"bandwidth_hz":200000,"confidence":0.85,"decoder":"native_wfm_rds"}),
@@ -917,7 +917,61 @@ async fn scan_status(State(s): State<ApiState>) -> impl IntoResponse {
     Json(json!({"running": runtime.as_ref().map(|v| v.running).unwrap_or(false), "locked": runtime.as_ref().map(|v| v.scan_locked).unwrap_or(false), "range": runtime.and_then(|v| v.active_range)}))
 }
 
-async fn scan_adsb(State(_s): State<ApiState>) -> Json<Value> { Json(json!({"available":false,"messages":[],"reason":"ADS-B decoder transport is not implemented"})) }
+async fn scan_adsb(State(s): State<ApiState>) -> Json<Value> {
+    // Native Mode S / ADS-B 1090ES decoder — no dump1090/readsb process needed.
+    let status = s.0.device.status();
+    if !status.connected {
+        return Json(json!({
+            "available": true,
+            "native": true,
+            "messages": [],
+            "reason": "no device connected — connect an SDR and tune near 1090 MHz"
+        }));
+    }
+    let rate = status.sample_rate.max(1);
+    // Capture ~0.5 s of IQ; ADS-B works best at ≥2 Msps
+    let count = ((rate as f64) * 0.5) as usize;
+    let count = count.clamp(8192, 4_000_000);
+    match s.0.device.read_iq(count) {
+        Ok(iq) => {
+            let msgs = crate::adsb::decode_iq_chunk(&iq, rate);
+            // Persist high-confidence messages
+            for m in &msgs {
+                let dm = crate::db::DecodedMessage {
+                    id: None,
+                    frequency_hz: 1_090_000_000,
+                    protocol: "adsb".into(),
+                    message_type: m.message_type.clone(),
+                    address: m.icao.clone(),
+                    function_code: format!("DF{}", m.df),
+                    content: m.callsign.clone().unwrap_or_else(|| {
+                        m.altitude_ft
+                            .map(|a| format!("{a} ft"))
+                            .unwrap_or_default()
+                    }),
+                    raw: m.raw_hex.clone(),
+                    encryption: "none".into(),
+                    timestamp_ms: crate::scanner::now_ms(),
+                };
+                let _ = s.0.db.insert_decoded_message(&dm);
+            }
+            Json(json!({
+                "available": true,
+                "native": true,
+                "sample_rate_hz": rate,
+                "samples": iq.len(),
+                "message_count": msgs.len(),
+                "messages": msgs,
+            }))
+        }
+        Err(e) => Json(json!({
+            "available": true,
+            "native": true,
+            "messages": [],
+            "error": e.to_string()
+        })),
+    }
+}
 async fn scan_ais(State(_s): State<ApiState>) -> Json<Value> { Json(json!({"available":false,"messages":[],"reason":"AIS decoder transport is not implemented"})) }
 async fn scan_acars(State(_s): State<ApiState>) -> Json<Value> { Json(json!({"available":false,"messages":[],"reason":"ACARS decoder transport is not implemented"})) }
 async fn scan_aero(State(s): State<ApiState>) -> Json<Value> { scan_acars(State(s)).await }
