@@ -215,6 +215,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/recording/iq/playback/status", get(playback_status))
         .route("/recordings/annotations", get(rec_annotations).post(rec_annotation_new))
         .route("/recordings/annotations/:id", get(rec_annotation_one).delete(rec_annotation_delete).put(rec_annotation_update))
+        .route("/iq/consumers", get(iq_consumers))
         .route("/iq/network/start", post(iq_network_start))
         .route("/iq/network/stop", post(iq_network_stop))
         .route("/iq/network/status", get(iq_network_status))
@@ -579,6 +580,7 @@ async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
         let _ = cmd_tx.send(crate::scanner::ScannerCommand::Stop);
     }
     s.0.audio.clear_queue();
+    s.0.receiver_session.lock().release("scanner");
     let _ = s.0.sidecars.kill_all().await;
     Json(json!({"ok": true}))
 }
@@ -1274,6 +1276,13 @@ async fn digital_voice_check() -> impl IntoResponse {
 }
 
 #[derive(Deserialize)] struct IqNetworkReq { target: String }
+async fn iq_consumers(State(s): State<ApiState>) -> Json<Value> {
+    let consumers = s.0.scanner.read().as_ref()
+        .map(|scanner| scanner.iq_consumers.iter().map(|ring| ring.status()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Json(json!({"consumers":consumers}))
+}
+
 async fn iq_network_start(State(s): State<ApiState>, Json(req): Json<IqNetworkReq>) -> impl IntoResponse { match req.target.parse::<SocketAddr>() { Ok(target) => match s.0.iq_network.start(target) { Ok(()) => Json(json!({"ok":true,"status":s.0.iq_network.status()})), Err(e) => Json(json!({"ok":false,"error":e.to_string()})) }, Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")})) } }
 async fn iq_network_stop(State(s): State<ApiState>) -> impl IntoResponse { s.0.iq_network.stop(); Json(json!({"ok":true,"status":s.0.iq_network.status()})) }
 async fn iq_network_status(State(s): State<ApiState>) -> impl IntoResponse { Json(s.0.iq_network.status()) }

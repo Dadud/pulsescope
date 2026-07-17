@@ -77,6 +77,10 @@ impl AppState {
     /// explicitly unmutes a VFO.
     pub fn start_default_monitor(self: &Arc<Self>) {
         if !self.device.status().connected || self.scanner.read().is_some() { return; }
+        if let Err(error) = self.receiver_session.lock().claim("scanner", false) {
+            tracing::warn!(%error, "default monitor could not claim receiver");
+            return;
+        }
         let range: Option<ScanRange> = self.config.read().scan_ranges.iter()
             .find(|r| r.name == "FM Broadcast")
             .cloned()
@@ -84,7 +88,10 @@ impl AppState {
         let Some(range) = range else { return; };
         if self.device.set_sample_rate(range.sample_rate_hz).is_err()
             || self.device.set_bandwidth(range.channel_bw_hz).is_err()
-            || self.device.set_frequency(range.start_hz).is_err() { return; }
+            || self.device.set_frequency(range.start_hz).is_err() {
+            self.receiver_session.lock().release("scanner");
+            return;
+        }
         let cfg = self.config.read().scanner.clone();
         let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone());
         let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
