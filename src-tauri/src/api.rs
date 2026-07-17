@@ -1043,6 +1043,12 @@ async fn native_pocsag_decode(Json(v): Json<Value>) -> Json<Value> {
 }
 
 async fn native_uat_decode(Json(v): Json<Value>) -> Json<Value> {
+    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
+        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| { let a=p.as_array()?; Some((a.first()?.as_f64()? as f32,a.get(1)?.as_f64()? as f32)) }).collect();
+        let rate=v.get("sample_rate_hz").and_then(|x|x.as_u64()).unwrap_or(2_000_000) as u32;
+        let mut d=crate::aviation::UatIqDecoder::new(rate); d.push_iq(&samples); let messages=d.take_messages();
+        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"uat978","message_count":messages.len(),"messages":messages}));
+    }
     let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
     if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
     let mut decoder = crate::aviation::UatDecoder::new();
@@ -1052,6 +1058,12 @@ async fn native_uat_decode(Json(v): Json<Value>) -> Json<Value> {
 }
 
 async fn native_acars_decode(Json(v): Json<Value>) -> Json<Value> {
+    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
+        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| { let a=p.as_array()?; Some((a.first()?.as_f64()? as f32,a.get(1)?.as_f64()? as f32)) }).collect();
+        let rate=v.get("sample_rate_hz").and_then(|x|x.as_u64()).unwrap_or(12500) as u32;
+        let mut d=crate::aviation::AcarsIqDecoder::new(rate,crate::aviation::BitOrder::MsbFirst,false); d.push_iq(&samples); let messages=d.take_messages();
+        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"acars","message_count":messages.len(),"messages":messages}));
+    }
     let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
     if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
     let mut decoder = crate::aviation::AcarsDecoder::new(crate::aviation::BitOrder::MsbFirst, false);
