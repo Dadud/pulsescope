@@ -54,8 +54,6 @@ async fn main() {
     // Bundled SDR runtime — ships with the app, no PothosSDR install needed
     setup_sdr_runtime();
 
-    let app_state = AppState::new();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let server_mode = args.iter().any(|a| a == "--server" || a == "--api") || std::env::var("PULSESCOPE_API_ONLY").is_ok();
     // A LAN/headless server must not open physical speakers merely because a

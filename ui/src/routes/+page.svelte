@@ -47,10 +47,18 @@
   ];
 
 
-  onMount(async () => {
+  onMount(() => {
     if (!browser) return;
-    await loadInitial();
-    ws = openEvents(handleEvent);
+    let poll: number | undefined;
+    void (async () => {
+      await loadInitial();
+      // Start the reliable HTTP frame path before the optional socket.
+      poll = window.setInterval(() => { void pollSpectrum(); }, 250);
+      await pollSpectrum();
+      try { ws = openEvents(handleEvent); }
+      catch (e) { console.warn('event ws unavailable; using spectrum polling', e); }
+    })();
+    return () => { if (poll !== undefined) window.clearInterval(poll); ws?.close(); ws = null; };
   });
 
   // Even when the route is mounted by the hash router without a
@@ -58,7 +66,11 @@
   // on the client. Use it as a belt-and-suspenders to ensure the
   // initial data load always runs at least once in the browser.
   $effect(() => {
-    if (browser && banks.length === 0 && !notice.startsWith('init')) {
+    if (!browser) return;
+    // The static-router hydration path reliably runs this effect. Seed the
+    // first FFT frame here; the interval below maintains it afterwards.
+    void pollSpectrum();
+    if (banks.length === 0 && !notice.startsWith('init')) {
       notice = 'init…';
       loadInitial().finally(() => { notice = notice === 'init…' ? '' : notice; });
     }
@@ -79,52 +91,6 @@
       console.warn('init failed', e);
       notice = `init failed: ${e}`;
     }
-  }
-
-  // Even when the route is mounted by the hash router without a
-  // visible navigation event, Svelte 5 runes still fire `$effect`
-  // on the client. Use it as a belt-and-suspenders to ensure the
-  // initial data load always runs at least once in the browser.
-  $effect(() => {
-    if (!browser) return;
-    // The static-router hydration path reliably runs this effect. Seed the
-    // first FFT frame here; the interval below maintains it afterwards.
-    void pollSpectrum();
-    if (banks.length === 0 && !notice.startsWith('init')) {
-      notice = 'init…';
-      loadInitial().finally(() => { notice = notice === 'init…' ? '' : notice; });
-    }
-  });
-
-  async function loadInitial() {
-    if (initialLoadInFlight || banks.length > 0) return;
-    initialLoadInFlight = true;
-    let lastError: unknown;
-    // Tauri creates the webview before its setup hook's local API listener is
-    // necessarily bound. Retry the short startup race instead of leaving the
-    // dashboard permanently stuck at "Failed to fetch".
-    for (let attempt = 0; attempt < 8; attempt++) {
-      try {
-        const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
-        banks = bankList;
-        deviceLabel = status.label;
-        connected = status.connected;
-        centerFreqHz = Number(status.center_freq_hz ?? 0);
-        sampleRateHz = Number(status.sample_rate ?? 1);
-        signalHistory = storedSignals;
-        vfos = await Api.vfoStates();
-        messages = await Api.decodedMessages(100);
-        notice = '';
-        initialLoadInFlight = false;
-        return;
-      } catch (e) {
-        lastError = e;
-        await new Promise((resolve) => window.setTimeout(resolve, 150 * (attempt + 1)));
-      }
-    }
-    initialLoadInFlight = false;
-    console.warn('init failed', lastError);
-    notice = `init failed: ${lastError}`;
   }
 
   async function applySpectrum(bins: number[]) {
