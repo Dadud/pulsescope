@@ -647,6 +647,8 @@ async fn spectrum(State(s): State<ApiState>) -> impl IntoResponse {
         "bins": runtime.latest_spectrum,
         "range": runtime.active_range,
         "running": runtime.running,
+        "frame_sequence": runtime.frames_processed,
+        "frame_timestamp_ms": runtime.latest_spectrum_ms,
     }))
 }
 

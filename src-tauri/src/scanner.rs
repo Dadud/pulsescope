@@ -40,6 +40,8 @@ pub struct ScannerRuntimeState {
     pub vfo_states: Vec<VfoState>,
     pub latest_spectrum: Vec<f32>,
     pub frames_processed: u64,
+    /// Backend capture timestamp for the currently retained FFT frame.
+    pub latest_spectrum_ms: i64,
     pub scan_locked: bool,
 }
 
@@ -367,6 +369,7 @@ async fn scanner_loop(
             let mut runtime = state.lock();
             runtime.latest_spectrum = bins.clone();
             runtime.frames_processed = runtime.frames_processed.saturating_add(1);
+            runtime.latest_spectrum_ms = now_ms();
             let peak = bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             for vfo in runtime.vfo_states.iter_mut() {
                 vfo.strength_db = peak;
