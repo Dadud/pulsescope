@@ -149,6 +149,8 @@ export const Api = {
   deviceConnect: (key: string, label?: string) => postJson('/device/connect', { key, label }),
   deviceDisconnect: () => postJson('/device/disconnect'),
   deviceStatus: () => getJson('/device/status'),
+  deviceCapabilities: () => getJson('/device/capabilities'),
+  deviceControl: (control: string, value: string | number | boolean) => postJson('/device/control', { control, value: String(value) }),
   decodedMessages: (limit = 100) => getJson<DecodedMessage[]>(`/decoded_messages?limit=${limit}`),
   signalEvents: (limit = 100) => getJson<any[]>(`/signal_events?limit=${limit}`),
   channelBankScanConfig: () => getJson('/channels/bank-scan-config'),
