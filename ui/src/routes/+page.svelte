@@ -22,6 +22,7 @@
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
+  let initialLoadInFlight = false;
 
   const filteredBanks = $derived(
     banks.filter((b) => b.name.toLowerCase().includes(filter.toLowerCase()))
@@ -76,20 +77,34 @@
   });
 
   async function loadInitial() {
-    try {
-      const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
-      banks = bankList;
-      deviceLabel = status.label;
-      connected = status.connected;
-      centerFreqHz = Number(status.center_freq_hz ?? 0);
-      sampleRateHz = Number(status.sample_rate ?? 1);
-      signalHistory = storedSignals;
-      vfos = await Api.vfoStates();
-      messages = await Api.decodedMessages(100);
-    } catch (e) {
-      console.warn('init failed', e);
-      notice = `init failed: ${e}`;
+    if (initialLoadInFlight || banks.length > 0) return;
+    initialLoadInFlight = true;
+    let lastError: unknown;
+    // Tauri creates the webview before its setup hook's local API listener is
+    // necessarily bound. Retry the short startup race instead of leaving the
+    // dashboard permanently stuck at "Failed to fetch".
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
+        banks = bankList;
+        deviceLabel = status.label;
+        connected = status.connected;
+        centerFreqHz = Number(status.center_freq_hz ?? 0);
+        sampleRateHz = Number(status.sample_rate ?? 1);
+        signalHistory = storedSignals;
+        vfos = await Api.vfoStates();
+        messages = await Api.decodedMessages(100);
+        notice = '';
+        initialLoadInFlight = false;
+        return;
+      } catch (e) {
+        lastError = e;
+        await new Promise((resolve) => window.setTimeout(resolve, 150 * (attempt + 1)));
+      }
     }
+    initialLoadInFlight = false;
+    console.warn('init failed', lastError);
+    notice = `init failed: ${lastError}`;
   }
 
   async function applySpectrum(bins: number[]) {
