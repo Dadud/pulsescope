@@ -114,6 +114,16 @@ impl AppState {
         let Ok(jobs) = self.db.due_scheduled_jobs(now) else { return; };
         for job in jobs {
             let id = job.id.unwrap_or_default();
+            if job.kind == "recording" {
+                let payload: serde_json::Value = match serde_json::from_str(&job.payload_json) { Ok(v) => v, Err(e) => { let _=self.db.mark_scheduled_job(id,"failed",&format!("invalid payload: {e}"),false,now); continue; } };
+                let duration_ms = payload.get("duration_ms").and_then(|v|v.as_u64()).unwrap_or(60_000).clamp(1_000, 3_600_000);
+                let path = self.data_dir.join("recordings").join(format!("job-{id}-{now}.cf32"));
+                if std::fs::create_dir_all(path.parent().expect("recordings parent")).is_err() || self.recording.lock().file.is_some() { let _=self.db.mark_scheduled_job(id,"blocked","recording already active or output directory unavailable",false,now); continue; }
+                match File::create(&path) { Ok(file) => { let mut rec=self.recording.lock(); rec.file=Some(file); rec.path=Some(path); rec.started_ms=Some(now); rec.samples_written=0; rec.bytes_written=0; rec.write_error=None; }, Err(e) => { let _=self.db.mark_scheduled_job(id,"failed",&e.to_string(),false,now); continue; } }
+                let _=self.db.mark_scheduled_job(id,"running","",false,now);
+                let app=self.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(duration_ms)).await; let status=app.recording.lock().stop(); let error=status.get("write_error").and_then(|v|v.as_str()).unwrap_or(""); let _=app.db.mark_scheduled_job(id,if error.is_empty(){"completed"}else{"failed"},error,false,crate::scanner::now_ms()); });
+                continue;
+            }
             if job.kind != "scan" {
                 let _ = self.db.mark_scheduled_job(id, "unsupported", "executor currently supports scan jobs only", false, now);
                 continue;
