@@ -976,6 +976,17 @@ async fn scan_adsb(State(s): State<ApiState>) -> Json<Value> {
     }
 }
 async fn native_ais_decode(Json(v): Json<Value>) -> Json<Value> {
+    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
+        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| {
+            let a = p.as_array()?;
+            Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
+        }).collect();
+        if samples.is_empty() { return Json(json!({"ok":false,"error":"iq must contain [I,Q] samples"})); }
+        let rate = v.get("sample_rate_hz").and_then(|x| x.as_f64()).unwrap_or(48000.0);
+        let mut decoder = match crate::ais::IqDecoder::new(rate) { Ok(d) => d, Err(e) => return Json(json!({"ok":false,"error":e})) };
+        let messages: Vec<Value> = decoder.push_iq(&samples).into_iter().filter_map(|r| r.ok()).filter_map(|m| serde_json::to_value(m).ok()).collect();
+        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"ais","message_count":messages.len(),"messages":messages}));
+    }
     let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
     if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
     let mut decoder = crate::ais::HdlcDecoder::new();
@@ -985,6 +996,18 @@ async fn native_ais_decode(Json(v): Json<Value>) -> Json<Value> {
 }
 
 async fn native_pocsag_decode(Json(v): Json<Value>) -> Json<Value> {
+    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
+        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| {
+            let a = p.as_array()?;
+            Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
+        }).collect();
+        if samples.is_empty() { return Json(json!({"ok":false,"error":"iq must contain [I,Q] samples"})); }
+        let rate = v.get("sample_rate_hz").and_then(|x| x.as_u64()).unwrap_or(128000) as u32;
+        let baud = match v.get("baud").and_then(|x| x.as_u64()).unwrap_or(1200) { 2400 => crate::pocsag::PocsagBaud::Baud2400, _ => crate::pocsag::PocsagBaud::Baud1200 };
+        let mut decoder = crate::pocsag::IqDecoder::new(rate, baud);
+        let mut messages = decoder.push_iq(&samples); messages.extend(decoder.flush());
+        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"pocsag","message_count":messages.len(),"messages":messages,"corrected_codewords":decoder.corrected_words(),"rejected_codewords":decoder.rejected_words()}));
+    }
     let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
     if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
     let baud = match v.get("baud").and_then(|x| x.as_u64()).unwrap_or(1200) { 2400 => crate::pocsag::PocsagBaud::Baud2400, _ => crate::pocsag::PocsagBaud::Baud1200 };
