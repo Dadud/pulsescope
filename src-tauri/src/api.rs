@@ -22,7 +22,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use axum::http::{header, Method};
+use axum::http::{header, HeaderValue, Method};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::state::{AppState, ScannerEvent};
@@ -322,6 +322,9 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
     );
+    // LAN clients must never retain an old SSR shell with dead controls.
+    // Hashed JS is cheap to refetch; correctness beats a stale dashboard.
+    top = top.layer(axum::middleware::from_fn(no_store));
 
     match (listener, tls) {
         (Some(listener), None) => { serve_plain(listener, top).await?; }
@@ -330,6 +333,15 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         (None, None) => unreachable!("server mode requires a listener"),
     }
     Ok(())
+}
+
+async fn no_store(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store, max-age=0"));
+    response
 }
 
 async fn serve_plain(listener: tokio::net::TcpListener, router: Router) -> anyhow::Result<()> {
