@@ -11,7 +11,13 @@ function authHeader(): Record<string, string> {
   let token: string | null = null;
   try {
     const qs = new URLSearchParams(window.location.search);
-    const t = qs.get('token');
+    let t = qs.get('token');
+    // Hash routing is used by the static UI; accept #/settings?token=...
+    // as well as the normal ?token=... form so LAN links are hard to misuse.
+    if (!t) {
+      const hashQuery = window.location.hash.split('?')[1];
+      if (hashQuery) t = new URLSearchParams(hashQuery).get('token');
+    }
     if (t) { token = t; localStorage.setItem('pst', t); }
     else { token = localStorage.getItem('pst'); }
   } catch {}
