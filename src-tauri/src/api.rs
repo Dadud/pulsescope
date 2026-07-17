@@ -617,7 +617,7 @@ async fn decoded_messages(State(s): State<ApiState>, Query(q): Query<LimitQ>) ->
 async fn signal_id_fps(State(s): State<ApiState>) -> Json<Value> {
     // Built-in band fingerprints derived from the classifier priors + recent classified hits.
     let mut fps = vec![
-        json!({"id":"adsb-1090","name":"ADS-B 1090","family":"aviation","mode":"am","frequency_hz":1090000000u64,"bandwidth_hz":1000000,"confidence":0.95,"decoder":"dump1090"}),
+        json!({"id":"adsb-1090","name":"ADS-B 1090 (native Rust)","family":"aviation","mode":"am","frequency_hz":1090000000u64,"bandwidth_hz":1000000,"confidence":0.95,"decoder":"native_adsb"}),
         json!({"id":"ais-162","name":"AIS Marine","family":"marine","mode":"nfm","frequency_hz":161975000u64,"bandwidth_hz":25000,"confidence":0.92,"decoder":"AIS-catcher"}),
         json!({"id":"noaa-wx","name":"NOAA Weather Radio","family":"weather","mode":"nfm","frequency_hz":162550000u64,"bandwidth_hz":25000,"confidence":0.88,"decoder":"native_nfm"}),
         json!({"id":"fm-broadcast","name":"FM Broadcast + RDS","family":"analog","mode":"wfm","frequency_hz":100700000u64,"bandwidth_hz":200000,"confidence":0.85,"decoder":"native_wfm_rds"}),
@@ -1001,93 +1001,7 @@ async fn scan_adsb(State(s): State<ApiState>) -> Json<Value> {
         })),
     }
 }
-async fn native_ais_decode(Json(v): Json<Value>) -> Json<Value> {
-    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
-        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| {
-            let a = p.as_array()?;
-            Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
-        }).collect();
-        if samples.is_empty() { return Json(json!({"ok":false,"error":"iq must contain [I,Q] samples"})); }
-        let rate = v.get("sample_rate_hz").and_then(|x| x.as_f64()).unwrap_or(48000.0);
-        let mut decoder = match crate::ais::IqDecoder::new(rate) { Ok(d) => d, Err(e) => return Json(json!({"ok":false,"error":e})) };
-        let messages: Vec<Value> = decoder.push_iq(&samples).into_iter().filter_map(|r| r.ok()).filter_map(|m| serde_json::to_value(m).ok()).collect();
-        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"ais","message_count":messages.len(),"messages":messages}));
-    }
-    let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
-    if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
-    let mut decoder = crate::ais::HdlcDecoder::new();
-    let results = decoder.push_bits(bits);
-    let messages: Vec<Value> = results.into_iter().filter_map(|r| r.ok()).filter_map(|m| serde_json::to_value(m).ok()).collect();
-    Json(json!({"ok":true,"native":true,"protocol":"ais","message_count":messages.len(),"messages":messages}))
-}
-
-async fn native_pocsag_decode(Json(v): Json<Value>) -> Json<Value> {
-    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
-        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| {
-            let a = p.as_array()?;
-            Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
-        }).collect();
-        if samples.is_empty() { return Json(json!({"ok":false,"error":"iq must contain [I,Q] samples"})); }
-        let rate = v.get("sample_rate_hz").and_then(|x| x.as_u64()).unwrap_or(128000) as u32;
-        let baud = match v.get("baud").and_then(|x| x.as_u64()).unwrap_or(1200) { 2400 => crate::pocsag::PocsagBaud::Baud2400, _ => crate::pocsag::PocsagBaud::Baud1200 };
-        let mut decoder = crate::pocsag::IqDecoder::new(rate, baud);
-        let mut messages = decoder.push_iq(&samples); messages.extend(decoder.flush());
-        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"pocsag","message_count":messages.len(),"messages":messages,"corrected_codewords":decoder.corrected_words(),"rejected_codewords":decoder.rejected_words()}));
-    }
-    let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
-    if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
-    let baud = match v.get("baud").and_then(|x| x.as_u64()).unwrap_or(1200) { 2400 => crate::pocsag::PocsagBaud::Baud2400, _ => crate::pocsag::PocsagBaud::Baud1200 };
-    let mut decoder = crate::pocsag::PocsagDecoder::new(baud.value() * 8, baud);
-    let messages = decoder.push_bits(&bits);
-    Json(json!({"ok":true,"native":true,"protocol":"pocsag","message_count":messages.len(),"messages":messages,"corrected_codewords":decoder.corrected_words(),"rejected_codewords":decoder.rejected_words()}))
-}
-
-async fn native_uat_decode(Json(v): Json<Value>) -> Json<Value> {
-    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
-        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| { let a=p.as_array()?; Some((a.first()?.as_f64()? as f32,a.get(1)?.as_f64()? as f32)) }).collect();
-        let rate=v.get("sample_rate_hz").and_then(|x|x.as_u64()).unwrap_or(2_000_000) as u32;
-        let mut d=crate::aviation::UatIqDecoder::new(rate); d.push_iq(&samples); let messages=d.take_messages();
-        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"uat978","message_count":messages.len(),"messages":messages}));
-    }
-    let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
-    if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
-    let mut decoder = crate::aviation::UatDecoder::new();
-    decoder.feed_bits(&bits);
-    let messages = decoder.take_messages();
-    Json(json!({"ok":true,"native":true,"protocol":"uat978","message_count":messages.len(),"messages":messages}))
-}
-
-async fn native_acars_decode(Json(v): Json<Value>) -> Json<Value> {
-    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
-        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| { let a=p.as_array()?; Some((a.first()?.as_f64()? as f32,a.get(1)?.as_f64()? as f32)) }).collect();
-        let rate=v.get("sample_rate_hz").and_then(|x|x.as_u64()).unwrap_or(12500) as u32;
-        let mut d=crate::aviation::AcarsIqDecoder::new(rate,crate::aviation::BitOrder::MsbFirst,false); d.push_iq(&samples); let messages=d.take_messages();
-        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"acars","message_count":messages.len(),"messages":messages}));
-    }
-    let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
-    if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
-    let mut decoder = crate::aviation::AcarsDecoder::new(crate::aviation::BitOrder::MsbFirst, false);
-    decoder.feed_bits(&bits);
-    let messages = decoder.take_messages();
-    Json(json!({"ok":true,"native":true,"protocol":"acars","message_count":messages.len(),"messages":messages}))
-}
-
-async fn native_vdl2_decode(Json(v): Json<Value>) -> Json<Value> {
-    if let Some(iq) = v.get("iq").and_then(|x| x.as_array()) {
-        let samples: Vec<(f32, f32)> = iq.iter().filter_map(|p| { let a=p.as_array()?; Some((a.first()?.as_f64()? as f32,a.get(1)?.as_f64()? as f32)) }).collect();
-        let rate=v.get("sample_rate_hz").and_then(|x|x.as_u64()).unwrap_or(1_000_000) as u32;
-        let mut d=crate::aviation::Vdl2IqDecoder::new(rate); d.push_iq(&samples); let messages=d.take_messages();
-        return Json(json!({"ok":true,"native":true,"input":"iq","protocol":"vdl2","message_count":messages.len(),"messages":messages,"note":"D8PSK slicer active; physical VDL2 FEC/carrier recovery is limited"}));
-    }
-    let bits: Vec<bool> = v.get("bits").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
-    if bits.is_empty() { return Json(json!({"ok":false,"error":"bits[] is required"})); }
-    let mut decoder = crate::aviation::Vdl2Decoder::new();
-    decoder.feed_bits(&bits);
-    let messages = decoder.take_messages();
-    Json(json!({"ok":true,"native":true,"protocol":"vdl2","message_count":messages.len(),"messages":messages}))
-}
-
-async fn scan_ais(State(_s): State<ApiState>) -> Json<Value> { Json(json!({"available":true,"native":true,"messages":[],"reason":"native AIS parser is ready; live GMSK channel integration remains to be wired"})) }
+async fn scan_ais(State(_s): State<ApiState>) -> Json<Value> { Json(json!({"available":false,"messages":[],"reason":"AIS decoder transport is not implemented"})) }
 async fn scan_acars(State(_s): State<ApiState>) -> Json<Value> { Json(json!({"available":false,"messages":[],"reason":"ACARS decoder transport is not implemented"})) }
 async fn scan_aero(State(s): State<ApiState>) -> Json<Value> { scan_acars(State(s)).await }
 async fn scan_ble(State(s): State<ApiState>) -> Json<Value> { ble_devices(State(s)).await }
