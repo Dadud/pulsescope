@@ -73,22 +73,23 @@ async fn main() {
     let has_auth = auth_token.is_some();
     let has_ui = ui_dir.is_some();
 
-    let cfg = ServeConfig {
-        addr: SocketAddr::from((
-            bind.parse::<std::net::IpAddr>().unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
-            port,
-        )),
-        ui_dir,
-        auth_token,
-        tls,
-    };
-
-    let app_clone: Arc<AppState> = app_state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::api::serve(cfg, app_clone.clone()).await {
-            tracing::error!(error = %e, "API server error");
-        }
-    });
+    if server_mode {
+        let cfg = ServeConfig {
+            addr: SocketAddr::from((
+                bind.parse::<std::net::IpAddr>().unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
+                port,
+            )),
+            ui_dir,
+            auth_token,
+            tls,
+        };
+        let app_clone: Arc<AppState> = app_state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::api::serve(cfg, app_clone).await {
+                tracing::error!(error = %e, "API server error");
+            }
+        });
+    }
 
     tracing::info!(
         bind = %bind,
