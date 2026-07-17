@@ -46,6 +46,22 @@ mod soapy {
         pub fn set_rate(&mut self,rate:u32)->anyhow::Result<()> { unsafe { if !self.stream.is_null(){check("deactivate RX stream",s::SoapySDRDevice_deactivateStream(self.device,self.stream,0,0))?; check("close RX stream",s::SoapySDRDevice_closeStream(self.device,self.stream))?; self.stream=ptr::null_mut();} check("set sample rate",s::SoapySDRDevice_setSampleRate(self.device,s::SOAPY_SDR_RX as i32,0,rate as f64))?; check("setup CF32 RX stream",s::SoapySDRDevice_setupStream(self.device,&mut self.stream,s::SOAPY_SDR_RX as i32,s::SOAPY_SDR_CF32.as_ptr().cast(),ptr::null(),0,ptr::null()))?; if let Err(e)=check("activate RX stream",s::SoapySDRDevice_activateStream(self.device,self.stream,0,0,0)){let _=s::SoapySDRDevice_closeStream(self.device,self.stream);self.stream=ptr::null_mut();return Err(e);} Ok(()) } }
         pub fn set_bandwidth(&mut self,bw:u32)->anyhow::Result<()> { check("set bandwidth",unsafe{s::SoapySDRDevice_setBandwidth(self.device,s::SOAPY_SDR_RX as i32,0,bw as f64)}) }
         pub fn set_gain(&mut self,gain:f64)->anyhow::Result<()> { check("set gain",unsafe{s::SoapySDRDevice_setGainMode(self.device,s::SOAPY_SDR_RX as i32,0,false)})?; check("set gain",unsafe{s::SoapySDRDevice_setGain(self.device,s::SOAPY_SDR_RX as i32,0,gain)}) }
+        pub fn apply_safe_defaults(&mut self) -> anyhow::Result<()> { unsafe {
+            let dir=s::SOAPY_SDR_RX as i32;
+            if s::SoapySDRDevice_hasGainMode(self.device,dir,0) { check("enable AGC",s::SoapySDRDevice_setGainMode(self.device,dir,0,true))?; }
+            if s::SoapySDRDevice_hasDCOffsetMode(self.device,dir,0) { check("enable DC offset auto",s::SoapySDRDevice_setDCOffsetMode(self.device,dir,0,true))?; }
+            if s::SoapySDRDevice_hasIQBalanceMode(self.device,dir,0) { check("enable IQ balance auto",s::SoapySDRDevice_setIQBalanceMode(self.device,dir,0,true))?; }
+            // SDRplay exposes these as Soapy vendor settings. Apply only when
+            // present; other hardware retains its own driver defaults.
+            for (key, value) in [("iqcorr_ctrl", "true"), ("agc_setpoint", "-30"), ("rfgain_sel", "1")] {
+                let key_c=CString::new(key).unwrap();
+                if !s::SoapySDRDevice_readSetting(self.device,key_c.as_ptr()).is_null() {
+                    let value_c=CString::new(value).unwrap();
+                    check("apply receiver default",s::SoapySDRDevice_writeSetting(self.device,key_c.as_ptr(),value_c.as_ptr()))?;
+                }
+            }
+            Ok(())
+        }}
         pub fn capabilities(&self) -> DeviceCapabilities { unsafe {
             let mut c=DeviceCapabilities{connected:true,..Default::default()}; let dir=s::SOAPY_SDR_RX as i32;
             c.agc_supported=s::SoapySDRDevice_hasGainMode(self.device,dir,0); c.agc_enabled=c.agc_supported&&s::SoapySDRDevice_getGainMode(self.device,dir,0);
