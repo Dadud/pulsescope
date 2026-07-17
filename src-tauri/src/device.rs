@@ -13,6 +13,19 @@ pub struct DiscoveredDevice { pub driver: String, pub label: String, pub key: St
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeviceStatus { pub connected: bool, pub driver: String, pub label: String, pub sample_rate: u32, pub center_freq_hz: u64, pub ppm_correction: f32, pub gain: String, pub bias_tee_on: bool, pub saturation: bool }
 
+/// Capability report comes from the currently opened SoapySDR RX chain. UI
+/// renders these dynamically; there is no driver-name-specific knob list.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GainStage { pub name: String, pub value_db: f64, pub min_db: f64, pub max_db: f64, pub step_db: f64 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DeviceCapabilities {
+    pub connected: bool, pub agc_supported: bool, pub agc_enabled: bool,
+    pub gain_stages: Vec<GainStage>, pub antennas: Vec<String>, pub antenna: String,
+    pub dc_offset_auto_supported: bool, pub dc_offset_auto: bool,
+    pub iq_balance_auto_supported: bool, pub iq_balance_auto: bool,
+    pub frequency_correction_supported: bool, pub frequency_correction_ppm: f64,
+}
+
 #[cfg(feature = "soapysdr")]
 mod soapy {
     use super::*;
@@ -31,6 +44,14 @@ mod soapy {
         pub fn set_rate(&mut self,rate:u32)->anyhow::Result<()> { unsafe { if !self.stream.is_null(){check("deactivate RX stream",s::SoapySDRDevice_deactivateStream(self.device,self.stream,0,0))?; check("close RX stream",s::SoapySDRDevice_closeStream(self.device,self.stream))?; self.stream=ptr::null_mut();} check("set sample rate",s::SoapySDRDevice_setSampleRate(self.device,s::SOAPY_SDR_RX as i32,0,rate as f64))?; check("setup CF32 RX stream",s::SoapySDRDevice_setupStream(self.device,&mut self.stream,s::SOAPY_SDR_RX as i32,s::SOAPY_SDR_CF32.as_ptr().cast(),ptr::null(),0,ptr::null()))?; if let Err(e)=check("activate RX stream",s::SoapySDRDevice_activateStream(self.device,self.stream,0,0,0)){let _=s::SoapySDRDevice_closeStream(self.device,self.stream);self.stream=ptr::null_mut();return Err(e);} Ok(()) } }
         pub fn set_bandwidth(&mut self,bw:u32)->anyhow::Result<()> { check("set bandwidth",unsafe{s::SoapySDRDevice_setBandwidth(self.device,s::SOAPY_SDR_RX as i32,0,bw as f64)}) }
         pub fn set_gain(&mut self,gain:f64)->anyhow::Result<()> { check("set gain",unsafe{s::SoapySDRDevice_setGainMode(self.device,s::SOAPY_SDR_RX as i32,0,false)})?; check("set gain",unsafe{s::SoapySDRDevice_setGain(self.device,s::SOAPY_SDR_RX as i32,0,gain)}) }
+        pub fn capabilities(&self) -> DeviceCapabilities { unsafe {
+            let mut c=DeviceCapabilities{connected:true,..Default::default()}; let dir=s::SOAPY_SDR_RX as i32;
+            c.agc_supported=s::SoapySDRDevice_hasGainMode(self.device,dir,0); c.agc_enabled=c.agc_supported&&s::SoapySDRDevice_getGainMode(self.device,dir,0);
+            let mut n=0usize; let p=s::SoapySDRDevice_listGains(self.device,dir,0,&mut n); for i in 0..n { let name=CStr::from_ptr(*p.add(i)).to_string_lossy().into_owned(); let key=CString::new(name.as_str()).unwrap(); let r=s::SoapySDRDevice_getGainElementRange(self.device,dir,0,key.as_ptr()); c.gain_stages.push(GainStage{name,value_db:s::SoapySDRDevice_getGainElement(self.device,dir,0,key.as_ptr()),min_db:r.minimum,max_db:r.maximum,step_db:r.step}); } if !p.is_null(){s::SoapySDRStrings_clear(&mut (p as *mut *mut c_char),n);}
+            let mut n=0usize; let p=s::SoapySDRDevice_listAntennas(self.device,dir,0,&mut n); for i in 0..n { c.antennas.push(CStr::from_ptr(*p.add(i)).to_string_lossy().into_owned()); } if !p.is_null(){s::SoapySDRStrings_clear(&mut (p as *mut *mut c_char),n);} c.antenna=string(s::SoapySDRDevice_getAntenna(self.device,dir,0));
+            c.dc_offset_auto_supported=s::SoapySDRDevice_hasDCOffsetMode(self.device,dir,0); c.dc_offset_auto=c.dc_offset_auto_supported&&s::SoapySDRDevice_getDCOffsetMode(self.device,dir,0); c.iq_balance_auto_supported=s::SoapySDRDevice_hasIQBalanceMode(self.device,dir,0); c.iq_balance_auto=c.iq_balance_auto_supported&&s::SoapySDRDevice_getIQBalanceMode(self.device,dir,0); c.frequency_correction_supported=s::SoapySDRDevice_hasFrequencyCorrection(self.device,dir,0); if c.frequency_correction_supported{c.frequency_correction_ppm=s::SoapySDRDevice_getFrequencyCorrection(self.device,dir,0);} c
+        }}
+        pub fn set_control(&mut self, control:&str, value:&str)->anyhow::Result<()> { unsafe { let dir=s::SOAPY_SDR_RX as i32; match control { "agc"=>check("set AGC",s::SoapySDRDevice_setGainMode(self.device,dir,0,value=="true")), "dc_offset_auto"=>check("set DC auto",s::SoapySDRDevice_setDCOffsetMode(self.device,dir,0,value=="true")), "iq_balance_auto"=>check("set IQ auto",s::SoapySDRDevice_setIQBalanceMode(self.device,dir,0,value=="true")), "frequency_correction_ppm"=>check("set frequency correction",s::SoapySDRDevice_setFrequencyCorrection(self.device,dir,0,value.parse()?)), "antenna"=>{let v=CString::new(value)?;check("set antenna",s::SoapySDRDevice_setAntenna(self.device,dir,0,v.as_ptr()))}, _ if control.starts_with("gain:")=>{let n=CString::new(&control[5..])?;check("disable AGC",s::SoapySDRDevice_setGainMode(self.device,dir,0,false))?;check("set gain stage",s::SoapySDRDevice_setGainElement(self.device,dir,0,n.as_ptr(),value.parse()?))}, _=>Err(anyhow::anyhow!("unsupported control: {control}")) } } }
     }
     #[cfg(test)] mod tests { use super::*; #[test] fn live_sdrplay_rsp1b_cf32_iq() { let _hardware_guard = crate::device::LIVE_HARDWARE_LOCK.lock().unwrap(); eprintln!("stage=enumerate"); let found=super::super::DeviceLayer::discover(); assert!(found.iter().any(|d|d.driver=="sdrplay"),"RSP1B missing from discovery: {found:?}"); let key = super::super::DeviceLayer::discover().into_iter().find(|d| d.driver == "sdrplay").expect("RSP1B missing from discovery").key; eprintln!("stage=open"); let mut dev=Hardware::open(&key,2_000_000,162_550_000).expect("open RSP1B CF32 stream"); eprintln!("stage=read"); let iq = dev.read(16384).expect("read RSP1B IQ"); eprintln!("stage=read_done count={}",iq.len()); assert!(iq.len()>=1024,"insufficient IQ: {}",iq.len()); let power=iq.iter().map(|x|x.re*x.re+x.im*x.im).sum::<f32>()/iq.len() as f32; eprintln!("stage=power value={power}"); assert!(power.is_finite()&&power>1e-12,"zero RSP1B IQ power: {power}"); eprintln!("stage=drop"); } }
     #[cfg(test)]
@@ -167,5 +188,7 @@ impl DeviceLayer {
     pub fn set_sample_rate(&self,rate:u32)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_mut(){h.set_rate(rate)?;} self.state.lock().sample_rate=rate; Ok(()) }
     pub fn set_bandwidth(&self,bw:u32)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_mut(){h.set_bandwidth(bw)?;} Ok(()) }
     pub fn set_gain(&self,gain:String)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if let Ok(v)=gain.parse::<f64>() {if let Some(h)=self.hardware.lock().as_mut(){h.set_gain(v)?;}} self.state.lock().gain=gain; Ok(()) }
+    pub fn capabilities(&self)->DeviceCapabilities { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_ref(){return h.capabilities();} DeviceCapabilities{connected:self.status().connected,..Default::default()} }
+    pub fn set_control(&self, control:&str, value:&str)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_mut(){h.set_control(control,value)?; return Ok(());} Err(anyhow::anyhow!("connect a hardware SDR before changing controls")) }
     pub fn read_iq(&self,count:usize)->anyhow::Result<Vec<Complex<f32>>> { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_mut(){return h.read(count);} if self.status().driver != "mock" { return Err(anyhow::anyhow!("hardware IQ stream unavailable")); } let mut phase=self.phase.lock(); let mut out=Vec::with_capacity(count); for i in 0..count { let t=*phase+i as f32; let a=Complex::from_polar(0.18,TAU*t/97.0); let b=Complex::from_polar(0.08,TAU*t/211.0); let n=(((i as f32*12.9898).sin()*43758.547).fract()-0.5)*0.012; out.push(a+b+Complex::new(n,-n*0.7)); } *phase+=count as f32; Ok(out) }
 }
