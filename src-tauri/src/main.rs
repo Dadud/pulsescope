@@ -25,6 +25,8 @@ mod scanner;
 mod sidecar;
 mod aprs;
 mod adsb;
+mod pocsag;
+mod ais;
 mod aviation;
 mod voice_decoder;
 mod signal_id;
