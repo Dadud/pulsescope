@@ -9,29 +9,5 @@
   </head>
   <body data-theme="pulsescope-dark">
     <div style="display: contents">%sveltekit.body%</div>
-    <script type="module">
-      // ESM-only hydration shim. SvelteKit's adapter-static emits an
-      // inline <script> using top-level dynamic import(). Some HTTP
-      // intermediaries (and certain embedded QA browsers) refuse to
-      // execute it, leaving the route component visible but its
-      // onMount() never firing. We re-issue the imports as an explicit
-      // type="module" block so the router bootstraps reliably.
-      try {
-        // adapter-static places the real module URLs in SvelteKit's inline
-        // bootstrap. `start.*` is not necessarily module-preloaded.
-        const bootstrap = Array.from(document.querySelectorAll('script:not([type])'))
-          .find(s => s.textContent?.includes('kit.start'));
-        const modules = [...(bootstrap?.textContent ?? '').matchAll(/import\("([^"]+)"\)/g)]
-          .map(m => new URL(m[1], location.href).href);
-        const root = document.body.firstElementChild;
-        if (modules.length < 2 || !root) throw new Error('SvelteKit bootstrap modules missing');
-        const [kit, appMod] = await Promise.all([import(modules[0]), import(modules[1])]);
-        if (typeof kit.start !== 'function') throw new Error('kit.start not present');
-        kit.start(appMod, root);
-        window.__pulsescopeHydrated = true;
-      } catch (err) {
-        console.warn('pulsescope: ESM hydration shim failed:', err && err.message);
-      }
-    </script>
   </body>
 </html>
