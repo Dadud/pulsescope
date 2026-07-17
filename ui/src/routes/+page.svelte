@@ -23,6 +23,8 @@
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
   let waterfallPixels: Uint8ClampedArray | null = null;
+  let waterfallGain = $state(1);
+  let waterfallPalette = $state('classic');
   let initialLoadInFlight = false;
 
   const filteredBanks = $derived(
@@ -50,6 +52,8 @@
 
   onMount(() => {
     if (!browser) return;
+    waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
+    waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
     let poll: number | undefined;
     let statePoll: number | undefined;
     void (async () => {
@@ -154,6 +158,15 @@
     if (canvas.height !== height) canvas.height = height;
   }
 
+  function setWaterfallGain(event: Event) {
+    waterfallGain = Number((event.currentTarget as HTMLInputElement).value);
+    localStorage.setItem('pulsescope.waterfall.gain', String(waterfallGain));
+  }
+  function setWaterfallPalette(event: Event) {
+    waterfallPalette = (event.currentTarget as HTMLSelectElement).value === 'mono' ? 'mono' : 'classic';
+    localStorage.setItem('pulsescope.waterfall.palette', waterfallPalette);
+  }
+
   function drawSpectrum() {
     if (!canvas || spectrumBins.length === 0) return;
     ensureCanvasBacking(canvas, 900, 220);
@@ -212,11 +225,13 @@
     if (h > 1) waterfallPixels.copyWithin(w * 4, 0, w * 4 * (h - 1));
     for (let x = 0; x < w; x++) {
       const index = Math.min(spectrumBins.length - 1, Math.floor((x / w) * spectrumBins.length));
-      const value = Math.max(0, Math.min(1, (spectrumBins[index] + 100) / 80));
+      const value = Math.max(0, Math.min(1, ((spectrumBins[index] + 100) / 80) * waterfallGain));
       const hue = 240 - value * 240;
       const c = 1 - Math.abs((hue / 60) % 2 - 1);
       const sector = Math.floor(hue / 60);
-      const rgb = sector === 0 ? [1, c, 0] : sector === 1 ? [c, 1, 0] : sector === 2 ? [0, 1, c] : sector === 3 ? [0, c, 1] : sector === 4 ? [c, 0, 1] : [1, 0, c];
+      const rgb = waterfallPalette === 'mono'
+        ? [1, 1, 1]
+        : sector === 0 ? [1, c, 0] : sector === 1 ? [c, 1, 0] : sector === 2 ? [0, 1, c] : sector === 3 ? [0, c, 1] : sector === 4 ? [c, 0, 1] : [1, 0, c];
       const pixel = x * 4;
       waterfallPixels[pixel] = Math.round(rgb[0] * value * 255);
       waterfallPixels[pixel + 1] = Math.round(rgb[1] * value * 255);
@@ -369,7 +384,7 @@
     <div class="spectrum-wrap card">
       <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
       <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune VFO 0"></canvas>
-      <h2 class="waterfall-title">Waterfall · live FFT history</h2>
+      <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
     </div>
 
@@ -517,6 +532,10 @@
   .spectrum-wrap canvas { display: block; width: 100%; height: 95px; background: var(--bg); border-radius: 4px; }
   .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
   .waterfall-title { margin-top: 6px !important; }
+  .waterfall-head { display:flex; align-items:center; gap:8px; }
+  .waterfall-head h2 { flex:1; }
+  .waterfall-head label, .waterfall-head select { font:10px var(--mono); color:var(--fg-dim); }
+  .waterfall-head input { width:70px; vertical-align:middle; }
   .spectrum-wrap canvas.waterfall { height: 95px; image-rendering: pixelated; }
 
   .signal-history { order: 3; max-height: 190px; overflow: hidden; }
