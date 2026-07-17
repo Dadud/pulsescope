@@ -15,6 +15,7 @@ use rustfft::num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::adsb::AdsbDecoder;
 use crate::audio::AudioSink;
 use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
