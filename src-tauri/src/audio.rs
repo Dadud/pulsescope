@@ -128,6 +128,10 @@ impl AudioSink {
     pub fn clear_queue(&self) { self.queue.lock().clear(); }
 
     pub fn push(&self, samples: &[f32], volume: f32) {
+        // Headless/LAN mode must not route RF noise to the host speakers.
+        // It can be explicitly enabled for a local lab server with
+        // PULSESCOPE_AUDIO_OUTPUT=1; desktop mode leaves this unset.
+        if std::env::var("PULSESCOPE_AUDIO_OUTPUT").as_deref() == Ok("0") { return; }
         self.start();
         let mut q = self.queue.lock();
         let gain = volume.clamp(0.0, 1.0);
