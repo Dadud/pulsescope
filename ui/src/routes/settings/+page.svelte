@@ -78,6 +78,14 @@
       {#each caps.gain_stages as stage}
         <label class="row"><span>{stage.name} gain ({stage.value_db.toFixed(1)} dB)</span><input type="range" min={stage.min_db} max={stage.max_db} step={stage.step_db || 1} value={stage.value_db} onchange={(e) => control(`gain:${stage.name}`, e.currentTarget.value)} /></label>
       {/each}
+      {#each caps.settings as setting}
+        <label class="row"><span>{setting.name}</span>
+          {#if setting.kind === 'bool'}<input type="checkbox" checked={setting.value === 'true'} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.checked)} />
+          {:else if setting.options.length}<select value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)}>{#each setting.options as option}<option value={option}>{option}</option>{/each}</select>
+          {:else if setting.kind === 'string'}<input type="text" value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)} />
+          {:else}<input type="number" min={setting.min} max={setting.max} step={setting.step || 1} value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)} />{/if}
+        </label>
+      {/each}
       <button onclick={refreshCaps}>Refresh receiver controls</button>
     </section>
   {/if}
