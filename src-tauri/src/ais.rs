@@ -292,35 +292,6 @@ impl NrziHdlcDecoder {
     }
 }
 
-/// Complex-IQ front end for AIS. The input is interleaved `(I, Q)` samples;
-/// carrier phase differences are passed to the discriminator/timing decoder.
-#[derive(Debug)]
-pub struct IqDecoder {
-    discriminator: DiscriminatorDecoder,
-    previous: Option<(f32, f32)>,
-}
-
-impl IqDecoder {
-    pub fn new(sample_rate_hz: f64) -> Result<Self, &'static str> {
-        Ok(Self { discriminator: DiscriminatorDecoder::new(sample_rate_hz)?, previous: None })
-    }
-
-    pub fn push_iq(&mut self, samples: &[(f32, f32)]) -> Vec<Result<AisMessage, AisDecodeError>> {
-        let mut out = Vec::new();
-        for &(i, q) in samples {
-            if !i.is_finite() || !q.is_finite() { self.previous = None; continue; }
-            if let Some((pi, pq)) = self.previous {
-                let discriminator = (q * pi - i * pq).atan2(i * pi + q * pq);
-                if let Some(result) = self.discriminator.push_sample(discriminator) { out.push(result); }
-            }
-            self.previous = Some((i, q));
-        }
-        out
-    }
-
-    pub fn reset(&mut self) { self.previous = None; self.discriminator.reset(); }
-}
-
 /// Minimal fixed-clock slicer for zero-centred discriminator samples.
 ///
 /// `samples_per_symbol` may be fractional (for example 5.0 at 48 kHz/9600).
@@ -332,7 +303,6 @@ pub struct DiscriminatorDecoder {
     phase: f64,
     sum: f64,
     count: usize,
-    dc: f64,
     nrzi: NrziHdlcDecoder,
 }
 
@@ -346,18 +316,12 @@ impl DiscriminatorDecoder {
             phase: 0.0,
             sum: 0.0,
             count: 0,
-            dc: 0.0,
             nrzi: NrziHdlcDecoder::new(),
         })
     }
 
     pub fn push_sample(&mut self, sample: f32) -> Option<Result<AisMessage, AisDecodeError>> {
-        // AIS captures commonly contain residual carrier frequency offset.
-        // Track the discriminator DC component so the symbol slicer sees the
-        // GMSK deviation rather than the receiver's static phase slope.
-        let x = sample as f64;
-        self.dc += (x - self.dc) * 0.0005;
-        self.sum += x - self.dc;
+        self.sum += sample as f64;
         self.count += 1;
         self.phase += 1.0;
         if self.phase + 1e-9 < self.samples_per_symbol {
@@ -381,7 +345,6 @@ impl DiscriminatorDecoder {
         self.phase = 0.0;
         self.sum = 0.0;
         self.count = 0;
-        self.dc = 0.0;
         self.nrzi.reset();
     }
 }

@@ -29,58 +29,6 @@ const UAT_LONG_BYTES: usize = 48; // 34 data + 14 RS parity
 const UAT_UPLINK_BLOCK_BYTES: usize = 92; // 72 data + 20 RS parity
 const UAT_UPLINK_BLOCKS: usize = 6;
 
-/// Raw-IQ front end for UAT CPFSK. It performs phase discrimination and a
-/// fixed-clock hard slicer at the UAT symbol rate; higher-quality timing loops
-/// can feed `UatDecoder::feed_bits` directly.
-pub struct UatIqDecoder {
-    decoder: UatDecoder,
-    sample_rate: u32,
-    clock: u64,
-    sum: f64,
-    previous: Option<(f32, f32)>,
-}
-
-impl UatIqDecoder {
-    pub fn new(sample_rate: u32) -> Self { Self { decoder: UatDecoder::new(), sample_rate, clock: 0, sum: 0.0, previous: None } }
-    pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
-        for &(i, q) in samples {
-            if let Some((pi, pq)) = self.previous {
-                self.sum += (q * pi - i * pq).atan2(i * pi + q * pq) as f64;
-                self.clock += 1_041_667;
-                if self.clock >= self.sample_rate as u64 { self.clock -= self.sample_rate as u64; self.decoder.feed_bits(&[self.sum >= 0.0]); self.sum = 0.0; }
-            }
-            self.previous = Some((i, q));
-        }
-    }
-    pub fn take_messages(&mut self) -> Vec<UatMessage> { self.decoder.take_messages() }
-}
-
-/// Raw-IQ front end for ACARS MSK. The output is handed to the native ACARS
-/// framing decoder; callers may use `AcarsDecoder::feed_bits` for recovered
-/// clocks when the capture has substantial sample-rate error.
-pub struct AcarsIqDecoder {
-    decoder: AcarsDecoder,
-    sample_rate: u32,
-    clock: u64,
-    sum: f64,
-    previous: Option<(f32, f32)>,
-}
-
-impl AcarsIqDecoder {
-    pub fn new(sample_rate: u32, order: BitOrder, invert: bool) -> Self { Self { decoder: AcarsDecoder::new(order, invert), sample_rate, clock: 0, sum: 0.0, previous: None } }
-    pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
-        for &(i, q) in samples {
-            if let Some((pi, pq)) = self.previous {
-                self.sum += (q * pi - i * pq).atan2(i * pi + q * pq) as f64;
-                self.clock += 2400;
-                if self.clock >= self.sample_rate as u64 { self.clock -= self.sample_rate as u64; self.decoder.feed_bits(&[self.sum >= 0.0]); self.sum = 0.0; }
-            }
-            self.previous = Some((i, q));
-        }
-    }
-    pub fn take_messages(&mut self) -> Vec<AcarsMessage> { self.decoder.take_messages() }
-}
-
 /// The on-air UAT frame family selected by its sync word and downlink type.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -323,40 +271,6 @@ fn bits_to_bytes_msb(bits: &[bool]) -> Vec<u8> {
 pub enum BitOrder {
     LsbFirst,
     MsbFirst,
-}
-
-/// Raw-IQ VDL2 front end. VDL Mode 2 uses differential 8-PSK at 31.5 ksym/s;
-/// this performs phase differencing, sector slicing and Gray-symbol expansion.
-/// The HDLC/FCS decoder remains responsible for rejecting bad frames.
-pub struct Vdl2IqDecoder {
-    decoder: Vdl2Decoder,
-    sample_rate: u32,
-    clock: u64,
-    phase_sum: f64,
-    previous: Option<(f32, f32)>,
-}
-
-impl Vdl2IqDecoder {
-    pub fn new(sample_rate: u32) -> Self { Self { decoder: Vdl2Decoder::new(), sample_rate, clock: 0, phase_sum: 0.0, previous: None } }
-    pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
-        for &(i, q) in samples {
-            if let Some((pi, pq)) = self.previous {
-                self.phase_sum += (q * pi - i * pq).atan2(i * pi + q * pq) as f64;
-                self.clock += 31_500;
-                if self.clock >= self.sample_rate as u64 {
-                    self.clock -= self.sample_rate as u64;
-                    let sector = ((self.phase_sum / (std::f64::consts::TAU / 8.0)).round() as i32).rem_euclid(8) as usize;
-                    // Differential 8-PSK Gray ordering: adjacent sectors differ by one bit.
-                    const GRAY: [u8; 8] = [0, 1, 3, 2, 6, 7, 5, 4];
-                    let symbol = GRAY[sector];
-                    self.decoder.feed_bits(&[(symbol & 4) != 0, (symbol & 2) != 0, (symbol & 1) != 0]);
-                    self.phase_sum = 0.0;
-                }
-            }
-            self.previous = Some((i, q));
-        }
-    }
-    pub fn take_messages(&mut self) -> Vec<Vdl2Message> { self.decoder.take_messages() }
 }
 
 /// A complete ACARS block, including its integrity result.
