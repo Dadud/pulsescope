@@ -118,11 +118,10 @@ fn static_ui_dir() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("PULSESCOPE_UI_DIR") {
         return Some(PathBuf::from(p));
     }
-    // LAN uses a dependency-free dashboard: no SSR/hydration lifecycle to
-    // freeze the spectrum on phones. Desktop retains the richer Svelte UI.
+    // Desktop and LAN deliberately serve the same Svelte build. A separate
+    // LAN skin guarantees feature drift and is retained only as a diagnostic
+    // artifact, never as the production UI.
     let candidates = [
-        PathBuf::from("./ui/lan"),
-        PathBuf::from("../ui/lan"),
         PathBuf::from("./ui/build"),
         PathBuf::from("../ui/build"),
         PathBuf::from("./build"),
