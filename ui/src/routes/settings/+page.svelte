@@ -122,6 +122,12 @@
         <label for="squelch">Squelch (dB)</label>
         <input id="squelch" type="number" step="0.5" bind:value={cfg.scanner.squelch_db} />
       </div>
+      <div class="row"><label for="hold-ms">Signal hold (ms)</label><input id="hold-ms" type="number" min="0" bind:value={cfg.scanner.hold_ms} /></div>
+      <div class="row"><label for="lockout-ms">Temporary lockout (ms)</label><input id="lockout-ms" type="number" min="0" bind:value={cfg.scanner.lockout_ms} /></div>
+      <div class="row"><label for="hold-audio">Hold while audio is active</label><input id="hold-audio" type="checkbox" bind:checked={cfg.scanner.scan_hold_on_audio} /></div>
+      <div class="row"><label for="hold-max">Maximum audio hold (ms)</label><input id="hold-max" type="number" min="0" bind:value={cfg.scanner.scan_hold_max_ms} /></div>
+      <label class="row"><span>Priority channels (Hz, comma separated)</span><input value={cfg.scanner.priority_channels_hz.join(', ')} onchange={(e) => cfg.scanner.priority_channels_hz=e.currentTarget.value.split(',').map(Number).filter(Number.isFinite)} /></label>
+      <label class="row"><span>Permanent blacklist (Hz, comma separated)</span><input value={cfg.scanner.blacklist_hz.join(', ')} onchange={(e) => cfg.scanner.blacklist_hz=e.currentTarget.value.split(',').map(Number).filter(Number.isFinite)} /></label>
     </section>
 
     <section class="card">
