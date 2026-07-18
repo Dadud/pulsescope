@@ -11,33 +11,13 @@ through well-defined sidecar boundaries, ships its own native Rust DSP
 Compare its feature coverage against the category leaders in
 `NYXSCOPE_PARITY_MATRIX.md`.
 
-## Status — verified working today
+## Release status
 
-- ✅ **Desktop app** (Windows MSI/NSIS installers, Tauri 2 webview, embedded UI)
-- ✅ **Headless server** (`--server` / `--api` flag, optional bearer auth, rustls
-  TLS via `PULSESCOPE_TLS_CERT` / `PULSESCOPE_TLS_KEY`)
-- ✅ **SDRplay RSP1B** end-to-end through SoapySDR (discovery, CF32 acquisition,
-  retune, sample-rate rebuild, teardown, reconnect)
-- ✅ **Native DSP decoders**: CTCSS (50 EIA tones), DCS, RDS (57 kHz BPSK),
-  CW/Morse (ITU), DTMF (16 digits), **APRS/AX.25** (1200 baud AFSK with
-  Goertzel mark/space, NRZ-I slicer, HDLC frame parser, full AX.25 UI frame
-  parser)
-- ✅ **dsd-fme sidecar** wired for digital voice: **P25 Phase 1/2, DMR,
-  NXDN48/96, D-STAR, YSF, M17, ProVoice** (real `dsd-fme.exe` from lwvmobile
-  build, runs against live RSP1B at 853 MHz)
-- ✅ **rtl_433 sidecar** with valid u8-IQ transport and JSON parser
-- ✅ **Spectrum + waterfall** UI, live mini-spectrum per VFO, signal-event
-  persistence, SQLite WAL database
-- ✅ **IQ recording** (CF32, real-verified 4M samples ≈ 32 MB)
-- ✅ **IQ playback** (interleaved little-endian CF32 to EOF through the shared
-  capture/scanner path)
-- ✅ **UDP streaming** (PSAU audio + PSIQ IQ with magic/version headers)
-- ✅ **79 default scan ranges** from AM Broadcast through GOES HRIT/LRIT
-- ✅ **Docker multi-stage build** + systemd unit for headless deployment
-- ✅ **35 unit tests passing**
-
-See `NYXSCOPE_PARITY_MATRIX.md` for honest feature-by-feature classification
-(what's wired, what's partial, what's blocked, what's deliberately unavailable).
+PulseScope is **pre-1.0**. Implemented code paths are classified as experimental
+until reproducible acceptance evidence exists. Hardware and external decoders are
+dependency-gated. See [`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md) and the
+CI-enforced [`release/acceptance-matrix.json`](release/acceptance-matrix.json). A
+v1.0 tag is refused while any required acceptance row remains pending.
 
 ## Quick start — server mode
 
@@ -45,8 +25,8 @@ See `NYXSCOPE_PARITY_MATRIX.md` for honest feature-by-feature classification
 # 1. build
 cargo build --release --features soapysdr --manifest-path src-tauri/Cargo.toml
 
-# 2. discover & connect RSP1B (or swap for any SoapySDR-compatible SDR)
-./target/release/pulsescope.exe --server
+# 2. start the server (hardware support depends on installed Soapy modules)
+./src-tauri/target/release/pulsescope --server
 # → bound to 127.0.0.1:8765
 
 curl http://127.0.0.1:8765/health
@@ -95,7 +75,7 @@ verified:
 | ------------ | ------------------------------------------------ | ---------------------------------- | ------------------- |
 | `rtl_433`    | PothosSDR 0.8.1                                  | Sidecar, u8 IQ via stdin/stdout    | WIRED, REAL-TESTED  |
 | `rtl_adsb`   | PothosSDR                                        | (binary available, transport TBD)  | Available           |
-| `dsd-fme`    | `/c/Users/Dadud/pulsescope/decoders/dsd-fme/`    | Sidecar, 48 kHz mono WAV via fs    | WIRED, REAL-TESTED  |
+| `dsd-fme`    | User-installed binary                           | Sidecar, 48 kHz mono WAV via fs    | Dependency-gated    |
 | `AIS-catcher`| jvde-github v0.70                                | (binary available, transport TBD)  | Installed, exclusive SDR |
 
 Multimon-ng, direwolf, acarsdec, nrsc5, dumpvdl2, dump978 source tarballs are
@@ -117,7 +97,7 @@ pulsescope/
 │  │  ├─ aprs.rs            native AFSK 1200 APRS/AX.25 decoder
 │  │  ├─ voice_decoder.rs   dsd-fme sidecar (digital voice)
 │  │  ├─ sidecar.rs         rtl_433 sidecar (ISM sensors)
-│  │  ├─ depend_manager.rs  cross-platform sidecar discovery
+│  │  ├─ depmanager.rs      cross-platform sidecar discovery
 │  │  ├─ device.rs          SoapySDR hardware lifecycle
 │  │  ├─ capture.rs         bounded IQ rings + CaptureWorker + playback
 │  │  ├─ audio.rs           CPAL output + UDP PSAU streamer

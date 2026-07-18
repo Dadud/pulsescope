@@ -1,5 +1,9 @@
 # Default scan-range presets
 
+Presets are tuning defaults, not claims that a driver, antenna, regional
+allocation, or decoder is available. Validate local regulations and hardware.
+Preset presence does not change a feature classification in `FEATURE_STATUS.md`.
+
 PulseScope ships with 79 default presets spanning 540 kHz through 5.8 GHz.
 All frequencies are public ITU / FCC band edges — no proprietary data.
 `max_vfos` of 0 marks a protection-only band (cellular, never scanned).

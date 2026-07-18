@@ -1,5 +1,10 @@
 # Decode-sidecar output parsers (next iteration)
 
+Parser code is not acceptance evidence. Native decoders remain **experimental**
+until every advertised decoder has a deterministic fixture in the acceptance
+matrix. Process parsers are **dependency-gated**: executables are not bundled and
+a missing binary must report unavailable rather than imply completeness.
+
 Each sidecar decoder emits a distinctive line format on stdout. The Rust
 `sidecar::parse_line` dispatcher needs one regex per protocol.
 

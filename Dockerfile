@@ -22,6 +22,11 @@ RUN apt-get update && \
         libhidapi-libusb0 \
         libudev-dev \
         libssl-dev \
+        libasound2-dev \
+        libwebkit2gtk-4.1-dev \
+        libgtk-3-dev \
+        libayatana-appindicator3-dev \
+        librsvg2-dev \
         git && \
     rm -rf /var/lib/apt/lists/*
 
@@ -31,7 +36,8 @@ WORKDIR /build
 COPY . .
 
 # Build the server binary (--server mode is the default flag, but turn it on):
-RUN cargo build --release --features soapysdr --bin pulsescope
+RUN cargo build --release --manifest-path src-tauri/Cargo.toml \
+    --no-default-features --features mock-source --bin pulsescope
 
 # ─────────────────────────────────────────────────────────────
 # Runtime stage
@@ -49,6 +55,10 @@ RUN apt-get update && \
         libhidapi-libusb0 \
         libudev1 \
         libssl3 \
+        libasound2 \
+        libwebkit2gtk-4.1-0 \
+        libgtk-3-0 \
+        curl \
         tini && \
     rm -rf /var/lib/apt/lists/*
 
@@ -68,7 +78,7 @@ WORKDIR /app
 # Pull in the build artifacts and the SvelteKit build (mounted via /ui or copied
 # separately). The image expects the build host to put the SvelteKit bundle at
 # /app/ui/build before building.
-COPY --from=builder /build/target/release/pulsescope /usr/local/bin/pulsescope
+COPY --from=builder /build/src-tauri/target/release/pulsescope /usr/local/bin/pulsescope
 
 # Healthcheck: every 30s, expect 200 from /health
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

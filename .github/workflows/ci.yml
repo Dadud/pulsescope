@@ -1,0 +1,103 @@
+name: required
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verified-contract
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features mock-source
+      - run: python3 scripts/verify_release_contract.py
+
+  linux-headless:
+    name: linux-headless-${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --features mock-source
+      - run: scripts/smoke_headless.sh src-tauri/target/release/pulsescope
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulsescope-linux-${{ matrix.arch }}
+          path: src-tauri/target/release/pulsescope
+
+  linux-desktop:
+    name: linux-desktop-deb-appimage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tauri build --no-default-features --features mock-source --bundles deb,appimage
+      - run: test -n "$(find src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.AppImage' \) -print -quit)"
+      - uses: actions/upload-artifact@v4
+        with: { name: pulsescope-linux-desktop, path: src-tauri/target/release/bundle }
+
+  windows-installers:
+    name: windows-msi-nsis
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tauri build --no-default-features --features mock-source --bundles msi,nsis
+      - shell: pwsh
+        run: ./scripts/smoke_windows_packages.ps1 -BundleDir src-tauri/target/release/bundle
+      - uses: actions/upload-artifact@v4
+        with: { name: pulsescope-windows-installers, path: src-tauri/target/release/bundle }
+
+  docker:
+    name: docker-${{ matrix.platform }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix: { platform: [linux/amd64, linux/arm64] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: pulsescope:ci
+      - run: |
+          docker run -d --name pulsescope -p 8765:8765 pulsescope:ci
+          trap 'docker logs pulsescope; docker rm -f pulsescope' EXIT
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8765/health && exit 0; sleep 2; done
+          exit 1
+

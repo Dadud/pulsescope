@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "release_ready": false,
+  "policy": "A required row may be complete only with a reproducible command or CI run URL in evidence.",
+  "checks": [
+    {"id":"mock_mode","required":true,"status":"complete","platforms":["linux-x86_64"],"evidence":"cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features mock-source"},
+    {"id":"iq_playback","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"authenticated_headless","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"tls","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"docker","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"desktop_startup","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"verified_sdr","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"native_decoder_fixtures","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"recording","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"streaming","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"database_migration","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"clean_install","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"upgrade_existing_data","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"rollback","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"uninstall","required":true,"status":"pending","platforms":[],"evidence":null},
+    {"id":"unicode_and_space_paths","required":true,"status":"pending","platforms":[],"evidence":null}
+  ]
+}
+

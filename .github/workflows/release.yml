@@ -1,0 +1,40 @@
+name: release-candidate
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: python3 scripts/verify_release_contract.py --release
+      - name: Refuse v1.0 without signed-off evidence
+        if: startsWith(github.ref, 'refs/tags/v1.0')
+        run: test "$(jq -r .release_ready release/acceptance-matrix.json)" = true
+
+  provenance:
+    needs: guard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - run: cargo install cargo-cyclonedx cargo-about --locked
+      - run: pnpm install --frozen-lockfile
+      - run: mkdir -p release-metadata && cargo cyclonedx --manifest-path src-tauri/Cargo.toml --format json && mv src-tauri/pulsescope.cdx.json release-metadata/sbom-rust.cdx.json
+      - run: pnpm licenses list --json > release-metadata/licenses-node.json
+      - run: cargo about generate about.hbs -m src-tauri/Cargo.toml -o release-metadata/THIRD-PARTY-LICENSES.html
+      - run: cp docs/THIRD_PARTY_NOTICES.md LICENSE release-metadata/
+      - uses: actions/upload-artifact@v4
+        with: { name: release-metadata, path: release-metadata }
+
