@@ -8,7 +8,7 @@
 const desktopWebview = typeof window !== 'undefined' && (
   // Tauri v2 injects one of these regardless of whether WebView2 uses
   // tauri.localhost, asset:, or plain localhost as its visible origin.
-  '__TAURI_INTERNALS__' in (window as any) || '__TAURI__' in (window as any) ||
+  '__TAURI_INTERNALS__' in (window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }) || '__TAURI__' in (window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }) ||
   window.location.hostname === 'tauri.localhost' ||
   window.location.hostname.endsWith('.tauri.localhost') ||
   window.location.protocol === 'asset:' ||
@@ -80,18 +80,48 @@ export interface ScanRange {
   sample_rate_hz: number;
 }
 
-export interface ScannerEvent {
-  kind: 'Spectrum' | 'SignalHit' | 'VfoStates' | 'DecodedMessage' | 'TrunkingUpdate' | 'SpectrumOccupancy';
-  data: any;
-}
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export interface JsonObject { [key: string]: JsonValue | undefined }
 
-export async function getJson<T = any>(path: string): Promise<T> {
+export interface SpectrumPayload { range: string; bins: number[] }
+export interface SignalHitPayload {
+  frequency_hz: number; strength_db: number; snr_db: number; bandwidth_hz: number;
+  protocol: string; family: string; confidence: number; decoder: string;
+}
+export interface TrunkingUpdatePayload extends JsonObject {
+  system?: string; active_talkgroup?: string; locked?: boolean;
+}
+export interface SpectrumOccupancyPayload extends JsonObject { frequency_bucket_hz: number }
+
+export type ScannerEvent =
+  | { kind: 'Spectrum'; data: SpectrumPayload }
+  | { kind: 'SignalHit'; data: SignalHitPayload }
+  | { kind: 'VfoStates'; data: VfoState[] }
+  | { kind: 'DecodedMessage'; data: DecodedMessage }
+  | { kind: 'TrunkingUpdate'; data: TrunkingUpdatePayload }
+  | { kind: 'SpectrumOccupancy'; data: SpectrumOccupancyPayload };
+
+export interface OperationResponse { ok: boolean; error?: string }
+export interface SignalEvent extends JsonObject { frequency_hz: number; timestamp_ms: number }
+export interface Job extends JsonObject { id: number }
+export interface JobCreateRequest extends JsonObject { name: string; kind: string; payload: JsonObject; next_run_ms: number }
+export interface ScanBankUpdate extends JsonObject { enabled?: boolean; dwell_ms?: number; hold_ms?: number; max_vfos?: number; squelch_db?: number }
+export interface DeviceStatus extends JsonObject { label: string; connected: boolean; center_freq_hz?: number; sample_rate?: number; driver: string }
+export interface DeviceInfo extends JsonObject { key: string; driver: string }
+export interface DeviceList extends JsonObject { devices: DeviceInfo[] }
+export interface DeviceCapabilities extends JsonObject { capabilities?: DeviceCapabilities }
+export interface BankUpdateResponse extends OperationResponse { bank: ScanRange }
+export interface IdentificationResponse extends JsonObject { available?: boolean; reason: string }
+
+
+export async function getJson<T = unknown>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() } });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
   return r.json();
 }
 
-export async function postJson<T = any>(path: string, body?: any): Promise<T> {
+export async function postJson<T = unknown>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeader() },
@@ -101,7 +131,7 @@ export async function postJson<T = any>(path: string, body?: any): Promise<T> {
   return r.json();
 }
 
-export async function putJson<T = any>(path: string, body: any): Promise<T> {
+export async function putJson<T = unknown>(path: string, body: JsonObject): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeader() },
@@ -111,7 +141,7 @@ export async function putJson<T = any>(path: string, body: any): Promise<T> {
   return r.json();
 }
 
-export async function deleteJson<T = any>(path: string): Promise<T> {
+export async function deleteJson<T = unknown>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
   return r.json();
@@ -142,7 +172,7 @@ export const Api = {
   health: () => getJson('/health'),
   spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),
-  createBank: (body: any) => postJson('/channels/banks/create', body),
+  createBank: (body: JsonObject) => postJson('/channels/banks/create', body),
   deleteBank: (name: string) => postJson('/channels/banks/delete', { name }),
   scanConfig: () => getJson('/channels/scan-config'),
   scanStart: (range_name: string) => postJson('/channels/scan/start', { range_name }),
@@ -153,35 +183,35 @@ export const Api = {
   vfoFrequency: (id: number, frequency_hz: number) => postJson(`/vfo/${id}/frequency`, { frequency_hz }),
   vfoMode: (id: number, mode: string) => postJson(`/vfo/${id}/mode`, { mode }),
   vfoAgc: (id: number, on: boolean) => postJson(`/vfo/${id}/audio_agc`, { id, on }),
-  vfoIdentify: (id: number) => postJson(`/vfo/${id}/identify`, { id }),
-  devices: () => getJson('/devices'),
+  vfoIdentify: (id: number) => postJson<IdentificationResponse>(`/vfo/${id}/identify`, { id }),
+  devices: () => getJson<DeviceList>('/devices'),
   deviceConnect: (key: string, label?: string) => postJson('/device/connect', { key, label }),
   deviceDisconnect: () => postJson('/device/disconnect'),
-  deviceStatus: () => getJson('/device/status'),
-  deviceCapabilities: () => getJson('/device/capabilities'),
-  deviceControl: (control: string, value: string | number | boolean) => postJson('/device/control', { control, value: String(value) }),
+  deviceStatus: () => getJson<DeviceStatus>('/device/status'),
+  deviceCapabilities: () => getJson<DeviceCapabilities>('/device/capabilities'),
+  deviceControl: (control: string, value: string | number | boolean) => postJson<DeviceCapabilities>('/device/control', { control, value: String(value) }),
   decodedMessages: (limit = 100) => getJson<DecodedMessage[]>(`/decoded_messages?limit=${limit}`),
-  signalEvents: (limit = 100) => getJson<any[]>(`/signal_events?limit=${limit}`),
+  signalEvents: (limit = 100) => getJson<SignalEvent[]>(`/signal_events?limit=${limit}`),
   channelBankScanConfig: () => getJson('/channels/bank-scan-config'),
-  updateChannelBank: (name: string, body: any) => putJson(`/channels/bank-scan-config`, { ...body, bank_name: name }),
+  updateChannelBank: (name: string, body: ScanBankUpdate) => putJson<BankUpdateResponse>(`/channels/bank-scan-config`, { ...body, bank_name: name }),
   settings: () => getJson('/settings'),
-  setSettings: (cfg: any) => putJson('/settings', cfg),
+  setSettings: (cfg: JsonObject) => putJson('/settings', cfg),
   trunkingStatus: () => getJson('/trunking/status'),
   trunkingStart: () => postJson('/trunking/start'),
   trunkingStop: () => postJson('/trunking/stop'),
   trunkingLock: (locked: boolean) => postJson('/trunking/lock', { locked }),
-  trunkingCalls: () => getJson<any[]>('/trunking/calls'),
+  trunkingCalls: () => getJson<JsonObject[]>('/trunking/calls'),
   trunkingDiscoveryStart: () => postJson('/trunking/discovery/start'),
   trunkingDiscoveryStop: () => postJson('/trunking/discovery/stop'),
-  trunkingDiscoveryResults: () => getJson<any[]>('/trunking/discovery/results'),
+  trunkingDiscoveryResults: () => getJson<JsonObject[]>('/trunking/discovery/results'),
 
   aeroStatus: () => getJson('/aero/status'),
-  aeroMessages: () => getJson<any[]>('/aero/messages'),
+  aeroMessages: () => getJson<JsonObject[]>('/aero/messages'),
   aeroEnable: (enabled: boolean) => postJson('/aero/enable', { enabled }),
   aeroClear: () => postJson('/aero/clear'),
 
   iridiumStatus: () => getJson('/iridium/status'),
-  iridiumMessages: () => getJson<any[]>('/iridium/messages'),
+  iridiumMessages: () => getJson<JsonObject[]>('/iridium/messages'),
   iridiumEnable: (enabled: boolean) => postJson('/iridium/enable', { enabled }),
   iridiumClear: () => postJson('/iridium/clear'),
   iridiumQuickStart: () => postJson('/iridium/quick-start'),
@@ -195,41 +225,41 @@ export const Api = {
     postJson(`/${system === 'goes' ? 'goes_lrit' : system}/clear`),
 
   hdRadioStatus: () => getJson('/hd_radio/status'),
-  hdRadioMessages: () => getJson<any[]>('/hd_radio/messages'),
+  hdRadioMessages: () => getJson<JsonObject[]>('/hd_radio/messages'),
   hdRadioCheck: () => postJson('/hd_radio/check'),
   hdRadioEnable: (enabled: boolean) => postJson('/hd_radio/enable', { enabled }),
 
-  bleDevices: () => getJson<any[]>('/ble/devices'),
+  bleDevices: () => getJson<JsonObject[]>('/ble/devices'),
   bleStatus: () => getJson('/ble/status'),
   bleClear: () => postJson('/ble/clear'),
-  loraMessages: () => getJson<any[]>('/lora/messages'),
-  loraRegions: () => getJson<any[]>('/lora/regions'),
+  loraMessages: () => getJson<JsonObject[]>('/lora/messages'),
+  loraRegions: () => getJson<JsonObject[]>('/lora/regions'),
 
-  signalFingerprints: () => getJson<any[]>('/signal_id/fingerprints'),
+  signalFingerprints: () => getJson<JsonObject[]>('/signal_id/fingerprints'),
   signalSegmentBursts: () => postJson('/signal_id/segment_bursts'),
   signalPolyphaseExtract: () => postJson('/signal_id/polyphase_extract'),
   spectrumOccupancy: () => getJson('/spectrum_occupancy'),
 
-  jobs: () => getJson<{jobs:any[]}>('/jobs'),
-  createJob: (body:any) => postJson('/jobs', body),
+  jobs: () => getJson<{ jobs: Job[] }>('/jobs'),
+  createJob: (body: JobCreateRequest) => postJson('/jobs', body),
   deleteJob: (id:number) => deleteJson(`/jobs/${id}`),
   iqRecordingStatus: () => getJson('/iq_recording/status'),
   iqRecordingStart: () => postJson('/iq_recording/start'),
   iqRecordingStop: () => postJson('/iq_recording/stop'),
-  cases: () => getJson<any[]>('/cases'),
-  createCase: (body: any) => postJson('/cases', body),
+  cases: () => getJson<JsonObject[]>('/cases'),
+  createCase: (body: JsonObject) => postJson('/cases', body),
   deleteCase: (id: number) => fetch(`${BASE}/cases/${id}`, { method: 'DELETE' }).then(r => r.json()),
-  recordingAnnotations: () => getJson<any[]>('/recordings/annotations'),
-  addRecordingAnnotation: (body: any) => postJson('/recordings/annotations', body),
+  recordingAnnotations: () => getJson<JsonObject[]>('/recordings/annotations'),
+  addRecordingAnnotation: (body: JsonObject) => postJson('/recordings/annotations', body),
   deleteRecordingAnnotation: (id: number) => fetch(`${BASE}/recordings/annotations/${id}`, { method: 'DELETE' }).then(r => r.json()),
   transcriptionStatus: () => getJson('/transcription/status'),
-  transcripts: () => getJson<any[]>('/transcription/transcripts'),
+  transcripts: () => getJson<JsonObject[]>('/transcription/transcripts'),
   transcriptionStart: () => postJson('/transcription/start'),
   transcriptionStop: () => postJson('/transcription/stop'),
 
   featurePacks: () => getJson('/feature-packs'),
   featurePackEnable: (id: string, enabled: boolean) => postJson(`/feature-packs/${encodeURIComponent(id)}/enable`, { enabled }),
-  sidecarsStatus: () => getJson<any[]>('/sidecars/status'),
+  sidecarsStatus: () => getJson<JsonObject[]>('/sidecars/status'),
   sidecarStderr: (name: string) => getJson<string[]>(`/sidecars/${encodeURIComponent(name)}/stderr`),
   blacklist: () => getJson('/blacklist'),
   blacklistAdd: (frequency_hz: number, reason = '') => postJson('/blacklist/add', { frequency_hz, reason }),

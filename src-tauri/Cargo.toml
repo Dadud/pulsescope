@@ -82,6 +82,10 @@ which = "7"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
+percent-encoding = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["mock-source", "soapysdr"]
