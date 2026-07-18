@@ -25,6 +25,7 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
+        conn.execute_batch(include_str!("../migrations/002_trunking.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;

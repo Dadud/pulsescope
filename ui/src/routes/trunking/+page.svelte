@@ -1,79 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { Api } from '$lib/api';
-
-  let status = $state<any>({});
-  let calls = $state<any[]>([]);
-  let discoveries = $state<any[]>([]);
-  let error = $state('');
-  let busy = $state(false);
-
-  async function load() {
-    try {
-      [status, calls, discoveries] = await Promise.all([
-        Api.trunkingStatus(), Api.trunkingCalls(), Api.trunkingDiscoveryResults()
-      ]);
-      error = '';
-    } catch (e) { error = String(e); }
-  }
-  onMount(load);
-
-  async function toggle() {
-    busy = true;
-    try { if (status.running) await Api.trunkingStop(); else await Api.trunkingStart(); await load(); }
-    catch (e) { error = String(e); }
-    finally { busy = false; }
-  }
-  async function lock() {
-    try { await Api.trunkingLock(!status.locked); await load(); } catch (e) { error = String(e); }
-  }
-  async function discover() {
-    try {
-      if (status.discovery_running) await Api.trunkingDiscoveryStop();
-      else await Api.trunkingDiscoveryStart();
-      await load();
-    } catch (e) { error = String(e); }
-  }
+  import { onMount } from 'svelte'; import { Api } from '$lib/api';
+  let status=$state<any>({}); let calls=$state<any[]>([]); let discoveries=$state<any[]>([]); let talkgroups=$state<any[]>([]); let error=$state(''); let busy=$state(false);
+  let selectedSystem=$state(''); let selectedSite=$state('');
+  async function load(){try{[status,calls,discoveries,talkgroups]=await Promise.all([Api.trunkingStatus(),Api.trunkingCalls(),Api.trunkingDiscoveryResults(),Api.talkgroups()]);error=''}catch(e){error=String(e)}} onMount(load);
+  async function toggle(){busy=true;try{status.running?await Api.trunkingStop():await Api.trunkingStart(selectedSystem, Number(discoveries.find(d => (d.system_key??d.system) === selectedSystem)?.control_channel_hz));await load()}catch(e){error=String(e)}finally{busy=false}}
+  async function lock(){try{await Api.trunkingLock(!status.locked);await load()}catch(e){error=String(e)}}
+  async function discover(){try{status.discovery_running?await Api.trunkingDiscoveryStop():await Api.trunkingDiscoveryStart();await load()}catch(e){error=String(e)}}
+  const fmt=(hz:any)=>hz?`${(Number(hz)/1e6).toFixed(5)} MHz`:'Unavailable';
 </script>
-
-<div class="trunking-page">
-  <h1>Trunking</h1>
-  <p class="muted">Follow P25 / NXDN / EDACS / DMR talkgroups across control channels.</p>
-  {#if error}<p class="error">{error}</p>{/if}
-
-  <section class="card controls">
-    <button class="primary" disabled={busy} onclick={toggle}>{status.running ? 'Stop' : 'Start'} trunking</button>
-    <button onclick={lock}>{status.locked ? 'Unlock system' : 'Lock system'}</button>
-    <button onclick={discover}>{status.discovery_running ? 'Stop discovery' : 'Discover systems'}</button>
-    <button onclick={load}>Refresh</button>
-    <span class:online={status.running} class="state">{status.running ? 'RUNNING' : 'IDLE'}</span>
-  </section>
-
-  <section class="grid">
-    <div class="card"><h2>System</h2><dl>
-      <dt>Name</dt><dd>{status.system ?? '—'}</dd>
-      <dt>Protocol</dt><dd>{status.protocol ?? 'P25 / auto'}</dd>
-      <dt>Control channel</dt><dd>{status.control_channel_hz ?? '—'}</dd>
-      <dt>Active talkgroup</dt><dd>{status.active_talkgroup ?? '—'}</dd>
-    </dl></div>
-    <div class="card"><h2>Discovery</h2>{#if discoveries.length}<ul>{#each discoveries as item}<li>{JSON.stringify(item)}</li>{/each}</ul>{:else}<p class="muted">No discovered systems.</p>{/if}</div>
-  </section>
-
-  <section class="card"><h2>Call history</h2>
-    {#if calls.length}<div class="calls">{#each calls as call}<div class="call"><b>{call.talkgroup ?? call.talkgroup_id ?? 'Unknown TG'}</b><span>{call.frequency_hz ?? '—'}</span><span>{call.started_ms ?? call.timestamp_ms ?? '—'}</span></div>{/each}</div>{:else}<p class="muted">No trunking calls recorded.</p>{/if}
-  </section>
-</div>
-
-<style>
-  .trunking-page { padding:16px; overflow-y:auto; height:100%; }
-  .muted { color:var(--fg-dim); }.error { color:var(--danger); }
-  .card { margin:12px 0; padding:14px; background:var(--bg-elev); border:1px solid var(--line); border-radius:8px; }
-  .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  button { background:var(--bg); color:var(--fg); border:1px solid var(--line); padding:7px 10px; border-radius:5px; cursor:pointer; }
-  button.primary { color:var(--accent); border-color:var(--accent); } button:disabled { opacity:.5; }
-  .state { margin-left:auto; color:var(--fg-dim); font:11px var(--mono); }.state.online { color:var(--ok); }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; } h2 { font-size:14px; margin-top:0; }
-  dl { display:grid; grid-template-columns:150px 1fr; gap:6px; font:12px var(--mono); } dt { color:var(--fg-dim); } dd { margin:0; }
-  ul { padding-left:18px; font:11px var(--mono); }.call { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; padding:7px 0; border-bottom:1px solid var(--line); font:12px var(--mono); }
-  @media (max-width:700px) { .grid { grid-template-columns:1fr; } }
-</style>
+<div class="page"><header><div><h1>Trunking</h1><p>Observed control-channel activity and voice-call following.</p></div><span class:online={status.running} class="badge">{status.running?'RUNNING':'IDLE'}</span></header>
+{#if error}<p class="unavailable">Backend unavailable: {error}</p>{/if}
+<section class="card toolbar"><label>System<select bind:value={selectedSystem}><option value="">No observed system</option>{#each discoveries as d}<option value={d.system_key??d.system}>{d.name??d.system_key??'Observed system'}</option>{/each}</select></label><label>Site<select bind:value={selectedSite} disabled={!selectedSystem}><option value="">No observed site</option></select></label><button class="primary" disabled={busy||(!status.running&&!selectedSystem)} onclick={toggle}>{status.running?'Stop':'Start'}</button><button onclick={lock}>{status.locked?'Release hold':'Hold'}</button><button onclick={discover}>{status.discovery_running?'Stop discovery':'Discover'}</button><button onclick={load}>Refresh</button></section>
+<div class="grid"><section class="card"><h2>Selected site</h2><dl><dt>System</dt><dd>{status.system??'Unavailable — select observed traffic'}</dd><dt>Site</dt><dd>{status.site??'Unavailable'}</dd><dt>Protocol</dt><dd>{status.protocol??'Unavailable until synchronized'}</dd><dt>Control</dt><dd>{fmt(status.control_channel_hz)}</dd></dl></section><section class="card"><h2>Decoder health</h2>{#if status.decoder_health}<dl><dt>Sync</dt><dd>{status.decoder_health.synchronized?'Locked':'Searching'}</dd><dt>Frames</dt><dd>{status.decoder_health.frames}</dd><dt>CRC failures</dt><dd>{status.decoder_health.crc_failures}</dd></dl>{:else}<p class="empty">Unavailable — no control-channel decoder is running.</p>{/if}</section></div>
+<section class="card"><h2>Active calls <small>{status.active_calls?.length??0}</small></h2>{#if status.active_calls?.length}<div class="table">{#each status.active_calls as c}<div><b>TG {c.talkgroup_id}</b><span>{fmt(c.frequency_hz)}</span><span>{c.source_unit_id??'Unknown unit'}</span><span class:encrypted={c.encrypted}>{c.encrypted?'ENCRYPTED':'Clear'}</span></div>{/each}</div>{:else}<p class="empty">No active grants. Calls appear only after a valid observed grant is mapped to a voice channel.</p>{/if}</section>
+<div class="grid"><section class="card"><h2>Talkgroups</h2>{#if talkgroups.length}<div class="list">{#each talkgroups as t}<div><b>{t.alpha_tag||`TG ${t.talkgroup_id}`}</b><span>{t.locked_out?'Locked out':t.policy??t.mode??'Allow'}</span></div>{/each}</div>{:else}<p class="empty">No talkgroups observed or imported.</p>{/if}</section><section class="card"><h2>Units</h2>{#if status.units?.length}<div class="list">{#each status.units as u}<div><b>{u.alpha_tag||u.id}</b><span>{u.last_seen_ms}</span></div>{/each}</div>{:else}<p class="empty">No unit identifiers observed.</p>{/if}</section></div>
+<section class="card"><h2>Discovery evidence</h2>{#if discoveries.length}<div class="list">{#each discoveries as d}<div><b>{d.name??d.system_key}</b><span>{fmt(d.control_channel_hz)} · {Math.round((d.confidence??0)*100)}% · {d.evidence?.frame_hex?'frame preserved':'no evidence'}</span></div>{/each}</div>{:else}<p class="empty">No CRC-valid control-channel observations yet. Discovery does not use sample data.</p>{/if}</section>
+<section class="card"><h2>Call history</h2>{#if calls.length}<div class="table">{#each calls as c}<div><b>TG {c.talkgroup??c.talkgroup_id}</b><span>{fmt(c.frequency_hz)}</span><span>{c.duration_ms??'Active'}</span><span>{c.recording_path??'No recording'}</span></div>{/each}</div>{:else}<p class="empty">No completed calls or recording associations.</p>{/if}</section></div>
+<style>.page{padding:20px;overflow:auto;height:100%;max-width:1200px;margin:auto}header{display:flex;justify-content:space-between;align-items:start}h1{margin:0}header p,.empty{color:var(--fg-dim)}.badge{font:11px var(--mono);padding:5px 9px;border:1px solid var(--line);border-radius:99px}.badge.online{color:var(--ok);border-color:var(--ok)}.card{background:var(--bg-elev);border:1px solid var(--line);border-radius:8px;padding:14px;margin:12px 0}.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap}label{font-size:11px;color:var(--fg-dim);display:grid;gap:4px}select,button{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:7px}.primary{border-color:var(--accent);color:var(--accent)}button:disabled{opacity:.45}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.grid .card{margin:0}h2{font-size:14px;margin:0 0 12px}small{color:var(--fg-dim)}dl{display:grid;grid-template-columns:110px 1fr;gap:7px;font:12px var(--mono)}dt{color:var(--fg-dim)}dd{margin:0}.table>div{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;border-top:1px solid var(--line);padding:8px;font:12px var(--mono)}.list>div{display:flex;justify-content:space-between;border-top:1px solid var(--line);padding:8px;font:12px var(--mono)}.encrypted,.unavailable{color:var(--danger)}@media(max-width:700px){.grid{grid-template-columns:1fr}.table>div{grid-template-columns:1fr 1fr}}</style>

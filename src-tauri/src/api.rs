@@ -855,7 +855,8 @@ async fn talkgroup_delete_system(State(s): State<ApiState>, Json(req): Json<Syst
 async fn trunking_start(State(s): State<ApiState>, req: Option<Json<TrunkingStartReq>>) -> impl IntoResponse {
     let req = req.map(|Json(v)| v).unwrap_or(TrunkingStartReq { system: None, control_channel_hz: None });
     let mut t = s.0.trunking.write();
-    t.running = true; t.system = req.system.or_else(|| Some("mock-trunked-system".into())); t.control_channel_hz = req.control_channel_hz.or(Some(851_012_500));
+    t.system = req.system; t.control_channel_hz = req.control_channel_hz;
+    t.running = t.system.is_some() && t.control_channel_hz.is_some();
     t.log.push(format!("{} trunking started", crate::scanner::now_ms()));
     Json(json!({"ok": true, "status": &*t}))
 }
@@ -874,14 +875,14 @@ async fn trunking_import(State(s): State<ApiState>, Json(def): Json<Value>) -> i
     t.log.push("trunking definition imported".into());
     Json(json!({"ok": true, "status": &*t}))
 }
-async fn trunking_disc_start(State(s): State<ApiState>) -> impl IntoResponse { let mut t = s.0.trunking.write(); t.discovery_running = true; t.discovery_results = vec![json!({"system":"mock-trunked-system","control_channel_hz":851012500,"protocol":"P25"})]; t.log.push("discovery started".into()); Json(json!({"ok": true})) }
+async fn trunking_disc_start(State(s): State<ApiState>) -> impl IntoResponse { let mut t = s.0.trunking.write(); t.discovery_running = true; t.discovery_results.clear(); t.log.push("discovery started; awaiting CRC-valid observed control-channel frames".into()); Json(json!({"ok": true, "source":"observed_control_channel"})) }
 async fn trunking_disc_stop(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().discovery_running = false; Json(json!({"ok": true})) }
 async fn trunking_disc_results(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&s.0.trunking.read().discovery_results).unwrap()) }
 async fn trunking_disc_snapshot(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&*s.0.trunking.read()).unwrap()) }
 async fn trunking_disc_log(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&s.0.trunking.read().log).unwrap()) }
 async fn trunking_disc_log_clear(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().log.clear(); Json(json!({"ok": true})) }
 async fn trunking_disc_notes() -> impl IntoResponse { Json(json!([])) }
-async fn trunking_disc_promote(State(s): State<ApiState>) -> impl IntoResponse { let mut t = s.0.trunking.write(); t.system = Some("mock-trunked-system".into()); Json(json!({"ok": true})) }
+async fn trunking_disc_promote() -> impl IntoResponse { Json(json!({"ok": false, "reason":"select an observed discovery result"})) }
 async fn trunking_disc_identify() -> impl IntoResponse { Json(json!({"ok": true, "protocol":"P25"})) }
 async fn trunking_disc_clear(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().discovery_results.clear(); Json(json!({"ok": true})) }
 async fn trunking_disc_delete(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().discovery_results.clear(); Json(json!({"ok": true})) }
