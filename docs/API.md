@@ -203,3 +203,9 @@ Each event is a tagged union:
 | GET    | `/debug/stats`        |
 | GET    | `/debug/log/tail`     |
 | GET    | `/debug/noise_floor`  |
+
+## Audio streaming and recording library
+
+`GET /audio/vfo/:id/stream.wav` streams authenticated mono PCM WAV with bounded per-client backpressure. `POST`/`DELETE /audio/vfo/:id/record` starts/stops per-VFO WAV recording; the start body includes frequency/mode, optional signal/case metadata, and `vox` (`enabled`, `threshold_db`, `pre_roll_ms`, `post_roll_ms`). `GET /audio/recordings/status` reports active recordings and elapsed time.
+
+`GET /recordings?page=1&page_size=25` lists safely rooted files and disk-space warnings. `GET`, `PUT`, and `DELETE /recordings/:name` inspect, rename, and delete; `GET /recordings/:name/download` downloads. Names are single path components. See [FORMATS.md](FORMATS.md) for CF32, WAV, PSAU, and PSIQ wire definitions.

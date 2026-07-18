@@ -40,6 +40,11 @@ function authHeader(): Record<string, string> {
   } catch {}
   return token ? { 'authorization': `Bearer ${token}` } : {};
 }
+export function authenticatedMediaUrl(path: string): string {
+  const bearer = authHeader()['authorization'];
+  const token = bearer?.startsWith('Bearer ') ? bearer.slice(7) : '';
+  return `${BASE}${path}${token ? `${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : ''}`;
+}
 
 export interface VfoState {
   id: number;
@@ -222,6 +227,15 @@ export const Api = {
   recordingAnnotations: () => getJson<any[]>('/recordings/annotations'),
   addRecordingAnnotation: (body: any) => postJson('/recordings/annotations', body),
   deleteRecordingAnnotation: (id: number) => fetch(`${BASE}/recordings/annotations/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  recordings: (page = 1) => getJson(`/recordings?page=${page}`),
+  renameRecording: (name: string, next: string) => putJson(`/recordings/${encodeURIComponent(name)}`, { name: next }),
+  deleteRecording: (name: string) => deleteJson(`/recordings/${encodeURIComponent(name)}`),
+  audioRecordingStatus: () => getJson('/audio/recordings/status'),
+  startAudioRecording: (id: number, body: any) => postJson(`/audio/vfo/${id}/record`, body),
+  stopAudioRecording: (id: number) => deleteJson(`/audio/vfo/${id}/record`),
+  case: (id: number) => getJson(`/cases/${id}`),
+  attachCase: (id: number, body: any) => postJson(`/cases/${id}/attach`, body),
+  deleteCaseAttachment: (id: number) => deleteJson(`/cases/attachments/${id}`),
   transcriptionStatus: () => getJson('/transcription/status'),
   transcripts: () => getJson<any[]>('/transcription/transcripts'),
   transcriptionStart: () => postJson('/transcription/start'),
