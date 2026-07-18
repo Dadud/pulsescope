@@ -262,64 +262,88 @@ pub fn scan_all(data_dir: &Path) -> Vec<DecoderStatus> {
         });
     let pothos_bin = default_root.join("bin");
 
-    KNOWN_DECODERS.iter().map(|decoder| {
-        let (found, path, source) = find_decoder(decoder, data_dir, &pothos_bin);
-        DecoderStatus {
-            name: decoder.name.to_string(),
-            description: decoder.description.to_string(),
-            protocol: decoder.protocol.to_string(),
-            found,
-            path: path.as_ref().map(|p| p.to_string_lossy().to_string()),
-            source,
-            input_type: format!("{:?}", decoder.input_type),
-            github_url: decoder.github.map(|(owner, repo)| format!("https://github.com/{owner}/{repo}")),
-            install_url: decoder.github.map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/releases/latest")),
-        }
-    }).collect()
+    KNOWN_DECODERS
+        .iter()
+        .map(|decoder| {
+            let (found, path, source) = find_decoder(decoder, data_dir, &pothos_bin);
+            DecoderStatus {
+                name: decoder.name.to_string(),
+                description: decoder.description.to_string(),
+                protocol: decoder.protocol.to_string(),
+                found,
+                path: path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                source,
+                input_type: format!("{:?}", decoder.input_type),
+                github_url: decoder
+                    .github
+                    .map(|(owner, repo)| format!("https://github.com/{owner}/{repo}")),
+                install_url: decoder.github.map(|(owner, repo)| {
+                    format!("https://github.com/{owner}/{repo}/releases/latest")
+                }),
+            }
+        })
+        .collect()
 }
 
-fn find_decoder(decoder: &DecoderManifest, data_dir: &Path, pothos_bin: &Path) -> (bool, Option<PathBuf>, String) {
+fn find_decoder(
+    decoder: &DecoderManifest,
+    data_dir: &Path,
+    pothos_bin: &Path,
+) -> (bool, Option<PathBuf>, String) {
     // 1. Data dir (downloaded decoders)
     if let Some(subdir) = decoder.extract_subdir {
-        let exe = data_dir.join("decoders").join(subdir).join(decoder.exe_name);
-        if exe.exists() { return (true, Some(exe), "pulsescope/decoders".into()); }
+        let exe = data_dir
+            .join("decoders")
+            .join(subdir)
+            .join(decoder.exe_name);
+        if exe.exists() {
+            return (true, Some(exe), "pulsescope/decoders".into());
+        }
     }
     for subdir in decoder.search_dirs {
-        let dir = if subdir.is_empty() { data_dir.join("decoders") } else { data_dir.join("decoders").join(subdir) };
+        let dir = if subdir.is_empty() {
+            data_dir.join("decoders")
+        } else {
+            data_dir.join("decoders").join(subdir)
+        };
         let exe = dir.join(decoder.exe_name);
-        if exe.exists() { return (true, Some(exe), "pulsescope/decoders".into()); }
+        if exe.exists() {
+            return (true, Some(exe), "pulsescope/decoders".into());
+        }
     }
 
     // 2. PothosSDR / SoapySDR bin directory (SOAPY_SDR_ROOT or platform default)
     let exe = pothos_bin.join(decoder.exe_name);
-    if exe.exists() { return (true, Some(exe), "SoapySDR bin".into()); }
+    if exe.exists() {
+        return (true, Some(exe), "SoapySDR bin".into());
+    }
 
     // 3. Standard *nix system binaries, plus PATH.
     let standard_paths: &[&str] = if cfg!(windows) {
-        &[
-            r"C:\Program Files\rtl-sdr",
-            r"C:\SDR",
-        ]
+        &[r"C:\Program Files\rtl-sdr", r"C:\SDR"]
     } else {
-        &[
-            "/usr/bin",
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-        ]
+        &["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
     };
     for dir in standard_paths {
         let exe = std::path::PathBuf::from(dir).join(decoder.exe_name);
-        if exe.exists() { return (true, Some(exe), format!("{dir}/")); }
+        if exe.exists() {
+            return (true, Some(exe), format!("{dir}/"));
+        }
     }
 
     // 4. PATH lookup via `where`/`which`.
     let bare = decoder.exe_name.trim_end_matches(".exe");
-    if let Ok(output) = Command::new(if cfg!(windows) { "where" } else { "which" }).arg(bare).output() {
+    if let Ok(output) = Command::new(if cfg!(windows) { "where" } else { "which" })
+        .arg(bare)
+        .output()
+    {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = path_str.lines().next() {
                 let path = PathBuf::from(first_line.trim());
-                if path.exists() { return (true, Some(path), "PATH".into()); }
+                if path.exists() {
+                    return (true, Some(path), "PATH".into());
+                }
             }
         }
     }
@@ -343,8 +367,16 @@ pub fn download_decoder(name: &str, data_dir: &Path) -> Result<String, String> {
         .extract_subdir
         .ok_or_else(|| format!("no extraction directory is configured for {name}"))?;
 
-    if !url.to_ascii_lowercase().split(['?', '#']).next().unwrap_or(url).ends_with(".zip") {
-        return Err(format!("unsupported decoder archive format for {name}: {url}"));
+    if !url
+        .to_ascii_lowercase()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .ends_with(".zip")
+    {
+        return Err(format!(
+            "unsupported decoder archive format for {name}: {url}"
+        ));
     }
 
     let response = reqwest::blocking::get(url)
@@ -415,7 +447,9 @@ fn find_executable(directory: &Path, exe_name: &str) -> Option<PathBuf> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file()
-            && path.file_name().and_then(|name| name.to_str())
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
                 .is_some_and(|name| name.eq_ignore_ascii_case(exe_name))
         {
             return Some(path);

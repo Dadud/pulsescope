@@ -95,13 +95,19 @@ pub struct IqDecoder {
 
 impl IqDecoder {
     pub fn new(sample_rate: u32, baud: PocsagBaud) -> Self {
-        Self { decoder: PocsagDecoder::new(sample_rate, baud), previous: None }
+        Self {
+            decoder: PocsagDecoder::new(sample_rate, baud),
+            previous: None,
+        }
     }
 
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) -> Vec<PocsagMessage> {
         let mut audio = Vec::with_capacity(samples.len());
         for &(i, q) in samples {
-            if !i.is_finite() || !q.is_finite() { self.previous = None; continue; }
+            if !i.is_finite() || !q.is_finite() {
+                self.previous = None;
+                continue;
+            }
             if let Some((pi, pq)) = self.previous {
                 audio.push((q * pi - i * pq).atan2(i * pi + q * pq));
             }
@@ -110,9 +116,15 @@ impl IqDecoder {
         self.decoder.push_audio(&audio)
     }
 
-    pub fn flush(&mut self) -> Vec<PocsagMessage> { self.decoder.flush() }
-    pub fn corrected_words(&self) -> u64 { self.decoder.corrected_words() }
-    pub fn rejected_words(&self) -> u64 { self.decoder.rejected_words() }
+    pub fn flush(&mut self) -> Vec<PocsagMessage> {
+        self.decoder.flush()
+    }
+    pub fn corrected_words(&self) -> u64 {
+        self.decoder.corrected_words()
+    }
+    pub fn rejected_words(&self) -> u64 {
+        self.decoder.rejected_words()
+    }
 }
 
 impl PocsagDecoder {

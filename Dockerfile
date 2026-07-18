@@ -1,23 +1,45 @@
 # Multi-stage Dockerfile for PulseScope server.
 #
-# Stage 1 builds the Rust backend (with embedded SvelteKit build on a host mount)
-# Stage 2 produces a slim Debian runtime that ships the binary + static UI +
+# The first stages build the SvelteKit frontend and Rust backend.
+# The runtime stage produces a slim Debian image containing the binary + static UI +
 # SoapySDR runtime + common hardware libs. Multi-arch-safe.
 
 # ─────────────────────────────────────────────────────────────
-# Build stage
+# Frontend build stage
 # ─────────────────────────────────────────────────────────────
+FROM node:20-bookworm-slim AS frontend
+
+RUN corepack enable
+WORKDIR /build
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY ui/package.json ui/package.json
+RUN pnpm install --frozen-lockfile
+COPY ui ui
+RUN pnpm build
+
+# ────────────────────────────────────────────────────────────
+# Rust build stage
+# ────────────────────────────────────────────────────────────
 FROM rust:1-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_TERM_COLOR=never
 
-# Build-time deps for SoapySDR + Rust crates
+# Native development headers required by Tauri/WebKitGTK, CPAL/ALSA,
+# GLib, SoapySDR, and crates that discover libraries through pkg-config.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         cmake \
         build-essential \
         pkg-config \
+        libglib2.0-dev \
+        libgtk-3-dev \
+        libwebkit2gtk-4.1-dev \
+        libayatana-appindicator3-dev \
+        librsvg2-dev \
+        libasound2-dev \
+        libsoapysdr-dev \
+        patchelf \
         libusb-1.0-0-dev \
         libhidapi-libusb0 \
         libudev-dev \
@@ -29,9 +51,10 @@ WORKDIR /build
 
 # Add source
 COPY . .
+COPY --from=frontend /build/ui/build /build/ui/build
 
 # Build the server binary (--server mode is the default flag, but turn it on):
-RUN cargo build --release --features soapysdr --bin pulsescope
+RUN cargo build --release --manifest-path src-tauri/Cargo.toml --features soapysdr --bin pulsescope
 
 # ─────────────────────────────────────────────────────────────
 # Runtime stage
@@ -49,6 +72,8 @@ RUN apt-get update && \
         libhidapi-libusb0 \
         libudev1 \
         libssl3 \
+        libsoapysdr0.8 \
+        curl \
         tini && \
     rm -rf /var/lib/apt/lists/*
 
@@ -65,10 +90,9 @@ RUN groupadd --gid 500 pulsescope && \
 
 WORKDIR /app
 
-# Pull in the build artifacts and the SvelteKit build (mounted via /ui or copied
-# separately). The image expects the build host to put the SvelteKit bundle at
-# /app/ui/build before building.
-COPY --from=builder /build/target/release/pulsescope /usr/local/bin/pulsescope
+# Pull in the backend and the frontend produced by the two build stages.
+COPY --from=builder /build/src-tauri/target/release/pulsescope /usr/local/bin/pulsescope
+COPY --from=frontend /build/ui/build /app/ui/build
 
 # Healthcheck: every 30s, expect 200 from /health
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

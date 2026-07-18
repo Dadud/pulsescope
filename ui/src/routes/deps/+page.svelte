@@ -90,7 +90,6 @@
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
   th { color: var(--fg-dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
-  tr.ok { }
   tr.missing td { opacity: 0.65; }
   small { color: var(--fg-dim); }
   .mini { padding: 2px 6px; font-size: 11px; }

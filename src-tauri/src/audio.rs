@@ -6,7 +6,10 @@
 
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::{Arc, atomic::{AtomicU32, AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc,
+};
 use std::thread;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -54,7 +57,9 @@ impl AudioSink {
 
     pub fn start(&self) {
         let mut started = self.started.lock();
-        if *started { return; }
+        if *started {
+            return;
+        }
         *started = true;
         drop(started);
 
@@ -80,28 +85,75 @@ impl AudioSink {
             *output_device.lock() = device.name().ok();
             let config = match device.default_output_config() {
                 Ok(v) => v,
-                Err(e) => { *error.lock() = Some(format!("Audio config: {e}")); return; }
+                Err(e) => {
+                    *error.lock() = Some(format!("Audio config: {e}"));
+                    return;
+                }
             };
             *sample_rate.lock() = config.sample_rate().0;
             let channels = config.channels() as usize;
             let err_state = error.clone();
-            let err_fn = move |e| { *err_state.lock() = Some(format!("Audio stream: {e}")); };
+            let err_fn = move |e| {
+                *err_state.lock() = Some(format!("Audio stream: {e}"));
+            };
 
             let result = match config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_output_stream(
                     &config.clone().into(),
-                    move |data: &mut [f32], _| fill_f32(data, channels, &queue, &callback_frames, &underrun_samples, &output_peak_bits, &nonzero_samples, &network, &network_packets, &network_errors),
-                    err_fn, None,
+                    move |data: &mut [f32], _| {
+                        fill_f32(
+                            data,
+                            channels,
+                            &queue,
+                            &callback_frames,
+                            &underrun_samples,
+                            &output_peak_bits,
+                            &nonzero_samples,
+                            &network,
+                            &network_packets,
+                            &network_errors,
+                        )
+                    },
+                    err_fn,
+                    None,
                 ),
                 cpal::SampleFormat::I16 => device.build_output_stream(
                     &config.clone().into(),
-                    move |data: &mut [i16], _| fill_i16(data, channels, &queue, &callback_frames, &underrun_samples, &output_peak_bits, &nonzero_samples, &network, &network_packets, &network_errors),
-                    err_fn, None,
+                    move |data: &mut [i16], _| {
+                        fill_i16(
+                            data,
+                            channels,
+                            &queue,
+                            &callback_frames,
+                            &underrun_samples,
+                            &output_peak_bits,
+                            &nonzero_samples,
+                            &network,
+                            &network_packets,
+                            &network_errors,
+                        )
+                    },
+                    err_fn,
+                    None,
                 ),
                 cpal::SampleFormat::U16 => device.build_output_stream(
                     &config.clone().into(),
-                    move |data: &mut [u16], _| fill_u16(data, channels, &queue, &callback_frames, &underrun_samples, &output_peak_bits, &nonzero_samples, &network, &network_packets, &network_errors),
-                    err_fn, None,
+                    move |data: &mut [u16], _| {
+                        fill_u16(
+                            data,
+                            channels,
+                            &queue,
+                            &callback_frames,
+                            &underrun_samples,
+                            &output_peak_bits,
+                            &nonzero_samples,
+                            &network,
+                            &network_packets,
+                            &network_errors,
+                        )
+                    },
+                    err_fn,
+                    None,
                 ),
                 other => {
                     *error.lock() = Some(format!("Unsupported audio format: {other:?}"));
@@ -110,36 +162,50 @@ impl AudioSink {
             };
             let stream = match result {
                 Ok(v) => v,
-                Err(e) => { *error.lock() = Some(format!("Audio stream build: {e}")); return; }
+                Err(e) => {
+                    *error.lock() = Some(format!("Audio stream build: {e}"));
+                    return;
+                }
             };
             if let Err(e) = stream.play() {
                 *error.lock() = Some(format!("Audio play: {e}"));
                 return;
             }
             *running.lock() = true;
-            loop { thread::park(); }
+            loop {
+                thread::park();
+            }
         });
     }
 
-    pub fn sample_rate(&self) -> u32 { *self.sample_rate.lock() }
+    pub fn sample_rate(&self) -> u32 {
+        *self.sample_rate.lock()
+    }
 
     /// Flush queued PCM when the last VFO stops. The CPAL stream may remain
     /// open, but it must output silence rather than stale demodulated audio.
-    pub fn clear_queue(&self) { self.queue.lock().clear(); }
+    pub fn clear_queue(&self) {
+        self.queue.lock().clear();
+    }
 
     pub fn push(&self, samples: &[f32], volume: f32) {
         // Headless/LAN mode must not route RF noise to the host speakers.
         // It can be explicitly enabled for a local lab server with
         // PULSESCOPE_AUDIO_OUTPUT=1; desktop mode leaves this unset.
-        if std::env::var("PULSESCOPE_AUDIO_OUTPUT").as_deref() == Ok("0") { return; }
+        if std::env::var("PULSESCOPE_AUDIO_OUTPUT").as_deref() == Ok("0") {
+            return;
+        }
         self.start();
         let mut q = self.queue.lock();
         let gain = volume.clamp(0.0, 1.0);
         for &sample in samples {
-            if q.len() >= MAX_QUEUE_SAMPLES { q.pop_front(); }
+            if q.len() >= MAX_QUEUE_SAMPLES {
+                q.pop_front();
+            }
             q.push_back((sample * gain).clamp(-1.0, 1.0));
         }
-        self.pushed_samples.fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.pushed_samples
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
     }
 
     pub fn start_network(&self, target: SocketAddr) -> std::io::Result<()> {
@@ -149,10 +215,16 @@ impl AudioSink {
         Ok(())
     }
 
-    pub fn stop_network(&self) { *self.network.lock() = None; }
+    pub fn stop_network(&self) {
+        *self.network.lock() = None;
+    }
 
     pub fn network_status(&self) -> serde_json::Value {
-        let target = self.network.lock().as_ref().map(|(_, target)| target.to_string());
+        let target = self
+            .network
+            .lock()
+            .as_ref()
+            .map(|(_, target)| target.to_string());
         serde_json::json!({"enabled": target.is_some(), "target": target, "packets": self.network_packets.load(Ordering::Relaxed), "errors": self.network_errors.load(Ordering::Relaxed), "format":"PSAU-f32le", "channels":1})
     }
 
@@ -175,7 +247,9 @@ impl AudioSink {
 
 fn observe_sample(sample: f32, peak: &AtomicU32, nonzero: &AtomicU64) {
     let magnitude = sample.abs();
-    if magnitude > 1.0e-6 { nonzero.fetch_add(1, Ordering::Relaxed); }
+    if magnitude > 1.0e-6 {
+        nonzero.fetch_add(1, Ordering::Relaxed);
+    }
     let mut old = peak.load(Ordering::Relaxed);
     let bits = magnitude.to_bits();
     while bits > old {
@@ -185,31 +259,100 @@ fn observe_sample(sample: f32, peak: &AtomicU32, nonzero: &AtomicU64) {
         }
     }
 }
-fn next_sample(queue: &Arc<Mutex<VecDeque<f32>>>, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64) -> f32 {
-    let sample = queue.lock().pop_front().unwrap_or_else(|| { underruns.fetch_add(1, Ordering::Relaxed); 0.0 });
+fn next_sample(
+    queue: &Arc<Mutex<VecDeque<f32>>>,
+    underruns: &AtomicU64,
+    peak: &AtomicU32,
+    nonzero: &AtomicU64,
+) -> f32 {
+    let sample = queue.lock().pop_front().unwrap_or_else(|| {
+        underruns.fetch_add(1, Ordering::Relaxed);
+        0.0
+    });
     observe_sample(sample, peak, nonzero);
     sample
 }
-fn fill_f32(data: &mut [f32], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>, callbacks: &AtomicU64, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64, network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
+fn fill_f32(
+    data: &mut [f32],
+    channels: usize,
+    queue: &Arc<Mutex<VecDeque<f32>>>,
+    callbacks: &AtomicU64,
+    underruns: &AtomicU64,
+    peak: &AtomicU32,
+    nonzero: &AtomicU64,
+    network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>,
+    packets: &AtomicU64,
+    errors: &AtomicU64,
+) {
     callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
-    for frame in data.chunks_mut(channels) { let s = next_sample(queue, underruns, peak, nonzero); for out in frame { *out = s; } }
+    for frame in data.chunks_mut(channels) {
+        let s = next_sample(queue, underruns, peak, nonzero);
+        for out in frame {
+            *out = s;
+        }
+    }
     let samples: Vec<f32> = data.chunks(channels.max(1)).map(|frame| frame[0]).collect();
     send_network(&samples, network, packets, errors);
 }
-fn fill_i16(data: &mut [i16], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>, callbacks: &AtomicU64, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64, network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
+fn fill_i16(
+    data: &mut [i16],
+    channels: usize,
+    queue: &Arc<Mutex<VecDeque<f32>>>,
+    callbacks: &AtomicU64,
+    underruns: &AtomicU64,
+    peak: &AtomicU32,
+    nonzero: &AtomicU64,
+    network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>,
+    packets: &AtomicU64,
+    errors: &AtomicU64,
+) {
     callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
-    for frame in data.chunks_mut(channels) { let s = next_sample(queue, underruns, peak, nonzero); let value = (s * i16::MAX as f32) as i16; for out in frame { *out = value; } }
-    let samples: Vec<f32> = data.chunks(channels.max(1)).map(|frame| frame[0] as f32 / i16::MAX as f32).collect();
+    for frame in data.chunks_mut(channels) {
+        let s = next_sample(queue, underruns, peak, nonzero);
+        let value = (s * i16::MAX as f32) as i16;
+        for out in frame {
+            *out = value;
+        }
+    }
+    let samples: Vec<f32> = data
+        .chunks(channels.max(1))
+        .map(|frame| frame[0] as f32 / i16::MAX as f32)
+        .collect();
     send_network(&samples, network, packets, errors);
 }
-fn fill_u16(data: &mut [u16], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>, callbacks: &AtomicU64, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64, network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
+fn fill_u16(
+    data: &mut [u16],
+    channels: usize,
+    queue: &Arc<Mutex<VecDeque<f32>>>,
+    callbacks: &AtomicU64,
+    underruns: &AtomicU64,
+    peak: &AtomicU32,
+    nonzero: &AtomicU64,
+    network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>,
+    packets: &AtomicU64,
+    errors: &AtomicU64,
+) {
     callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
-    for frame in data.chunks_mut(channels) { let s = next_sample(queue, underruns, peak, nonzero); let value = ((s * 0.5 + 0.5) * u16::MAX as f32) as u16; for out in frame { *out = value; } }
-    let samples: Vec<f32> = data.chunks(channels.max(1)).map(|frame| (frame[0] as f32 / u16::MAX as f32 - 0.5) * 2.0).collect();
+    for frame in data.chunks_mut(channels) {
+        let s = next_sample(queue, underruns, peak, nonzero);
+        let value = ((s * 0.5 + 0.5) * u16::MAX as f32) as u16;
+        for out in frame {
+            *out = value;
+        }
+    }
+    let samples: Vec<f32> = data
+        .chunks(channels.max(1))
+        .map(|frame| (frame[0] as f32 / u16::MAX as f32 - 0.5) * 2.0)
+        .collect();
     send_network(&samples, network, packets, errors);
 }
 
-fn send_network(samples: &[f32], network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
+fn send_network(
+    samples: &[f32],
+    network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>,
+    packets: &AtomicU64,
+    errors: &AtomicU64,
+) {
     let mut packet = Vec::with_capacity(16 + samples.len() * 4);
     packet.extend_from_slice(b"PSAU");
     packet.extend_from_slice(&1u16.to_le_bytes());
@@ -217,10 +360,21 @@ fn send_network(samples: &[f32], network: &Arc<Mutex<Option<(UdpSocket, SocketAd
     packet.extend_from_slice(&(samples.len() as u16).to_le_bytes());
     packet.extend_from_slice(&0u16.to_le_bytes());
     packet.extend_from_slice(&0u16.to_le_bytes());
-    for sample in samples { packet.extend_from_slice(&sample.to_le_bytes()); }
+    for sample in samples {
+        packet.extend_from_slice(&sample.to_le_bytes());
+    }
     let binding = network.lock();
-    let Some((socket, target)) = binding.as_ref() else { return; };
-    match socket.send_to(&packet, target) { Ok(_) => { packets.fetch_add(1, Ordering::Relaxed); }, Err(_) => { errors.fetch_add(1, Ordering::Relaxed); } }
+    let Some((socket, target)) = binding.as_ref() else {
+        return;
+    };
+    match socket.send_to(&packet, target) {
+        Ok(_) => {
+            packets.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {
+            errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[cfg(test)]

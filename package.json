@@ -3,6 +3,7 @@
   "private": true,
   "license": "MIT",
   "scripts": {
+    "check": "pnpm --filter pulsescope-ui check",
     "dev": "pnpm --filter pulsescope-ui dev",
     "build": "pnpm --filter pulsescope-ui build",
     "preview": "pnpm --filter pulsescope-ui preview",

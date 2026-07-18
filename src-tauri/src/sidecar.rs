@@ -7,17 +7,17 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::time::Duration;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::broadcast;
 
-use crate::state::ScannerEvent;
 use crate::db::Db;
+use crate::state::ScannerEvent;
 
 #[derive(Clone)]
 pub struct SidecarRegistry {
@@ -48,10 +48,18 @@ impl SidecarRegistry {
     }
 
     pub fn is_running(&self, name: &str) -> bool {
-        self.children.lock().get(name).map(|child| {
-            let mut child = child.lock();
-            match child.try_wait() { Ok(Some(_)) => false, Ok(None) => true, Err(_) => false }
-        }).unwrap_or(false)
+        self.children
+            .lock()
+            .get(name)
+            .map(|child| {
+                let mut child = child.lock();
+                match child.try_wait() {
+                    Ok(Some(_)) => false,
+                    Ok(None) => true,
+                    Err(_) => false,
+                }
+            })
+            .unwrap_or(false)
     }
 
     pub async fn spawn_decoder(
@@ -108,28 +116,51 @@ impl SidecarRegistry {
                 tracing::debug!(sidecar = %stderr_name, line = %line, "sidecar stderr");
                 let mut logs = stderr_log.lock();
                 let buffer = logs.entry(stderr_name.clone()).or_default();
-                if buffer.len() >= 200 { buffer.pop_front(); }
+                if buffer.len() >= 200 {
+                    buffer.pop_front();
+                }
                 buffer.push_back(line);
             }
         });
 
-        self.children.lock().insert(name.to_string(), Arc::new(Mutex::new(child)));
+        self.children
+            .lock()
+            .insert(name.to_string(), Arc::new(Mutex::new(child)));
         self.input_stats.lock().insert(name.to_string(), (0, 0));
-        self.inputs.lock().await.insert(name.to_string(), Arc::new(tokio::sync::Mutex::new(stdin)));
+        self.inputs
+            .lock()
+            .await
+            .insert(name.to_string(), Arc::new(tokio::sync::Mutex::new(stdin)));
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let exited = self.children.lock().get(name).and_then(|child| child.lock().try_wait().ok().flatten());
+        let exited = self
+            .children
+            .lock()
+            .get(name)
+            .and_then(|child| child.lock().try_wait().ok().flatten());
         if let Some(status) = exited {
             self.inputs.lock().await.remove(name);
             self.children.lock().remove(name);
-            return Err(anyhow::anyhow!("decoder exited during startup with {}", status));
+            return Err(anyhow::anyhow!(
+                "decoder exited during startup with {}",
+                status
+            ));
         }
         Ok(())
     }
 
     pub async fn feed_iq(&self, samples: &[rustfft::num_complex::Complex<f32>]) {
         use tokio::io::AsyncWriteExt;
-        let handles: Vec<_> = self.inputs.lock().await.iter().filter(|(name, _)| name.as_str() == "rtl_433").map(|(_, handle)| handle.clone()).collect();
-        if handles.is_empty() { return; }
+        let handles: Vec<_> = self
+            .inputs
+            .lock()
+            .await
+            .iter()
+            .filter(|(name, _)| name.as_str() == "rtl_433")
+            .map(|(_, handle)| handle.clone())
+            .collect();
+        if handles.is_empty() {
+            return;
+        }
         let bytes = encode_u8_iq(samples);
         if let Some((sample_count, byte_count)) = self.input_stats.lock().get_mut("rtl_433") {
             *sample_count += samples.len() as u64;
@@ -164,17 +195,40 @@ impl SidecarRegistry {
     }
 
     pub fn stderr(&self, name: &str) -> Vec<String> {
-        self.stderr.lock().get(name).map(|v| v.iter().cloned().collect()).unwrap_or_default()
+        self.stderr
+            .lock()
+            .get(name)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn statuses(&self) -> Vec<SidecarStatus> {
-        self.children.lock().iter().map(|(name, child)| {
-            let mut child = child.lock();
-            let running = matches!(child.try_wait(), Ok(None));
-            let exit_code = if running { None } else { child.try_wait().ok().flatten().and_then(|status| status.code()) };
-            let stats = self.input_stats.lock().get(name).copied().unwrap_or((0, 0));
-            SidecarStatus { name: name.clone(), running, pid: if running { child.id() } else { None }, exit_code, input_samples: stats.0, input_bytes: stats.1 }
-        }).collect()
+        self.children
+            .lock()
+            .iter()
+            .map(|(name, child)| {
+                let mut child = child.lock();
+                let running = matches!(child.try_wait(), Ok(None));
+                let exit_code = if running {
+                    None
+                } else {
+                    child
+                        .try_wait()
+                        .ok()
+                        .flatten()
+                        .and_then(|status| status.code())
+                };
+                let stats = self.input_stats.lock().get(name).copied().unwrap_or((0, 0));
+                SidecarStatus {
+                    name: name.clone(),
+                    running,
+                    pid: if running { child.id() } else { None },
+                    exit_code,
+                    input_samples: stats.0,
+                    input_bytes: stats.1,
+                }
+            })
+            .collect()
     }
 }
 
@@ -207,7 +261,11 @@ pub fn parse_line(protocol: &str, line: &str) -> Option<crate::db::DecodedMessag
                 msg.content = format!("model={model} {value}");
             }
             if let Some(freq) = value.get("freq").and_then(|v| v.as_f64()) {
-                msg.frequency_hz = if freq < 1_000_000.0 { (freq * 1_000_000.0) as u64 } else { freq as u64 };
+                msg.frequency_hz = if freq < 1_000_000.0 {
+                    (freq * 1_000_000.0) as u64
+                } else {
+                    freq as u64
+                };
             }
         } else {
             // rtl_433 is launched with -F json. Do not turn banners, warnings,
@@ -231,7 +289,9 @@ pub fn parse_line(protocol: &str, line: &str) -> Option<crate::db::DecodedMessag
     if p.contains("dumpvdl2") || p == "vdl2" {
         msg.protocol = "vdl2".into();
         msg.message_type = "aircraft_datalink".into();
-        msg.address = field_after(line, "AC:").map(|v| v.split(',').next().unwrap_or(&v).trim().to_string()).unwrap_or_default();
+        msg.address = field_after(line, "AC:")
+            .map(|v| v.split(',').next().unwrap_or(&v).trim().to_string())
+            .unwrap_or_default();
         msg.content = field_after(line, "Text:").unwrap_or_else(|| line.to_string());
         return Some(msg);
     }
@@ -240,7 +300,11 @@ pub fn parse_line(protocol: &str, line: &str) -> Option<crate::db::DecodedMessag
         msg.protocol = "acars".into();
         msg.message_type = "aircraft_datalink".into();
         msg.content = field_after(line, "Message:").unwrap_or_else(|| line.to_string());
-        msg.address = line.split_whitespace().find(|v| v.len() == 6 && v.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_default().into();
+        msg.address = line
+            .split_whitespace()
+            .find(|v| v.len() == 6 && v.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or_default()
+            .into();
         return Some(msg);
     }
 
@@ -255,10 +319,21 @@ pub fn parse_line(protocol: &str, line: &str) -> Option<crate::db::DecodedMessag
     }
 
     if p.contains("dsd") || p == "p25" || p == "dmr" {
-        msg.protocol = if lower.contains("p25") { "p25".into() } else { "digital_voice".into() };
+        msg.protocol = if lower.contains("p25") {
+            "p25".into()
+        } else {
+            "digital_voice".into()
+        };
         msg.message_type = "voice_metadata".into();
-        msg.address = field_after(line, "TG:").or_else(|| field_after(line, "Talkgroup:")).unwrap_or_default();
-        let encrypted = lower.split("encrypted:").nth(1).map(str::trim_start).map(|v| v.starts_with("yes") || v.starts_with("true")).unwrap_or_else(|| lower.contains("encrypted") && !lower.contains("not encrypted"));
+        msg.address = field_after(line, "TG:")
+            .or_else(|| field_after(line, "Talkgroup:"))
+            .unwrap_or_default();
+        let encrypted = lower
+            .split("encrypted:")
+            .nth(1)
+            .map(str::trim_start)
+            .map(|v| v.starts_with("yes") || v.starts_with("true"))
+            .unwrap_or_else(|| lower.contains("encrypted") && !lower.contains("not encrypted"));
         msg.encryption = if encrypted { "encrypted" } else { "none" }.into();
         return Some(msg);
     }
@@ -287,12 +362,27 @@ fn default_frequency(protocol: &str) -> u64 {
 fn field_after(line: &str, marker: &str) -> Option<String> {
     let (_, value) = line.split_once(marker)?;
     let mut value = value.trim().trim_start_matches(':').trim();
-    for next in [" Address:", " Function:", " Alpha:", " Numeric:", " Text:", " Message:", " TG:", " Talkgroup:", " encrypted:", " lat="] {
+    for next in [
+        " Address:",
+        " Function:",
+        " Alpha:",
+        " Numeric:",
+        " Text:",
+        " Message:",
+        " TG:",
+        " Talkgroup:",
+        " encrypted:",
+        " lat=",
+    ] {
         if let Some((head, _)) = value.split_once(next) {
             value = head.trim();
         }
     }
-    if value.is_empty() { None } else { Some(value.to_string()) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,12 +403,28 @@ mod tests {
     fn rtl433_process_stdout_persists_through_normal_pipeline() {
         use std::process::Command;
         use std::time::{SystemTime, UNIX_EPOCH};
-        let output = match Command::new("rtl_433.exe").args(["-y", "{25}fb2dd58", "-F", "json"]).output() {
+        let output = match Command::new("rtl_433.exe")
+            .args(["-y", "{25}fb2dd58", "-F", "json"])
+            .output()
+        {
             Ok(output) => output,
-            Err(error) => { eprintln!("rtl_433 unavailable: {error}"); return; }
+            Err(error) => {
+                eprintln!("rtl_433 unavailable: {error}");
+                return;
+            }
         };
-        assert!(output.status.success(), "rtl_433 failed: {:?}", output.status);
-        let path = std::env::temp_dir().join(format!("pulsescope-sidecar-{}.db", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        assert!(
+            output.status.success(),
+            "rtl_433 failed: {:?}",
+            output.status
+        );
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-sidecar-{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let db = crate::db::Db::open(&path).unwrap();
         let mut parsed = 0;
         for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -327,17 +433,26 @@ mod tests {
                 parsed += 1;
             }
         }
-        assert!(parsed >= 1, "decoder emitted no parseable JSON: {}", String::from_utf8_lossy(&output.stdout));
+        assert!(
+            parsed >= 1,
+            "decoder emitted no parseable JSON: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
         let stored = db.messages_by_protocol(Some("rtl_433"), 10).unwrap();
         assert_eq!(stored.len(), parsed);
-        assert!(stored.iter().any(|m| m.protocol == "rtl_433" && m.message_type == "sensor"));
+        assert!(stored
+            .iter()
+            .any(|m| m.protocol == "rtl_433" && m.message_type == "sensor"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn encodes_interleaved_u8_iq_transport() {
         use rustfft::num_complex::Complex;
-        assert_eq!(super::encode_u8_iq(&[Complex::new(-1.0, 1.0), Complex::new(0.0, 0.0)]), vec![0, 255, 128, 128]);
+        assert_eq!(
+            super::encode_u8_iq(&[Complex::new(-1.0, 1.0), Complex::new(0.0, 0.0)]),
+            vec![0, 255, 128, 128]
+        );
     }
 
     #[test]
@@ -350,7 +465,11 @@ mod tests {
 
     #[test]
     fn parses_pocsag_fields() {
-        let msg = parse_line("multimon-ng", "POCSAG512: Address: 123 Function: 0 Alpha: HELLO").unwrap();
+        let msg = parse_line(
+            "multimon-ng",
+            "POCSAG512: Address: 123 Function: 0 Alpha: HELLO",
+        )
+        .unwrap();
         assert_eq!(msg.protocol, "pocsag");
         assert_eq!(msg.address, "123");
         assert_eq!(msg.content, "HELLO");

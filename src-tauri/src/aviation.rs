@@ -41,18 +41,32 @@ pub struct UatIqDecoder {
 }
 
 impl UatIqDecoder {
-    pub fn new(sample_rate: u32) -> Self { Self { decoder: UatDecoder::new(), sample_rate, clock: 0, sum: 0.0, previous: None } }
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            decoder: UatDecoder::new(),
+            sample_rate,
+            clock: 0,
+            sum: 0.0,
+            previous: None,
+        }
+    }
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
         for &(i, q) in samples {
             if let Some((pi, pq)) = self.previous {
                 self.sum += (q * pi - i * pq).atan2(i * pi + q * pq) as f64;
                 self.clock += 1_041_667;
-                if self.clock >= self.sample_rate as u64 { self.clock -= self.sample_rate as u64; self.decoder.feed_bits(&[self.sum >= 0.0]); self.sum = 0.0; }
+                if self.clock >= self.sample_rate as u64 {
+                    self.clock -= self.sample_rate as u64;
+                    self.decoder.feed_bits(&[self.sum >= 0.0]);
+                    self.sum = 0.0;
+                }
             }
             self.previous = Some((i, q));
         }
     }
-    pub fn take_messages(&mut self) -> Vec<UatMessage> { self.decoder.take_messages() }
+    pub fn take_messages(&mut self) -> Vec<UatMessage> {
+        self.decoder.take_messages()
+    }
 }
 
 /// Raw-IQ front end for ACARS MSK. The output is handed to the native ACARS
@@ -67,18 +81,32 @@ pub struct AcarsIqDecoder {
 }
 
 impl AcarsIqDecoder {
-    pub fn new(sample_rate: u32, order: BitOrder, invert: bool) -> Self { Self { decoder: AcarsDecoder::new(order, invert), sample_rate, clock: 0, sum: 0.0, previous: None } }
+    pub fn new(sample_rate: u32, order: BitOrder, invert: bool) -> Self {
+        Self {
+            decoder: AcarsDecoder::new(order, invert),
+            sample_rate,
+            clock: 0,
+            sum: 0.0,
+            previous: None,
+        }
+    }
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
         for &(i, q) in samples {
             if let Some((pi, pq)) = self.previous {
                 self.sum += (q * pi - i * pq).atan2(i * pi + q * pq) as f64;
                 self.clock += 2400;
-                if self.clock >= self.sample_rate as u64 { self.clock -= self.sample_rate as u64; self.decoder.feed_bits(&[self.sum >= 0.0]); self.sum = 0.0; }
+                if self.clock >= self.sample_rate as u64 {
+                    self.clock -= self.sample_rate as u64;
+                    self.decoder.feed_bits(&[self.sum >= 0.0]);
+                    self.sum = 0.0;
+                }
             }
             self.previous = Some((i, q));
         }
     }
-    pub fn take_messages(&mut self) -> Vec<AcarsMessage> { self.decoder.take_messages() }
+    pub fn take_messages(&mut self) -> Vec<AcarsMessage> {
+        self.decoder.take_messages()
+    }
 }
 
 /// The on-air UAT frame family selected by its sync word and downlink type.
@@ -337,7 +365,15 @@ pub struct Vdl2IqDecoder {
 }
 
 impl Vdl2IqDecoder {
-    pub fn new(sample_rate: u32) -> Self { Self { decoder: Vdl2Decoder::new(), sample_rate, clock: 0, phase_sum: 0.0, previous: None } }
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            decoder: Vdl2Decoder::new(),
+            sample_rate,
+            clock: 0,
+            phase_sum: 0.0,
+            previous: None,
+        }
+    }
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) {
         for &(i, q) in samples {
             if let Some((pi, pq)) = self.previous {
@@ -345,18 +381,25 @@ impl Vdl2IqDecoder {
                 self.clock += 31_500;
                 if self.clock >= self.sample_rate as u64 {
                     self.clock -= self.sample_rate as u64;
-                    let sector = ((self.phase_sum / (std::f64::consts::TAU / 8.0)).round() as i32).rem_euclid(8) as usize;
+                    let sector = ((self.phase_sum / (std::f64::consts::TAU / 8.0)).round() as i32)
+                        .rem_euclid(8) as usize;
                     // Differential 8-PSK Gray ordering: adjacent sectors differ by one bit.
                     const GRAY: [u8; 8] = [0, 1, 3, 2, 6, 7, 5, 4];
                     let symbol = GRAY[sector];
-                    self.decoder.feed_bits(&[(symbol & 4) != 0, (symbol & 2) != 0, (symbol & 1) != 0]);
+                    self.decoder.feed_bits(&[
+                        (symbol & 4) != 0,
+                        (symbol & 2) != 0,
+                        (symbol & 1) != 0,
+                    ]);
                     self.phase_sum = 0.0;
                 }
             }
             self.previous = Some((i, q));
         }
     }
-    pub fn take_messages(&mut self) -> Vec<Vdl2Message> { self.decoder.take_messages() }
+    pub fn take_messages(&mut self) -> Vec<Vdl2Message> {
+        self.decoder.take_messages()
+    }
 }
 
 /// A complete ACARS block, including its integrity result.
