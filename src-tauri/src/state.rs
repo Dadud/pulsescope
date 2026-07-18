@@ -38,6 +38,7 @@ pub struct AppState {
     pub events: broadcast::Sender<ScannerEvent>,
     pub data_dir: PathBuf,
     pub started_ms: i64,
+    pub metrics: Arc<crate::operations::Metrics>,
 }
 
 impl AppState {
@@ -70,6 +71,7 @@ impl AppState {
             events: events_tx,
             data_dir,
             started_ms: crate::scanner::now_ms(),
+            metrics: Arc::new(crate::operations::Metrics::default()),
         })
     }
 

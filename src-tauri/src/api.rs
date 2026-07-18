@@ -59,6 +59,9 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
     let api = Router::new()
         // ── health / settings ────────────────────────────────────────────
         .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .route("/metrics", get(metrics))
+        .route("/diagnostics/bundle", get(diagnostic_bundle))
         .route("/settings", get(get_settings).put(put_settings))
         // ── device ───────────────────────────────────────────────────────
         .route("/devices", get(list_devices))
@@ -371,7 +374,7 @@ async fn auth_gate(
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     let path = req.uri().path().to_owned();
     // Always allow health and CORS preflight checks.
-    if path == "/api/health" || path == "/health" { return Ok(next.run(req).await); }
+    if matches!(path.as_str(), "/api/health"|"/health"|"/api/ready"|"/ready") { return Ok(next.run(req).await); }
     let header = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
     let query = req.uri().query().and_then(|q| {
         q.split('&').find_map(|kv| kv.strip_prefix("token="))
@@ -410,6 +413,28 @@ async fn health(State(s): State<ApiState>) -> impl IntoResponse {
             "decoders_total": decoders.len(),
         }
     }))
+}
+
+async fn readiness(State(s): State<ApiState>) -> impl IntoResponse {
+    let db_ok=s.0.metrics.time_database(||s.0.db.integrity_check().unwrap_or(false));
+    let device=s.0.device.status();
+    let audio=s.0.audio.status();
+    let mut components=vec![
+        crate::operations::ComponentHealth{name:"database".into(),status:if db_ok{"ok"}else{"failed"},detail:if db_ok{"integrity check passed".into()}else{"database unavailable".into()}},
+        crate::operations::ComponentHealth{name:"capture".into(),status:if device.connected{"ok"}else{"degraded"},detail:if device.connected{device.label}else{"no receiver connected".into()}},
+    ];
+    if audio.get("error").and_then(Value::as_str).is_some_and(|e|!e.is_empty()) { components.push(crate::operations::ComponentHealth{name:"audio".into(),status:"degraded",detail:"audio output unavailable".into()}); }
+    let ready=db_ok;
+    (if ready{StatusCode::OK}else{StatusCode::SERVICE_UNAVAILABLE},Json(json!({"ready":ready,"status":if ready && components.iter().all(|c|c.status=="ok") {"ok"} else if ready {"degraded"} else {"not_ready"},"components":components})))
+}
+async fn metrics(State(s): State<ApiState>) -> impl IntoResponse { Json(s.0.metrics.snapshot()) }
+async fn diagnostic_bundle(State(s): State<ApiState>) -> impl IntoResponse {
+    let config=toml::to_string_pretty(&*s.0.config.read()).unwrap_or_default();
+    let status=serde_json::to_string_pretty(&json!({"device":s.0.device.status(),"audio":s.0.audio.status(),"sidecars":s.0.sidecars.statuses(),"metrics":s.0.metrics.snapshot()})).unwrap_or_default();
+    match crate::operations::diagnostic_bundle(&s.0.data_dir,&[("config.toml",config),("status.json",status)]) {
+        Ok(bytes)=>(StatusCode::OK,[(header::CONTENT_TYPE,"application/zip"),(header::CONTENT_DISPOSITION,"attachment; filename=pulsescope-diagnostics.zip")],bytes).into_response(),
+        Err(error)=>crate::operations::OperationalError{status:StatusCode::INTERNAL_SERVER_ERROR,code:"DIAGNOSTIC_BUNDLE_FAILED",safe_message:"The diagnostic bundle could not be created.",context:error,request_id:uuid::Uuid::new_v4().to_string()}.into_response(),
+    }
 }
 
 async fn get_settings(State(s): State<ApiState>) -> impl IntoResponse {

@@ -1,6 +1,22 @@
 <script lang="ts">
   import '../app.css';
+  import { onMount } from 'svelte';
   let { children } = $props();
+  type ComponentHealth = { name: string; status: 'ok' | 'degraded' | 'failed'; detail: string };
+  let components = $state<ComponentHealth[]>([]);
+  let processOnline = $state(true);
+  onMount(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch('/api/ready');
+        const body = await response.json();
+        if (active) { processOnline = true; components = body.components ?? []; }
+      } catch { if (active) processOnline = false; }
+    };
+    refresh(); const timer = setInterval(refresh, 10_000);
+    return () => { active = false; clearInterval(timer); };
+  });
 </script>
 
 <svelte:head>
@@ -41,6 +57,14 @@
     </ul>
   </nav>
   <main class="content">
+    {#if !processOnline}
+      <aside class="health-banner offline" role="status">PulseScope is offline. Reconnecting…</aside>
+    {:else if components.some((component) => component.status !== 'ok')}
+      <aside class="health-banner degraded" role="status">
+        <strong>Running with degraded components:</strong>
+        {components.filter((component) => component.status !== 'ok').map((component) => `${component.name} — ${component.detail}`).join('; ')}
+      </aside>
+    {/if}
     {@render children?.()}
   </main>
 </div>

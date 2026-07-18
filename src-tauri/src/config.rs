@@ -6,10 +6,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub schema_version: u32,
     pub device: DeviceConfig,
     pub scanner: ScannerConfig,
     pub demodulator: DemodulatorConfig,
@@ -46,6 +48,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
             device: DeviceConfig::default(),
             scanner: ScannerConfig::default(),
             demodulator: DemodulatorConfig::default(),
@@ -85,10 +88,10 @@ impl Config {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("config.toml");
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
-                tracing::warn!("failed to parse {path:?}: {e}; using defaults");
-                Config::default()
-            }),
+            Ok(text) => match toml::from_str::<Config>(&text).map_err(anyhow::Error::from).and_then(|mut c| { if c.schema_version==0{c.schema_version=CONFIG_SCHEMA_VERSION;} c.validate()?; Ok(c) }) {
+                Ok(c)=>{let _=std::fs::copy(&path,data_dir.join("config.toml.good"));c},
+                Err(e)=>{tracing::warn!("invalid config {path:?}: {e}; rolling back");let _=std::fs::rename(&path,data_dir.join("config.toml.invalid"));if let Ok(text)=std::fs::read_to_string(data_dir.join("config.toml.good")){toml::from_str(&text).unwrap_or_default()}else{Config::default()}},
+            },
             Err(_) => {
                 tracing::info!("no config at {path:?}; using defaults");
                 Config::default()
@@ -97,13 +100,24 @@ impl Config {
     }
 
     pub fn save(&self, data_dir: &Path) -> anyhow::Result<()> {
+        self.validate()?;
         let path = data_dir.join("config.toml");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(&path, text)?;
+        let pending=path.with_extension("toml.pending");
+        std::fs::write(&pending,text)?;
+        if path.exists(){std::fs::copy(&path,data_dir.join("config.toml.good"))?;}
+        std::fs::rename(pending,&path)?;
         Ok(())
+    }
+
+    pub fn validate(&self)->anyhow::Result<()> {
+        anyhow::ensure!(self.schema_version<=CONFIG_SCHEMA_VERSION,"unsupported schema version");
+        anyhow::ensure!(self.scanner.fft_size>=256 && self.scanner.fft_size.is_power_of_two(),"fft_size must be a power of two >= 256");
+        anyhow::ensure!((0.0..1.0).contains(&self.scanner.fft_overlap),"fft_overlap must be in [0, 1)");
+        anyhow::ensure!(self.audio.sample_rate>0,"audio sample rate must be positive"); Ok(())
     }
 }
 

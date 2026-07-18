@@ -23,6 +23,12 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        if path.exists() {
+            let probe=Connection::open(path)?;
+            let integrity:String=probe.query_row("PRAGMA integrity_check",[],|r|r.get(0))?;
+            drop(probe);
+            if integrity!="ok" { let corrupt=path.with_extension(format!("corrupt-{}",chrono::Utc::now().timestamp())); std::fs::rename(path,&corrupt)?; let backup=path.with_extension("backup"); if backup.exists(){std::fs::copy(backup,path)?;} }
+        }
         let conn = Connection::open(path)?;
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
@@ -30,6 +36,8 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "on")?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
+    pub fn integrity_check(&self)->anyhow::Result<bool>{Ok(self.conn().query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0))?=="ok")}
+    pub fn backup(&self,path:&Path)->anyhow::Result<()>{if path.exists(){std::fs::remove_file(path)?;} self.conn().execute("VACUUM INTO ?1",[path.to_string_lossy().as_ref()])?; Ok(())}
 
     pub fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         // unreachable: we use parking_lot::Mutex below
@@ -465,4 +473,3 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 }
-

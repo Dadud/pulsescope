@@ -120,3 +120,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   .card { padding: 9px; border-radius: 6px; }
   button, input, select { min-height: 36px; }
 }
+.health-banner { margin: 0 0 1rem; padding: .7rem 1rem; border-radius: 6px; border: 1px solid; font-size: .9rem; }
+.health-banner.degraded { color: #ffd166; background: #3b3016; border-color: #80671e; }
+.health-banner.offline { color: #ff8d8d; background: #401b1b; border-color: #873737; }

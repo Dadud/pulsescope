@@ -31,6 +31,7 @@ mod aviation;
 mod voice_decoder;
 mod signal_id;
 mod state;
+mod operations;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
