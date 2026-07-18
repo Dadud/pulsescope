@@ -178,6 +178,27 @@ ws://127.0.0.1:8765
 | POST   | `/blacklist/clear`    |
 | GET    | `/aircraft/lookup`    |
 
+## Local geospatial and evidence APIs
+
+All tracking endpoints are served by the local PulseScope process. The offline
+map does not request remote tiles; coordinates are never submitted to a third
+party by these APIs.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/positions` | Store a validated normalized aircraft, vessel, APRS, or radiosonde observation. |
+| GET | `/positions` | Bounded history (`kind`, `entity_id`, `from_ms`, `to_ms`, `limit`, `offset`). |
+| GET | `/tracks/current` | Latest observation per entity, with the same filters and pagination. |
+| GET | `/tracks/export/{csv,json,geojson,kml}` | Export the selected window with a SHA-256 digest. |
+| POST | `/radios/chirp/import` | Validate and transactionally import CHIRP CSV. |
+| GET | `/cases/:id/attachments` | List message, event, recording, track, note, and lookup attachments. |
+| POST | `/cases/:id/evidence-export` | Produce a versioned manifest, configuration snapshot, artifact hashes, timestamps, and missing-source flags. |
+
+Position history is capped at 100,000 observations and page size at 1,000.
+RadioReference and FCC network lookups are intentionally not contacted by the
+local import flow; future connectors must require both an explicit credential
+and a separate privacy opt-in.
+
 ## Events — live stream
 
 Two transports, same JSON payload shape:

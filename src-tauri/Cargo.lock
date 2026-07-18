@@ -3544,6 +3544,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "sha2",
  "soapysdr-sys",
  "tauri",
  "tauri-build",

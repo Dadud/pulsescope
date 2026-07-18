@@ -84,6 +84,7 @@ export interface ScannerEvent {
   kind: 'Spectrum' | 'SignalHit' | 'VfoStates' | 'DecodedMessage' | 'TrunkingUpdate' | 'SpectrumOccupancy';
   data: any;
 }
+export interface PositionEvent { id?:number; entity_kind:'aircraft'|'vessel'|'aprs'|'radiosonde'; entity_id:string; timestamp_ms:number; latitude:number; longitude:number; altitude_m?:number; speed_mps?:number; heading_deg?:number; accuracy_m?:number; vertical_accuracy_m?:number; source:string; source_message_id?:number; metadata:Record<string,unknown> }
 
 export async function getJson<T = any>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() } });
@@ -217,6 +218,10 @@ export const Api = {
   iqRecordingStart: () => postJson('/iq_recording/start'),
   iqRecordingStop: () => postJson('/iq_recording/stop'),
   cases: () => getJson<any[]>('/cases'),
+  caseAttachments: (id:number) => getJson<any[]>(`/cases/${id}/attachments`),
+  attachToCase: (id:number, body:any) => postJson(`/cases/${id}/attach`, body),
+  deleteAttachment: (id:number) => deleteJson(`/cases/attachments/${id}`),
+  evidenceExport: (id:number) => postJson(`/cases/${id}/evidence-export`),
   createCase: (body: any) => postJson('/cases', body),
   deleteCase: (id: number) => fetch(`${BASE}/cases/${id}`, { method: 'DELETE' }).then(r => r.json()),
   recordingAnnotations: () => getJson<any[]>('/recordings/annotations'),
@@ -245,4 +250,8 @@ export const Api = {
   debugRtl433Stderr: () => getJson('/debug/rtl433_stderr'),
 
   aircraftLookup: (query: string) => getJson(`/aircraft/lookup?q=${encodeURIComponent(query)}`),
+  currentTracks: (query='') => getJson<{items:PositionEvent[]}>(`/tracks/current?${query}`),
+  trackHistory: (query='') => getJson<{items:PositionEvent[]}>(`/positions?${query}`),
+  exportTracks: (format:string, query='') => getJson(`/tracks/export/${format}?${query}`),
+  importChirp: (csv:string) => postJson('/radios/chirp/import', {csv}),
 };

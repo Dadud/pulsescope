@@ -127,6 +127,39 @@ CREATE TABLE IF NOT EXISTS case_attachments (
     attached_ms INTEGER NOT NULL,
     FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
 );
+DELETE FROM case_attachments WHERE id NOT IN (SELECT MIN(id) FROM case_attachments GROUP BY case_id,kind,ref);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_case_attachment_unique ON case_attachments(case_id, kind, ref);
+
+-- Normalized geospatial observations.  A row is an immutable observation;
+-- current tracks are derived by selecting the newest row for each entity.
+CREATE TABLE IF NOT EXISTS position_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_kind TEXT NOT NULL CHECK(entity_kind IN ('aircraft','vessel','aprs','radiosonde')),
+    entity_id TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    latitude REAL NOT NULL CHECK(latitude >= -90 AND latitude <= 90),
+    longitude REAL NOT NULL CHECK(longitude >= -180 AND longitude <= 180),
+    altitude_m REAL,
+    speed_mps REAL,
+    heading_deg REAL,
+    accuracy_m REAL,
+    vertical_accuracy_m REAL,
+    source TEXT NOT NULL,
+    source_message_id INTEGER,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_position_entity_time ON position_events(entity_kind, entity_id, timestamp_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_position_time ON position_events(timestamp_ms DESC);
+
+CREATE TABLE IF NOT EXISTS radio_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    frequency_hz INTEGER NOT NULL CHECK(frequency_hz > 0),
+    duplex TEXT NOT NULL DEFAULT '', offset_hz INTEGER NOT NULL DEFAULT 0,
+    tone TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'FM',
+    source TEXT NOT NULL DEFAULT 'chirp', imported_ms INTEGER NOT NULL,
+    UNIQUE(name, frequency_hz)
+);
 
 CREATE TABLE IF NOT EXISTS recording_annotations (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -33,6 +33,7 @@
       <li><a href="#/jobs">Jobs</a></li>
       <li><a href="#/cases">Cases</a></li>
       <li><a href="#/aircraft">Aircraft</a></li>
+      <li><a href="#/tracking">Live Map</a></li>
       <li><a href="#/lookups">Lookups</a></li>
       <li><a href="#/feature-packs">Features</a></li>
       <li><a href="#/blacklist">Blacklist</a></li>

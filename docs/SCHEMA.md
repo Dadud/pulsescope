@@ -110,6 +110,23 @@ Analyst case grouping.
 
 `cases` columns: `id, name, description, status, tags, created_ms, updated_ms`.
 `case_attachments` columns: `id, case_id, kind, ref, note, attached_ms`
+
+Duplicate `(case_id, kind, ref)` attachments are rejected. Supported kinds are
+`decoded_message`, `signal_event`, `recording`, `track`, `note`, and
+`lookup_result`.
+
+### `position_events`
+
+Immutable, normalized observations for `aircraft`, `vessel`, `aprs`, and
+`radiosonde` entities. Coordinates use WGS84 decimal degrees; altitude, speed,
+and horizontal/vertical accuracy use SI units. Every row includes a local
+timestamp, source attribution, optional decoded-message reference, and JSON
+protocol metadata. Current tracks are derived rather than stored separately.
+
+### `radio_channels`
+
+Validated channel rows imported from CHIRP CSV. The `(name, frequency_hz)` pair
+is unique so repeated imports are idempotent and report duplicates.
 (foreign key on `case_id` → `cases(id)` with cascade delete).
 
 ### `recording_annotations`

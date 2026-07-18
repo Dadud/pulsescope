@@ -236,7 +236,13 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/cases", get(cases).post(cases_new))
         .route("/cases/:id", get(case_one).delete(case_delete))
         .route("/cases/:id/attach", post(case_attach))
+        .route("/cases/:id/attachments", get(case_attachments))
+        .route("/cases/:id/evidence-export", post(case_evidence_export))
         .route("/cases/attachments/:att_id", get(case_attachment_one).delete(case_attachment_delete))
+        .route("/positions", get(position_history).post(position_insert))
+        .route("/tracks/current", get(position_current))
+        .route("/tracks/export/:format", get(position_export))
+        .route("/radios/chirp/import", post(chirp_import))
         // ── feature packs / lookups / blacklist ──────────────────────────
         .route("/feature-packs", get(feature_packs))
         .route("/feature-packs/:id/enable", post(feature_pack_enable))
@@ -1383,9 +1389,128 @@ async fn case_one(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoRe
 }
 async fn case_delete(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse { Json(json!({"ok": s.0.db.delete_case(id).is_ok()})) }
 #[derive(Deserialize)] struct CaseAttachmentReq { kind: String, r#ref: String, note: Option<String> }
-async fn case_attach(State(s): State<ApiState>, Path(id): Path<i64>, Json(req): Json<CaseAttachmentReq>) -> impl IntoResponse { let a=crate::db::CaseAttachment{id:None,case_id:id,kind:req.kind,r#ref:req.r#ref,note:req.note.unwrap_or_default(),attached_ms:crate::scanner::now_ms()}; match s.0.db.add_case_attachment(&a) { Ok(att_id)=>Json(json!({"ok":true,"id":att_id})),Err(e)=>Json(json!({"ok":false,"error":e.to_string()})) } }
+async fn case_attach(State(s): State<ApiState>, Path(id): Path<i64>, Json(req): Json<CaseAttachmentReq>) -> impl IntoResponse { const KINDS:&[&str]=&["decoded_message","signal_event","recording","track","note","lookup_result"]; if !KINDS.contains(&req.kind.as_str())||req.r#ref.trim().is_empty(){return Json(json!({"ok":false,"error":"invalid attachment kind or reference"}))} let a=crate::db::CaseAttachment{id:None,case_id:id,kind:req.kind,r#ref:req.r#ref,note:req.note.unwrap_or_default(),attached_ms:crate::scanner::now_ms()}; match s.0.db.add_case_attachment(&a) { Ok(att_id)=>Json(json!({"ok":true,"id":att_id})),Err(e)=>Json(json!({"ok":false,"error":e.to_string()})) } }
+async fn case_attachments(State(s):State<ApiState>,Path(id):Path<i64>)->impl IntoResponse{Json(match s.0.db.case_attachments(id){Ok(v)=>serde_json::to_value(v).unwrap(),Err(e)=>json!({"error":e.to_string()})})}
 async fn case_attachment_one(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse { match s.0.db.case_attachment(id) { Ok(Some(a))=>Json(serde_json::to_value(a).unwrap()),Ok(None)=>Json(json!({"error":"not found"})),Err(e)=>Json(json!({"error":e.to_string()})) } }
 async fn case_attachment_delete(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse { Json(json!({"ok":s.0.db.delete_case_attachment(id).map(|n|n>0).unwrap_or(false)})) }
+
+async fn position_insert(
+    State(s): State<ApiState>,
+    Json(p): Json<crate::tracking::PositionEvent>,
+) -> impl IntoResponse {
+    match s
+        .0
+        .db
+        .insert_position(&p, crate::tracking::DEFAULT_RETENTION)
+    {
+        Ok(id) => Json(json!({"ok":true,"id":id})),
+        Err(e) => Json(json!({"ok":false,"error":e.to_string()})),
+    }
+}
+async fn position_history(
+    State(s): State<ApiState>,
+    Query(q): Query<crate::tracking::TrackQuery>,
+) -> impl IntoResponse {
+    Json(match s.0.db.positions(&q, false) {
+        Ok(v) => {
+            json!({"items":v,"limit":q.limit.unwrap_or(250).min(crate::tracking::MAX_PAGE_SIZE),"offset":q.offset.unwrap_or(0)})
+        }
+        Err(e) => json!({"error":e.to_string()}),
+    })
+}
+async fn position_current(
+    State(s): State<ApiState>,
+    Query(q): Query<crate::tracking::TrackQuery>,
+) -> impl IntoResponse {
+    Json(match s.0.db.positions(&q, true) {
+        Ok(v) => {
+            json!({"items":v,"limit":q.limit.unwrap_or(250).min(crate::tracking::MAX_PAGE_SIZE),"offset":q.offset.unwrap_or(0)})
+        }
+        Err(e) => json!({"error":e.to_string()}),
+    })
+}
+async fn position_export(
+    State(s): State<ApiState>,
+    Path(format): Path<String>,
+    Query(q): Query<crate::tracking::TrackQuery>,
+) -> impl IntoResponse {
+    match s
+        .0
+        .db
+        .positions(&q, false)
+        .and_then(|v| crate::tracking::export_positions(&v, &format))
+    {
+        Ok((content_type, data)) => {
+            let hash = crate::tracking::sha256(data.as_bytes());
+            Json(json!({"format":format,"content_type":content_type,"data":data,"sha256":hash}))
+        }
+        Err(e) => Json(json!({"error":e.to_string()})),
+    }
+}
+#[derive(Deserialize)]
+struct ChirpReq {
+    csv: String,
+}
+async fn chirp_import(State(s): State<ApiState>, Json(req): Json<ChirpReq>) -> impl IntoResponse {
+    let channels = match crate::tracking::parse_chirp_csv(&req.csv) {
+        Ok(x) => x,
+        Err(e) => return Json(json!({"ok":false,"error":e.to_string()})),
+    };
+    let now = crate::scanner::now_ms();
+    let c = s.0.db.conn();
+    let tx = match c.unchecked_transaction() {
+        Ok(x) => x,
+        Err(e) => return Json(json!({"ok":false,"error":e.to_string()})),
+    };
+    let mut imported = 0;
+    for ch in &channels {
+        match tx.execute("INSERT OR IGNORE INTO radio_channels(name,frequency_hz,duplex,offset_hz,tone,mode,source,imported_ms)VALUES(?1,?2,?3,?4,?5,?6,'chirp',?7)",rusqlite::params![ch.name,ch.frequency_hz as i64,ch.duplex,ch.offset_hz,ch.tone,ch.mode,now]){Ok(n)=>imported+=n,Err(e)=>return Json(json!({"ok":false,"error":e.to_string()}))}
+    }
+    if let Err(e) = tx.commit() {
+        return Json(json!({"ok":false,"error":e.to_string()}));
+    }
+    Json(
+        json!({"ok":true,"validated":channels.len(),"imported":imported,"duplicates":channels.len()-imported}),
+    )
+}
+
+async fn case_evidence_export(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let case = match s.0.db.get_case(id) {
+        Ok(Some(c)) => c,
+        _ => return Json(json!({"error":"case not found"})),
+    };
+    let attachments = s.0.db.case_attachments(id).unwrap_or_default();
+    let artifacts:Vec<Value>=attachments.iter().map(|a|{let content=serde_json::to_vec(a).unwrap_or_default();json!({"path":format!("artifacts/{}/{}.json",a.kind,a.id.unwrap_or_default()),"kind":a.kind,"reference":a.r#ref,"sha256":crate::tracking::sha256(&content),"size":content.len(),"captured_ms":a.attached_ms,"missing_source":attachment_missing(&s.0.db,a)})}).collect();
+    let generated = crate::scanner::now_ms();
+    let manifest = json!({"format":"pulsescope-evidence","format_version":1,"application":{"name":"PulseScope","version":env!("CARGO_PKG_VERSION")},"generated_ms":generated,"case":case,"configuration":serde_json::to_value(&*s.0.config.read()).unwrap_or(json!({})),"artifacts":artifacts});
+    let canonical = serde_json::to_vec(&manifest).unwrap_or_default();
+    Json(json!({"manifest":manifest,"manifest_sha256":crate::tracking::sha256(&canonical)}))
+}
+fn attachment_missing(db: &crate::db::Db, a: &crate::db::CaseAttachment) -> bool {
+    let Ok(id) = a.r#ref.parse::<i64>() else {
+        return a.kind == "recording" && !std::path::Path::new(&a.r#ref).exists();
+    };
+    let c = db.conn();
+    match a.kind.as_str() {
+        "decoded_message" => c
+            .query_row("SELECT 1 FROM decoded_messages WHERE id=?1", [id], |_| {
+                Ok(())
+            })
+            .is_err(),
+        "signal_event" => c
+            .query_row("SELECT 1 FROM signal_events WHERE id=?1", [id], |_| Ok(()))
+            .is_err(),
+        "track" => c
+            .query_row(
+                "SELECT 1 FROM position_events WHERE id=?1",
+                [id],
+                |_| Ok(()),
+            )
+            .is_err(),
+        _ => false,
+    }
+}
+
 
 async fn sidecar_stderr(State(s): State<ApiState>, Path(name): Path<String>) -> impl IntoResponse { Json(serde_json::to_value(s.0.sidecars.stderr(&name)).unwrap()) }
 
