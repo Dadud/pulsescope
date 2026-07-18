@@ -118,21 +118,31 @@ export async function deleteJson<T = any>(path: string): Promise<T> {
 }
 
 export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
-  // Honor auth if PULSESCOPE_AUTH_TOKEN is set or the URL has ?token=...
-  const headers = authHeader();
-  // Browser WebSocket constructor doesn't accept headers, so encode the
-  // token as a query param. Server accepts both Bearer and ?token=.
+  // Never place the long-lived token in a URL. Fetch a single-use ticket via
+  // an authenticated HTTP exchange before opening the socket.
   const base = typeof window !== 'undefined' ? `${WS_BASE}/events` : `${WS_BASE}/events`;
-  const sep = base.includes('?') ? '&' : '?';
-  const auth = headers['authorization'] && headers['authorization'].startsWith('Bearer ');
-  const tokenParam = auth ? `${sep}token=${encodeURIComponent(headers['authorization'].slice(7))}` : '';
-  const ws = new WebSocket(`${base}${tokenParam}`);
-  ws.onmessage = (e) => {
+  let ws = new WebSocket(base);
+  const connect = async () => {
+    const headers = authHeader();
+    if (!headers.authorization) return ws;
+    ws.close();
+    const response = await fetch(`${BASE}/auth/ws-ticket`, { method: 'POST', headers });
+    if (!response.ok) throw new Error(`WebSocket ticket: HTTP ${response.status}`);
+    const { ticket } = await response.json();
+    ws = new WebSocket(`${base}?ticket=${encodeURIComponent(ticket)}`);
+    attach(ws);
+    return ws;
+  };
+  const attach = (socket: WebSocket) => {
+  socket.onmessage = (e) => {
     try { cb(JSON.parse(e.data)); }
     catch (err) { console.warn('bad ws frame', err); }
   };
-  ws.onclose = () => console.log('event ws closed');
-  ws.onerror = (e) => console.warn('event ws error', e);
+  socket.onclose = () => console.log('event ws closed');
+  socket.onerror = (e) => console.warn('event ws error', e);
+  };
+  attach(ws);
+  void connect().catch((e) => console.warn('event ws authentication failed', e));
   return ws;
 }
 
