@@ -139,6 +139,7 @@ export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
 // Convenience wrappers. Endpoint-specific payloads stay here so route components
 // remain small and the backend contract has a single source of truth.
 export const Api = {
+  protocolSlices: () => getJson<any[]>('/protocols/slices'),
   health: () => getJson('/health'),
   spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),

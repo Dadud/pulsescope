@@ -112,6 +112,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/decoded_messages", get(decoded_messages))
         .route("/rtl433_messages", get(rtl433_messages))
         .route("/protocol_messages", get(protocol_messages))
+        .route("/protocols/slices", get(protocol_slices))
+        .route("/protocols/:id/capability", get(protocol_capability))
         // ── talkgroups ───────────────────────────────────────────────────
         .route("/talkgroups", get(talkgroups).post(talkgroup_update))
         .route("/talkgroups/systems", get(talkgroup_systems))
@@ -905,12 +907,12 @@ async fn aero_messages(State(s): State<ApiState>) -> impl IntoResponse { Json(se
 async fn aero_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.aero.enabled,"satellite":c.aero.satellite,"center_freq_hz":c.aero.center_freq_hz,"sample_rate_hz":c.aero.sample_rate_hz,"path":c.aero.sniffer_path})) }
 async fn aero_stderr(State(s): State<ApiState>) -> impl IntoResponse { Json(s.0.sidecars.stderr("aero")) }
 
-async fn iridium_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.iridium.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.iridium.enabled})) }
+async fn iridium_enable(State(_s): State<ApiState>, Json(_v): Json<Value>) -> impl IntoResponse { (StatusCode::CONFLICT, Json(json!({"ok":false,"running":false,"available":false,"reason":"recorded IQ end-to-end fixture has not passed"}))) }
 async fn iridium_check(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ok":true,"available":false,"center_freq_hz":c.iridium.center_freq_hz,"sample_rate_hz":c.iridium.sample_rate_hz})) }
 async fn iridium_clear() -> impl IntoResponse { Json(json!({"ok": true})) }
 async fn iridium_messages() -> impl IntoResponse { Json(json!([])) }
 async fn iridium_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.iridium.enabled,"center_freq_hz":c.iridium.center_freq_hz,"sample_rate_hz":c.iridium.sample_rate_hz,"surface_message_content":c.iridium.surface_message_content})) }
-async fn iridium_quick_start(State(s): State<ApiState>) -> impl IntoResponse { let mut c=s.0.config.write(); c.iridium.enabled=true; let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":true})) }
+async fn iridium_quick_start() -> impl IntoResponse { (StatusCode::CONFLICT, Json(json!({"ok":false,"running":false,"available":false,"reason":"Iridium decoder transport and legal IQ fixture are not installed"}))) }
 async fn iridium_stderr(State(s): State<ApiState>) -> impl IntoResponse { Json(s.0.sidecars.stderr("iridium")) }
 
 async fn stdc_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.stdc.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.stdc.enabled})) }
@@ -919,7 +921,7 @@ async fn stdc_clear() -> impl IntoResponse { Json(json!({"ok": true})) }
 async fn stdc_messages() -> impl IntoResponse { Json(json!([])) }
 async fn stdc_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.stdc.enabled,"path":c.stdc.path,"uw_tolerance":c.stdc.uw_tolerance})) }
 
-async fn gps_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.gps.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.gps.enabled})) }
+async fn gps_enable(State(_s): State<ApiState>, Json(_v): Json<Value>) -> impl IntoResponse { (StatusCode::CONFLICT, Json(json!({"ok":false,"running":false,"available":false,"reason":"GNSS acquisition recorded IQ fixture has not passed"}))) }
 async fn gps_clear() -> impl IntoResponse { Json(json!({"ok": true})) }
 async fn gps_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.gps.enabled,"sample_rate_hz":c.gps.sample_rate_hz,"detection_threshold":c.gps.detection_threshold,"doppler_search_hz":c.gps.doppler_search_hz})) }
 
@@ -927,32 +929,35 @@ async fn glonass_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl
 async fn glonass_clear() -> impl IntoResponse { Json(json!({"ok": true})) }
 async fn glonass_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.glonass.enabled,"sample_rate_hz":c.glonass.sample_rate_hz,"detection_threshold":c.glonass.detection_threshold,"doppler_search_hz":c.glonass.doppler_search_hz})) }
 
-async fn goes_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.goes_lrit.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.goes_lrit.enabled})) }
+async fn goes_enable(State(_s): State<ApiState>, Json(_v): Json<Value>) -> impl IntoResponse { (StatusCode::CONFLICT, Json(json!({"ok":false,"running":false,"available":false,"reason":"SatDump transport and legal IQ fixture are not installed"}))) }
 async fn goes_check() -> impl IntoResponse { Json(json!({"ok": true, "available": false, "reason":"satdump sidecar not configured"})) }
 async fn goes_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.goes_lrit.enabled,"satellite":c.goes_lrit.satellite,"path":c.goes_lrit.satdump_path,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
 async fn goes_satellite(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
 async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); if let Some(x)=v.get("satellite").and_then(|x|x.as_str()){c.goes_lrit.satellite=x.to_string();} if let Some(x)=v.get("output_image_dir").and_then(|x|x.as_str()){c.goes_lrit.output_image_dir=x.to_string();} if let Some(x)=v.get("sample_rate_hz").and_then(|x|x.as_u64()){c.goes_lrit.sample_rate_hz=x as u32;} let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
 
-async fn hd_radio_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.hd_radio.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.hd_radio.enabled,"available":false,"reason":"HD Radio decoder sidecar not configured"})) }
-async fn hd_radio_check(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ok":true,"available":c.hd_radio.enabled,"program":c.hd_radio.program,"stations":c.hd_radio.stations})) }
+async fn hd_radio_enable(State(_s): State<ApiState>, Json(_v): Json<Value>) -> impl IntoResponse { (StatusCode::CONFLICT, Json(json!({"ok":false,"running":false,"available":false,"reason":"nrsc5 transport and legal IQ fixture are not installed"}))) }
+async fn hd_radio_check(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ok":true,"running":false,"available":false,"reason":"nrsc5 transport and legal IQ fixture are not installed","program":c.hd_radio.program,"stations":c.hd_radio.stations})) }
 async fn hd_radio_messages() -> impl IntoResponse { Json(json!([])) }
 async fn hd_radio_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.hd_radio.enabled,"auto_on_fm_lock":c.hd_radio.auto_on_fm_lock,"program":c.hd_radio.program,"stations":c.hd_radio.stations})) }
 async fn hd_radio_aas(Path(_filename): Path<String>) -> impl IntoResponse { Json(json!({})) }
 
-async fn ble_devices(State(s): State<ApiState>) -> Json<Value> {
-    let connected = s.0.device.status().connected;
-    if !connected { return Json(json!([])); }
-    Json(json!([
-        {"address":"02:00:00:00:00:01","name":"PulseScope Mock Beacon","rssi":-48,"manufacturer":"PulseScope","service_uuids":["180F"],"last_seen_ms":crate::scanner::now_ms()},
-        {"address":"02:00:00:00:00:02","name":"Mock Environmental Sensor","rssi":-67,"manufacturer":"PulseScope","service_uuids":["181A"],"last_seen_ms":crate::scanner::now_ms()}
-    ]))
-}
-async fn ble_status(State(s): State<ApiState>) -> impl IntoResponse { let connected=s.0.device.status().connected; Json(json!({"enabled":connected,"running":connected,"device_count":if connected {2} else {0},"source":if connected {"mock"} else {"none"}})) }
+async fn ble_devices() -> Json<Value> { Json(json!([])) }
+async fn ble_status() -> impl IntoResponse { Json(json!({"enabled":false,"running":false,"available":false,"device_count":0,"source":"none","reason":"BLE PHY and recorded IQ fixture are not implemented"})) }
 async fn ble_file() -> impl IntoResponse { Json(json!(null)) }
 async fn ble_clear() -> impl IntoResponse { Json(json!({"ok": true})) }
 
 async fn lora_messages() -> impl IntoResponse { Json(json!([])) }
 async fn lora_regions() -> impl IntoResponse { Json(json!(["US915","EU868","EU433","AS923","IN865","AU915","KR920"])) }
+
+async fn protocol_slices(State(s): State<ApiState>) -> impl IntoResponse {
+    let device = s.0.device.status();
+    Json(json!(crate::protocols::slices().into_iter().map(|slice| { let hardware = crate::protocols::capability_check(&slice, &device); json!({"slice":slice,"hardware":hardware,"running":false}) }).collect::<Vec<_>>()))
+}
+async fn protocol_capability(Path(id): Path<String>, State(s): State<ApiState>) -> impl IntoResponse {
+    let Some(slice) = crate::protocols::slices().into_iter().find(|slice| slice.id == id) else { return (StatusCode::NOT_FOUND, Json(json!({"available":false,"running":false,"reason":"unknown protocol slice"}))); };
+    let hardware = crate::protocols::capability_check(&slice, &s.0.device.status());
+    (StatusCode::OK, Json(json!({"slice":slice,"hardware":hardware,"running":false})))
+}
 
 async fn scan_lock(State(s): State<ApiState>) -> impl IntoResponse { if let Some(h)=s.0.scanner.read().as_ref() { h.state.lock().scan_locked=true; } Json(json!({"ok":true,"locked":true})) }
 async fn scan_unlock(State(s): State<ApiState>) -> impl IntoResponse { if let Some(h)=s.0.scanner.read().as_ref() { h.state.lock().scan_locked=false; } Json(json!({"ok":true,"locked":false})) }
