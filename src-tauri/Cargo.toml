@@ -71,6 +71,7 @@ tracing-appender = "0.2"
 # HTTP client for decoder auto-download + zip extraction
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 zip = "2"
+sha2 = "0.10"
 
 # Misc
 anyhow = "1"

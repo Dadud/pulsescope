@@ -95,7 +95,7 @@ verified:
 | ------------ | ------------------------------------------------ | ---------------------------------- | ------------------- |
 | `rtl_433`    | PothosSDR 0.8.1                                  | Sidecar, u8 IQ via stdin/stdout    | WIRED, REAL-TESTED  |
 | `rtl_adsb`   | PothosSDR                                        | (binary available, transport TBD)  | Available           |
-| `dsd-fme`    | `/c/Users/Dadud/pulsescope/decoders/dsd-fme/`    | Sidecar, 48 kHz mono WAV via fs    | WIRED, REAL-TESTED  |
+| `dsd-fme`    | `<application-data>/decoders/dsd-fme/<version>/` | Sidecar, continuous 48 kHz S16LE stdin | WIRED, HEALTH-CHECKED |
 | `AIS-catcher`| jvde-github v0.70                                | (binary available, transport TBD)  | Installed, exclusive SDR |
 
 Multimon-ng, direwolf, acarsdec, nrsc5, dumpvdl2, dump978 source tarballs are

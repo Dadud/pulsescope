@@ -971,11 +971,16 @@ async fn decoders_scan(State(s): State<ApiState>) -> Json<Value> {
     Json(serde_json::to_value(crate::depmanager::scan_all(&s.0.data_dir)).unwrap())
 }
 
-async fn decoders_install(State(s): State<ApiState>, Path(name): Path<String>) -> Json<Value> {
+#[derive(Deserialize)]
+struct DecoderManageReq { #[serde(default)] accept_license: bool, #[serde(default = "default_install_operation")] operation: String }
+fn default_install_operation() -> String { "install".into() }
+async fn decoders_install(State(s): State<ApiState>, Path(name): Path<String>, Json(req): Json<DecoderManageReq>) -> Json<Value> {
     let data_dir = s.0.data_dir.clone();
     let install_name = name.clone();
     match tokio::task::spawn_blocking(move || {
-        crate::depmanager::download_decoder(&install_name, &data_dir)
+        use crate::depmanager::DependencyOperation::*;
+        let op = match req.operation.as_str() { "update" => Update, "repair" => Repair, "uninstall" => Uninstall, _ => Install };
+        crate::depmanager::manage_decoder(&install_name, &data_dir, op, req.accept_license)
     }).await {
         Ok(Ok(path)) => Json(json!({"ok": true, "name": name, "path": path})),
         Ok(Err(error)) => Json(json!({"ok": false, "name": name, "error": error})),
