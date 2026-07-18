@@ -110,6 +110,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/signal_id/auto_decode", post(signal_id_auto_decode))
         // ── decoded messages ─────────────────────────────────────────────
         .route("/decoded_messages", get(decoded_messages))
+        .route("/decoders", get(decoder_status))
         .route("/rtl433_messages", get(rtl433_messages))
         .route("/protocol_messages", get(protocol_messages))
         // ── talkgroups ───────────────────────────────────────────────────
@@ -658,6 +659,14 @@ async fn decoded_messages(State(s): State<ApiState>, Query(q): Query<LimitQ>) ->
         Ok(rows) => Json(serde_json::to_value(&rows).unwrap()),
         Err(e) => Json(json!({"error": e.to_string()})),
     }
+}
+async fn decoder_status(State(s): State<ApiState>) -> impl IntoResponse {
+    let metrics = s.0.scanner.read().as_ref().map(|scanner| scanner.state.lock().decoder_metrics.clone()).unwrap_or_default();
+    let rows: Vec<_> = crate::decoder::descriptors().into_iter().map(|descriptor| {
+        let metric = metrics.get(&descriptor.protocol).cloned().unwrap_or_default();
+        json!({"descriptor": descriptor, "metrics": metric})
+    }).collect();
+    Json(json!(rows))
 }
 #[derive(Deserialize)] struct LimitQ { limit: Option<u32> }
 

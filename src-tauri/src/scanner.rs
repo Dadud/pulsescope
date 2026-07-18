@@ -15,7 +15,8 @@ use rustfft::num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::adsb::AdsbDecoder;
+use crate::decoder::{AdsbNativeDecoder, ChannelMetadata, DecoderMetrics, NativeDecoder};
+use std::collections::BTreeMap;
 use crate::audio::AudioSink;
 use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
@@ -44,6 +45,7 @@ pub struct ScannerRuntimeState {
     /// Backend capture timestamp for the currently retained FFT frame.
     pub latest_spectrum_ms: i64,
     pub scan_locked: bool,
+    pub decoder_metrics: BTreeMap<String, DecoderMetrics>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -184,7 +186,7 @@ async fn scanner_loop(
     let window: Vec<f32> = apodize::hanning_iter(cfg.fft_size).map(|x| x as f32).collect();
     let mut last_signal_hit = Instant::now() - Duration::from_secs(2);
     let mut smoothed_noise_floor: Option<f32> = None;
-    let mut native_adsb = AdsbDecoder::new(device.status().sample_rate);
+    let mut native_adsb = AdsbNativeDecoder::new(device.status().sample_rate);
 
     loop {
         // Drain commands
@@ -274,29 +276,28 @@ async fn scanner_loop(
             .unwrap_or(false);
         if native_adsb_active {
             if native_adsb.is_none() {
-                native_adsb = AdsbDecoder::new(device.status().sample_rate);
+                native_adsb = AdsbNativeDecoder::new(device.status().sample_rate);
             }
             if let Some(decoder) = native_adsb.as_mut() {
-                decoder.feed_iq(&iq);
+                let metadata = ChannelMetadata { bank_name: active_range.as_ref().map(|r| r.name.clone()).unwrap_or_default(), frequency_hz: 1_090_000_000, bandwidth_hz: active_range.as_ref().map(|r| r.channel_bw_hz).unwrap_or(2_000_000), protocol_hint: Some("adsb".into()), decoder_enabled: true };
+                decoder.feed_iq(&iq, &metadata);
                 for message in decoder.take_messages() {
-                    let content = message.callsign.clone()
-                        .or_else(|| message.altitude_ft.map(|a| format!("{a} ft")))
-                        .unwrap_or_default();
                     let decoded = crate::db::DecodedMessage {
                         id: None,
                         frequency_hz: 1_090_000_000,
                         protocol: "adsb".into(),
                         message_type: message.message_type.clone(),
-                        address: message.icao.clone(),
-                        function_code: format!("DF{}", message.df),
-                        content: content.clone(),
-                        raw: message.raw_hex.clone(),
+                        address: message.address.clone(),
+                        function_code: message.schema.clone(),
+                        content: serde_json::to_string(&serde_json::json!({"schema":message.schema,"schema_version":message.schema_version,"payload":message.payload})).unwrap_or_default(),
+                        raw: message.raw_frame.clone(),
                         encryption: "none".into(),
                         timestamp_ms: now_ms(),
                     };
                     let _ = db.insert_decoded_message(&decoded);
                     let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
                 }
+                state.lock().decoder_metrics.insert("adsb".into(), decoder.metrics());
             }
         }
 

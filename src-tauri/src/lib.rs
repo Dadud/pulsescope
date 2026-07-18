@@ -9,6 +9,7 @@ pub mod capture;
 pub mod config;
 pub mod db;
 pub mod demod;
+pub mod decoder;
 pub mod pocsag;
 pub mod device;
 pub mod scanner;

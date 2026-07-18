@@ -622,7 +622,9 @@ pub fn decode_rds(multiplex: &[f32], sample_rate: f32) -> Option<RdsResult> {
             // PTY is bits 15-19 of block B
             let word_b = extract_word(i + 26);
             let pty = ((word_b >> 5) & 0x1F) as u8;
-            groups.push((pi, pty, i));
+            let word_c = extract_word(i + 52);
+            let word_d = extract_word(i + 78);
+            groups.push((pi, pty, word_b, word_c, word_d, i));
             i += 104;
         } else {
             i += 1;
@@ -637,21 +639,45 @@ pub fn decode_rds(multiplex: &[f32], sample_rate: f32) -> Option<RdsResult> {
     use std::collections::HashMap;
     let mut pi_counts: HashMap<u16, usize> = HashMap::new();
     let mut pty_counts: HashMap<u8, usize> = HashMap::new();
-    for (pi, pty, _) in &groups {
+    for (pi, pty, _, _, _, _) in &groups {
         *pi_counts.entry(*pi).or_default() += 1;
         *pty_counts.entry(*pty).or_default() += 1;
     }
     let pi_code = pi_counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k);
     let pty = pty_counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k);
 
+    let (program_service, radio_text) = assemble_rds_text(&groups.iter().map(|(_, _, b, c, d, _)| ((*b >> 10) as u16, (*c >> 10) as u16, (*d >> 10) as u16)).collect::<Vec<_>>());
     Some(RdsResult {
         bits_decoded: diff_bits.len(),
         groups_found: groups.len(),
-        program_service: None, // Requires full block-by-block PS decoding (8-char display, sent over 4 groups)
-        radio_text: None,
+        program_service,
+        radio_text,
         pty,
         pi_code,
     })
+}
+
+/// Assemble repeated RDS 0A/0B Program Service and 2A/2B RadioText segments.
+pub fn assemble_rds_text(groups: &[(u16, u16, u16)]) -> (Option<String>, Option<String>) {
+    let mut ps = [b' '; 8];
+    let mut rt = [b' '; 64];
+    let mut ps_seen = 0u8;
+    let mut rt_seen = 0u16;
+    for &(b, c, d) in groups {
+        let group_type = (b >> 12) as u8;
+        let version_b = b & 0x0800 != 0;
+        let segment = (b & 0x000f) as usize;
+        if group_type == 0 && segment < 4 {
+            ps[segment * 2] = (d >> 8) as u8; ps[segment * 2 + 1] = d as u8; ps_seen |= 1 << segment;
+        } else if group_type == 2 && segment < 16 {
+            let offset = segment * if version_b { 2 } else { 4 };
+            if version_b { rt[offset] = (d >> 8) as u8; rt[offset + 1] = d as u8; }
+            else { rt[offset] = (c >> 8) as u8; rt[offset + 1] = c as u8; rt[offset + 2] = (d >> 8) as u8; rt[offset + 3] = d as u8; }
+            rt_seen |= 1 << segment;
+        }
+    }
+    let clean = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim_matches(|c: char| c == ' ' || c == '\r' || c == '\0').to_string();
+    (if ps_seen == 0x0f { Some(clean(&ps)) } else { None }, if rt_seen != 0 { Some(clean(&rt)) } else { None })
 }
 
 
@@ -723,6 +749,25 @@ pub fn detect_dcs(samples: &[f32], sample_rate: f32) -> Option<String> {
     let snr_db = 10.0 * ratio.max(1e-12).log10();
     if snr_db >= 10.0 { Some(format!("DCS signal detected (SNR {:.1} dB) — code extraction requires raw discriminator bitstream", snr_db)) }
     else { None }
+}
+
+/// Extract a DCS identifier from repeated, clock-recovered 23-bit Golay words.
+/// The caller supplies discriminator hard decisions; polarity is tried both
+/// ways and at least two identical words are required to avoid false codes.
+pub fn extract_dcs_code(bits: &[bool]) -> Option<String> {
+    for inverted in [false, true] {
+        for phase in 0..23.min(bits.len()) {
+            let words: Vec<u32> = bits[phase..].chunks_exact(23).map(|chunk| chunk.iter().fold(0, |v, &b| (v << 1) | u32::from(b ^ inverted))).collect();
+            for pair in words.windows(2) {
+                if pair[0] == pair[1] {
+                    let code = pair[0] & 0x1ff;
+                    let a = (code >> 6) & 7; let b = (code >> 3) & 7; let c = code & 7;
+                    return Some(format!("{a}{b}{c}{}", if inverted { 'I' } else { 'N' }));
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

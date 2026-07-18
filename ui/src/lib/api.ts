@@ -65,6 +65,11 @@ export interface DecodedMessage {
   timestamp_ms: number;
 }
 
+export interface DecoderStatus {
+  descriptor: { protocol: string; available: boolean; supported_sample_rates_hz: number[]; bandwidth_hz: [number, number]; input_format: string };
+  metrics: { samples_received: number; frames_attempted: number; valid_frames: number; checksum_failures: number; corrected_frames: number; last_error?: string | null };
+}
+
 export interface ScanRange {
   name: string;
   start_hz: number;
@@ -161,6 +166,7 @@ export const Api = {
   deviceCapabilities: () => getJson('/device/capabilities'),
   deviceControl: (control: string, value: string | number | boolean) => postJson('/device/control', { control, value: String(value) }),
   decodedMessages: (limit = 100) => getJson<DecodedMessage[]>(`/decoded_messages?limit=${limit}`),
+  decoders: () => getJson<DecoderStatus[]>('/decoders'),
   signalEvents: (limit = 100) => getJson<any[]>(`/signal_events?limit=${limit}`),
   channelBankScanConfig: () => getJson('/channels/bank-scan-config'),
   updateChannelBank: (name: string, body: any) => putJson(`/channels/bank-scan-config`, { ...body, bank_name: name }),
