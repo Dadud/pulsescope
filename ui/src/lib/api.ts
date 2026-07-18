@@ -85,8 +85,8 @@ export interface ScannerEvent {
   data: any;
 }
 
-export async function getJson<T = any>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() } });
+export async function getJson<T = any>(path: string, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() }, signal });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
   return r.json();
 }
@@ -134,6 +134,59 @@ export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
   ws.onclose = () => console.log('event ws closed');
   ws.onerror = (e) => console.warn('event ws error', e);
   return ws;
+}
+
+export type ConnectionState = 'connecting' | 'live' | 'polling' | 'offline';
+
+/** Reconnecting event stream with bounded exponential backoff and a polling
+ * fallback. `close()` also cancels every timer, making it safe for route
+ * teardown and tests. */
+export function connectEvents(
+  cb: (ev: ScannerEvent) => void,
+  state: (value: ConnectionState) => void,
+  poll: () => Promise<void>,
+) {
+  let socket: WebSocket | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
+  let attempts = 0;
+  const beginPolling = () => {
+    state('polling');
+    void poll();
+    if (!pollTimer) pollTimer = setInterval(() => void poll(), 2000);
+  };
+  const connect = () => {
+    if (stopped) return;
+    state('connecting');
+    try {
+      socket = openEvents(cb);
+      socket.onopen = () => {
+        attempts = 0; state('live');
+        if (pollTimer) clearInterval(pollTimer); pollTimer = undefined;
+      };
+      socket.onclose = () => {
+        if (stopped) return;
+        beginPolling();
+        retry = setTimeout(connect, Math.min(30_000, 500 * 2 ** attempts++));
+      };
+      socket.onerror = () => socket?.close();
+    } catch { beginPolling(); retry = setTimeout(connect, 1000); }
+  };
+  connect();
+  return { close() { stopped = true; socket?.close(); clearTimeout(retry); clearInterval(pollTimer); state('offline'); } };
+}
+
+/** Only the newest invocation may publish a result; superseded HTTP requests
+ * are aborted so slow responses cannot overwrite fresh page state. */
+export function latestRequest() {
+  let controller: AbortController | undefined;
+  let generation = 0;
+  return async <T>(request: (signal: AbortSignal) => Promise<T>, publish: (value: T) => void) => {
+    controller?.abort(); controller = new AbortController(); const mine = ++generation;
+    const value = await request(controller.signal);
+    if (mine === generation && !controller.signal.aborted) publish(value);
+  };
 }
 
 // Convenience wrappers. Endpoint-specific payloads stay here so route components
@@ -218,10 +271,10 @@ export const Api = {
   iqRecordingStop: () => postJson('/iq_recording/stop'),
   cases: () => getJson<any[]>('/cases'),
   createCase: (body: any) => postJson('/cases', body),
-  deleteCase: (id: number) => fetch(`${BASE}/cases/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteCase: (id: number) => deleteJson(`/cases/${id}`),
   recordingAnnotations: () => getJson<any[]>('/recordings/annotations'),
   addRecordingAnnotation: (body: any) => postJson('/recordings/annotations', body),
-  deleteRecordingAnnotation: (id: number) => fetch(`${BASE}/recordings/annotations/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteRecordingAnnotation: (id: number) => deleteJson(`/recordings/annotations/${id}`),
   transcriptionStatus: () => getJson('/transcription/status'),
   transcripts: () => getJson<any[]>('/transcription/transcripts'),
   transcriptionStart: () => postJson('/transcription/start'),

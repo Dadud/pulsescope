@@ -38,7 +38,7 @@
 
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Api, openEvents, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
+  import { Api, connectEvents, type ConnectionState, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
   import { browser } from '$app/environment';
 
   let banks: ScanRange[] = $state([]);
@@ -59,7 +59,8 @@
   let notice = $state('');
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
-  let ws: WebSocket | null = $state(null);
+  let eventStream: { close(): void } | null = null;
+  let connectionState: ConnectionState = $state('connecting');
   let waterfallPixels: Uint8ClampedArray | null = null;
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
@@ -114,14 +115,14 @@
     ensureLiveHub();
     void (async () => {
       await loadInitial();
-      try { ws = openEvents(handleEvent); }
+      try { eventStream = connectEvents(handleEvent, (value) => connectionState = value, async () => { await Promise.all([pollSpectrum(), pollRuntime()]); }); }
       catch (e) { console.warn('event ws unavailable; singleton polling remains active', e); }
     })();
     return () => {
       window.removeEventListener('pulsescope:spectrum', onSpectrum);
       window.removeEventListener('pulsescope:runtime', onRuntime);
       window.removeEventListener('pulsescope:poll-error', onPollError);
-      ws?.close(); ws = null;
+      eventStream?.close(); eventStream = null;
     };
   });
 
@@ -362,11 +363,6 @@
     URL.revokeObjectURL(url);
   }
 
-  function unsupportedAction(action: string) {
-    notice = `${action} is not implemented yet`;
-    setTimeout(() => (notice = ''), 3500);
-  }
-
   function miniTrace(frequencyHz: number): string {
     if (spectrumBins.length < 2) return '';
     const centerBin = centerFreqHz > 0 ? Math.round(((frequencyHz - centerFreqHz) / sampleRateHz + 0.5) * spectrumBins.length) : Math.floor(spectrumBins.length / 2);
@@ -432,6 +428,7 @@
         {/each}
       </div>
       <div class="runtime-status">
+        <span class="status-pill" class:on={connectionState === 'live'} role="status">● {connectionState === 'live' ? 'LIVE' : connectionState.toUpperCase()}</span>
         <span class="status-pill" class:on={connected}>● {connected ? 'PWR' : 'OFF'}</span>
         <span class="status-pill" class:on={scanRunning}>● {scanRunning ? 'SCANNING' : 'IDLE'}</span>
         <a href="#/settings" class="settings-link">⚙ Settings</a>
@@ -500,9 +497,6 @@
           <div class="vfo-actions">
             <button class="mini" class:on={v.audio_agc} onclick={() => Api.vfoAgc(v.id, !v.audio_agc)}>AGC</button>
             <button class="mini" onclick={() => identifyVfo(v.id)}>ID</button>
-            <button class="mini" onclick={() => unsupportedAction('Hold')}>Hold</button>
-            <button class="mini" onclick={() => unsupportedAction('Per-VFO recording')}>REC</button>
-            <button class="mini" onclick={() => unsupportedAction('VFO zoom')}>Zoom</button>
           </div>
           <div class="vfo-strength">
             <div class="meter">

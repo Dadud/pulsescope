@@ -1,6 +1,20 @@
 <script lang="ts">
   import '../app.css';
+  import { onMount } from 'svelte';
   let { children } = $props();
+  let route = $state('/');
+  let open = $state(false);
+  const links = [
+    ['/', 'Scanner'], ['/trunking', 'Trunking'], ['/messages', 'Messages'], ['/aero', 'Aero'], ['/iridium', 'Iridium'],
+    ['/satellites', 'Satellites'], ['/hd-radio', 'HD Radio'], ['/ble', 'BLE'], ['/lora', 'LoRa'], ['/signal-id', 'Signal ID'],
+    ['/occupancy', 'Occupancy'], ['/recording', 'Recording'], ['/jobs', 'Jobs'], ['/cases', 'Cases'], ['/aircraft', 'Aircraft'],
+    ['/lookups', 'Lookups'], ['/feature-packs', 'Features'], ['/blacklist', 'Blacklist'], ['/debug', 'Debug'], ['/settings', 'Settings']
+  ];
+  onMount(() => {
+    const update = () => { route = location.hash.slice(1).split('?')[0] || '/'; open = false; };
+    update(); addEventListener('hashchange', update);
+    return () => removeEventListener('hashchange', update);
+  });
 </script>
 
 <svelte:head>
@@ -8,7 +22,7 @@
 </svelte:head>
 
 <div class="app-shell">
-  <nav class="topbar">
+  <nav class="topbar" aria-label="Primary navigation">
     <div class="brand">
       <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
         <circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" stroke-width="2" />
@@ -17,27 +31,9 @@
       </svg>
       <span class="wordmark">PulseScope</span>
     </div>
-    <ul class="nav-links">
-      <li><a href="#/">Scanner</a></li>
-      <li><a href="#/trunking">Trunking</a></li>
-      <li><a href="#/messages">Messages</a></li>
-      <li><a href="#/aero">Aero</a></li>
-      <li><a href="#/iridium">Iridium</a></li>
-      <li><a href="#/satellites">Satellites</a></li>
-      <li><a href="#/hd-radio">HD Radio</a></li>
-      <li><a href="#/ble">BLE</a></li>
-      <li><a href="#/lora">LoRa</a></li>
-      <li><a href="#/signal-id">Signal ID</a></li>
-      <li><a href="#/occupancy">Occupancy</a></li>
-      <li><a href="#/recording">Recording</a></li>
-      <li><a href="#/jobs">Jobs</a></li>
-      <li><a href="#/cases">Cases</a></li>
-      <li><a href="#/aircraft">Aircraft</a></li>
-      <li><a href="#/lookups">Lookups</a></li>
-      <li><a href="#/feature-packs">Features</a></li>
-      <li><a href="#/blacklist">Blacklist</a></li>
-      <li><a href="#/debug">Debug</a></li>
-      <li><a href="#/settings">Settings</a></li>
+    <button class="nav-toggle" aria-expanded={open} aria-controls="primary-links" aria-label="Toggle navigation" onclick={() => open = !open}>☰</button>
+    <ul class="nav-links" class:open id="primary-links">
+      {#each links as link}<li><a href={`#${link[0]}`} class:active={route === link[0]} aria-current={route === link[0] ? 'page' : undefined}>{link[1]}</a></li>{/each}
     </ul>
   </nav>
   <main class="content">

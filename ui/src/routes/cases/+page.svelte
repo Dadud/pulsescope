@@ -22,6 +22,7 @@
     finally { busy = false; }
   }
   async function remove(id: number) {
+    if (!confirm('Delete this case and its saved metadata? This cannot be undone.')) return;
     try { await Api.deleteCase(id); await load(); }
     catch (e) { error = String(e); }
   }
