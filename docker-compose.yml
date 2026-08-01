@@ -13,10 +13,16 @@ services:
       PULSESCOPE_DATA_DIR: /var/lib/pulsescope
       PULSESCOPE_UI_DIR: /app/ui
       PULSESCOPE_AUDIO_OUTPUT: "0"
+      SOAPY_SDR_PLUGIN_PATH: /opt/pulsescope/drivers/sdrplay-3.15.2/modules0.8
+      LD_LIBRARY_PATH: /opt/pulsescope/drivers/sdrplay-3.15.2/lib
       RUST_LOG: pulsescope=info
     volumes:
       - pulsescope-data:/var/lib/pulsescope
+      - sdr-drivers:/opt/pulsescope/drivers:ro
       - /dev/bus/usb:/dev/bus/usb
+      # The licensed SDRplay API service runs on the host and exchanges samples
+      # through POSIX shared memory. This mount is narrower than host IPC mode.
+      - /dev/shm:/dev/shm
     device_cgroup_rules:
       - "c 189:* rwm"
     security_opt:
@@ -24,3 +30,6 @@ services:
 
 volumes:
   pulsescope-data:
+  sdr-drivers:
+    external: true
+    name: docker_sdr-drivers
