@@ -23,9 +23,11 @@ ENV CARGO_TERM_COLOR=never
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        clang \
         cmake \
         libasound2-dev \
         libhidapi-libusb0 \
+        libclang-dev \
         libssl-dev \
         libsoapysdr-dev \
         libudev-dev \
