@@ -39,6 +39,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { Api, openEvents, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
+  import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
   import { browser } from '$app/environment';
 
   let banks: ScanRange[] = $state([]);
@@ -64,6 +65,8 @@
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
   let initialLoadInFlight = false;
+  let browserAudio: BrowserAudio | null = null;
+  let audioState: BrowserAudioState = $state('off');
 
   const filteredBanks = $derived(
     banks.filter((b) => b.name.toLowerCase().includes(filter.toLowerCase()))
@@ -90,6 +93,7 @@
 
   onMount(() => {
     if (!browser) return;
+    browserAudio = new BrowserAudio((state) => { audioState = state; });
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
     const onSpectrum = (event: Event) => {
@@ -122,6 +126,7 @@
       window.removeEventListener('pulsescope:runtime', onRuntime);
       window.removeEventListener('pulsescope:poll-error', onPollError);
       ws?.close(); ws = null;
+      browserAudio?.stop(); browserAudio = null;
     };
   });
 
@@ -342,6 +347,19 @@
     await Api.vfoMode(id, (event.currentTarget as HTMLSelectElement).value);
   }
 
+  async function toggleVfoAudio(vfo: VfoState) {
+    if (vfo.muted) {
+      try {
+        await browserAudio?.start();
+      } catch (error) {
+        audioState = 'error';
+        notice = `Browser audio could not start: ${String(error)}`;
+        return;
+      }
+    }
+    await Api.vfoMute(vfo.id, !vfo.muted);
+  }
+
   async function identifyVfo(id: number) {
     try {
       const result = await Api.vfoIdentify(id);
@@ -444,6 +462,7 @@
       </div>
       <div class="receiver-readout"><span>RECEIVER</span><strong>{centerFreqHz > 0 ? fmtHz(centerFreqHz) : 'Tuning…'}</strong><small>{sampleRateHz > 0 ? `${fmtHz(sampleRateHz)} span` : ''}</small></div>
       <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
+      <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
     </div>
 
     <div class="spectrum-wrap card">
@@ -493,7 +512,7 @@
               oninput={(e) => Api.vfoVolume(v.id, parseFloat((e.target as HTMLInputElement).value))}
             />
             <button class="mini" class:off={v.muted}
-              onclick={() => Api.vfoMute(v.id, !v.muted)}>
+              onclick={() => toggleVfoAudio(v)}>
               {v.muted ? '🔇' : '🔊'}
             </button>
           </div>
@@ -592,6 +611,8 @@
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 8px; }
   .dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .vfo-summary { color: var(--fg-dim); }
+  .audio-status { color: var(--fg-dim); text-transform: capitalize; }
+  .audio-status.on { color: var(--ok); }
 
   .spectrum-wrap { flex: 0 0 auto; min-height: 250px; }
   .spectrum-wrap canvas { display: block; width: 100%; height: 95px; background: var(--bg); border-radius: 4px; }

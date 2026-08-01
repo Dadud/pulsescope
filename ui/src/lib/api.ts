@@ -85,6 +85,14 @@ export interface ScannerEvent {
   data: any;
 }
 
+export interface PcmAudioFrame {
+  sequence: number;
+  sampleRate: number;
+  channels: number;
+  capturedMs: number;
+  samples: Float32Array;
+}
+
 export async function getJson<T = any>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() } });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
@@ -117,22 +125,55 @@ export async function deleteJson<T = any>(path: string): Promise<T> {
   return r.json();
 }
 
-export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
+function websocketUrl(path: string): string {
   // Honor auth if PULSESCOPE_AUTH_TOKEN is set or the URL has ?token=...
   const headers = authHeader();
   // Browser WebSocket constructor doesn't accept headers, so encode the
   // token as a query param. Server accepts both Bearer and ?token=.
-  const base = typeof window !== 'undefined' ? `${WS_BASE}/events` : `${WS_BASE}/events`;
+  const base = `${WS_BASE}${path}`;
   const sep = base.includes('?') ? '&' : '?';
   const auth = headers['authorization'] && headers['authorization'].startsWith('Bearer ');
   const tokenParam = auth ? `${sep}token=${encodeURIComponent(headers['authorization'].slice(7))}` : '';
-  const ws = new WebSocket(`${base}${tokenParam}`);
+  return `${base}${tokenParam}`;
+}
+
+export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
+  const ws = new WebSocket(websocketUrl('/events'));
   ws.onmessage = (e) => {
     try { cb(JSON.parse(e.data)); }
     catch (err) { console.warn('bad ws frame', err); }
   };
   ws.onclose = () => console.log('event ws closed');
   ws.onerror = (e) => console.warn('event ws error', e);
+  return ws;
+}
+
+export function openAudio(
+  onFrame: (frame: PcmAudioFrame) => void,
+  onState?: (state: 'connecting' | 'open' | 'closed' | 'error') => void,
+): WebSocket {
+  onState?.('connecting');
+  const ws = new WebSocket(websocketUrl('/audio/stream'));
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => onState?.('open');
+  ws.onclose = () => onState?.('closed');
+  ws.onerror = () => onState?.('error');
+  ws.onmessage = (event) => {
+    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 32) return;
+    const bytes = new Uint8Array(event.data);
+    if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'PSA2') return;
+    const view = new DataView(event.data);
+    if (view.getUint16(4, true) !== 2) return;
+    const channels = view.getUint16(6, true);
+    const sampleRate = view.getUint32(8, true);
+    const sequence = Number(view.getBigUint64(12, true));
+    const capturedMs = Number(view.getBigInt64(20, true));
+    const sampleCount = view.getUint32(28, true);
+    if (channels < 1 || sampleRate < 8_000 || 32 + sampleCount * 4 !== event.data.byteLength) return;
+    const samples = new Float32Array(sampleCount);
+    for (let i = 0; i < sampleCount; i += 1) samples[i] = view.getFloat32(32 + i * 4, true);
+    onFrame({ sequence, sampleRate, channels, capturedMs, samples });
+  };
   return ws;
 }
 

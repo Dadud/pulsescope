@@ -226,6 +226,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/audio/network/start", post(audio_network_start))
         .route("/audio/network/stop", post(audio_network_stop))
         .route("/audio/network/status", get(audio_network_status))
+        .route("/audio/stream", get(audio_stream))
         .route("/iq_recording/start", post(iq_rec_start))
         .route("/iq_recording/stop", post(iq_rec_stop))
         .route("/iq_recording/status", get(iq_rec_status))
@@ -481,6 +482,10 @@ async fn health_ready(State(s): State<ApiState>) -> impl IntoResponse {
             "frames_processed": frames_processed,
             "latest_sample_ms": latest_sample_ms,
             "age_ms": if latest_sample_ms > 0 { Some(now_ms.saturating_sub(latest_sample_ms)) } else { None },
+        },
+        "audio_flow": {
+            "frames": s.0.audio.remote_frames(),
+            "last_frame_ms": s.0.audio.remote_last_frame_ms(),
         },
         "reasons": reasons,
     })))
@@ -1396,6 +1401,45 @@ async fn audio_network_start(State(s): State<ApiState>, Json(req): Json<AudioNet
 }
 async fn audio_network_stop(State(s): State<ApiState>) -> impl IntoResponse { s.0.audio.stop_network(); Json(json!({"ok":true,"status":s.0.audio.network_status()})) }
 async fn audio_network_status(State(s): State<ApiState>) -> impl IntoResponse { Json(s.0.audio.network_status()) }
+
+async fn audio_stream(State(s): State<ApiState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+    let audio = s.0.audio.clone();
+    let receiver = audio.subscribe();
+    ws.on_upgrade(move |socket| audio_stream_pump(socket, audio, receiver))
+}
+
+async fn audio_stream_pump(
+    socket: WebSocket,
+    audio: Arc<crate::audio::AudioSink>,
+    mut frames: tokio::sync::broadcast::Receiver<crate::audio::AudioFrame>,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    loop {
+        tokio::select! {
+            incoming = receiver.next() => {
+                if incoming.is_none() || matches!(incoming, Some(Ok(Message::Close(_)))) { break; }
+            }
+            frame = frames.recv() => {
+                match frame {
+                    Ok(frame) => {
+                        let mut packet = Vec::with_capacity(32 + frame.samples.len() * 4);
+                        packet.extend_from_slice(b"PSA2");
+                        packet.extend_from_slice(&2u16.to_le_bytes());
+                        packet.extend_from_slice(&frame.channels.to_le_bytes());
+                        packet.extend_from_slice(&frame.sample_rate.to_le_bytes());
+                        packet.extend_from_slice(&frame.sequence.to_le_bytes());
+                        packet.extend_from_slice(&frame.captured_ms.to_le_bytes());
+                        packet.extend_from_slice(&(frame.samples.len() as u32).to_le_bytes());
+                        for sample in frame.samples.iter() { packet.extend_from_slice(&sample.to_le_bytes()); }
+                        if sender.send(Message::Binary(packet)).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => audio.observe_remote_lag(count),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
 
 #[derive(Deserialize)] struct AnnotationReq { recording_path: String, offset_ms: i64, text: String }
 async fn playback_start(State(s): State<ApiState>, Json(req): Json<RecordingReq>) -> impl IntoResponse {
