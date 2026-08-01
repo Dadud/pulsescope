@@ -23,6 +23,7 @@
       const active = devices.find((d) => d.key === `${status.driver === 'mock' ? 'driver=mock' : status.driver}`) ?? devices.find((d) => d.driver === status.driver);
       if (active) { deviceKey = active.key; deviceLabel = active.label; }
       banks = await Api.banks();
+      await refreshCaps();
     } catch (e) { console.warn(e); }
   });
 
@@ -52,8 +53,11 @@
     <h2>Device</h2>
     {#if status}
       <div class="row"><span>Status:</span><b>{status.connected ? 'Connected' : 'Disconnected'}</b></div>
+      <div class="row"><span>Lifecycle:</span><code>{status.lifecycle ?? 'unknown'}</code></div>
       <div class="row"><span>Driver:</span><code>{status.driver}</code></div>
       <div class="row"><span>Sample rate:</span><code>{(status.sample_rate / 1e6).toFixed(2)} Msps</code></div>
+      <div class="row"><span>Samples received:</span><code>{Number(status.stream?.samples_received ?? 0).toLocaleString()}</code></div>
+      <div class="row"><span>Source errors:</span><code>{Number(status.stream?.source_errors ?? 0).toLocaleString()}</code></div>
     {/if}
     <div class="row">
       <select bind:value={deviceKey} aria-label="SDR device" onchange={() => { const d = devices.find((item) => item.key === deviceKey); if (d) deviceLabel = d.label; }} style="flex:1">
@@ -70,6 +74,11 @@
   {#if caps?.connected}
     <section class="card">
       <h2>Receiver frontend</h2>
+      <div class="row"><span>Capability contract</span><code>v{caps.contract_version}</code></div>
+      <div class="row"><span>Stream MTU</span><code>{Number(caps.stream_mtu ?? 0).toLocaleString()} samples</code></div>
+      <div class="row"><span>Total spectrum</span><code>{(Number(caps.total_bandwidth_hz ?? 0) / 1e6).toFixed(3)} MHz</code></div>
+      <div class="row"><span>Usable spectrum</span><code>{(Number(caps.usable_bandwidth_hz ?? 0) / 1e6).toFixed(3)} MHz</code></div>
+      <div class="row"><span>RX tuners</span><code>{caps.tuner_count ?? 1}</code></div>
       {#if caps.agc_supported}<label class="row"><span>RF AGC</span><input type="checkbox" checked={caps.agc_enabled} onchange={(e) => control('agc', e.currentTarget.checked)} /></label>{/if}
       {#if caps.dc_offset_auto_supported}<label class="row"><span>DC offset auto</span><input type="checkbox" checked={caps.dc_offset_auto} onchange={(e) => control('dc_offset_auto', e.currentTarget.checked)} /></label>{/if}
       {#if caps.iq_balance_auto_supported}<label class="row"><span>IQ balance auto</span><input type="checkbox" checked={caps.iq_balance_auto} onchange={(e) => control('iq_balance_auto', e.currentTarget.checked)} /></label>{/if}

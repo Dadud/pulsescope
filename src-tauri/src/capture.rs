@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use rustfft::num_complex::Complex;
 use crate::device::DeviceLayer;
@@ -99,7 +99,11 @@ impl CaptureWorker {
     pub fn start(device: Arc<DeviceLayer>, rings: Vec<IqRing>, chunk_size: usize, playback: Arc<Mutex<Option<PlaybackReader>>>, iq_network: IqNetworkSink) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
+        let stream_mtu = device.stream_mtu();
+        let chunk_size = if stream_mtu > 0 { stream_mtu.clamp(512, 262_144) } else { chunk_size };
         let thread = thread::spawn(move || {
+            let mut consecutive_errors = 0u32;
+            let mut last_recovery = Instant::now() - Duration::from_secs(5);
             while !stop_thread.load(Ordering::Acquire) {
                 let (result, playback_active) = {
                     let mut selected = playback.lock();
@@ -110,6 +114,7 @@ impl CaptureWorker {
                 };
                 match result {
                     Ok(samples) if !samples.is_empty() => {
+                        consecutive_errors = 0;
                         let status = device.status();
                         iq_network.send(&samples, status.sample_rate, status.center_freq_hz);
                         for ring in &rings { ring.push(&samples); }
@@ -120,7 +125,14 @@ impl CaptureWorker {
                         }
                     }
                     Ok(_) => thread::sleep(Duration::from_millis(1)),
-                    Err(_) => thread::sleep(Duration::from_millis(2)),
+                    Err(_) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        if !playback_active && consecutive_errors >= 8 && last_recovery.elapsed() >= Duration::from_secs(1) {
+                            let _ = device.recover();
+                            last_recovery = Instant::now();
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
                 }
             }
         });
