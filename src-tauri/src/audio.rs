@@ -149,7 +149,10 @@ impl AudioSink {
 
     /// Flush queued PCM when the last VFO stops. The CPAL stream may remain
     /// open, but it must output silence rather than stale demodulated audio.
-    pub fn clear_queue(&self) { self.queue.lock().clear(); }
+    pub fn clear_queue(&self) {
+        self.queue.lock().clear();
+        self.remote_accumulator.lock().clear();
+    }
 
     pub fn push(&self, samples: &[f32], volume: f32) {
         let gain = volume.clamp(0.0, 1.0);

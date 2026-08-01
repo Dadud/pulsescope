@@ -60,6 +60,10 @@ impl IqRing {
     }
     pub fn len(&self) -> usize { self.inner.lock().len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
+    /// Drop samples captured under an earlier tuning/sample-rate contract.
+    /// Keeping them would briefly render and demodulate the old band after a
+    /// retune, which looks like a frozen VFO and produces a burst of bad audio.
+    pub fn clear(&self) { self.inner.lock().clear(); }
     pub fn status(&self) -> serde_json::Value { serde_json::json!({"name":self.name.as_ref(),"capacity_samples":self.capacity,"queued_samples":self.len(),"pushed_samples":self.pushed.load(Ordering::Relaxed),"taken_samples":self.taken.load(Ordering::Relaxed),"dropped_samples":self.dropped.load(Ordering::Relaxed)}) }
 }
 

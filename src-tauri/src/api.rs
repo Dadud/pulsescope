@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use axum::http::{header, HeaderValue, Method};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::state::{AppState, ScannerEvent};
+use crate::state::{AppState, ScannerEvent, SpectrumFrame};
 
 #[derive(Clone)]
 pub struct ApiState(pub Arc<AppState>);
@@ -61,6 +61,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/health", get(health))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/v2/system/health", get(system_health_v2))
+        .route("/v2/decoders/catalog", get(decoder_catalog_v2))
         .route("/settings", get(get_settings).put(put_settings))
         // ── device ───────────────────────────────────────────────────────
         .route("/devices", get(list_devices))
@@ -100,6 +102,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/vfo/:id/rds", get(vfo_rds))
         // ── spectrum / signal-id ─────────────────────────────────────────
         .route("/spectrum", get(spectrum))
+        .route("/v2/spectrum/stream", get(spectrum_stream_ws))
         .route("/signal_events", get(signal_events))
         .route("/spectrum_occupancy", get(spectrum_occupancy))
         .route("/signal_id/file", post(signal_id_file))
@@ -491,6 +494,69 @@ async fn health_ready(State(s): State<ApiState>) -> impl IntoResponse {
     })))
 }
 
+async fn system_health_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let device = s.0.device.status();
+    let scanner_handle = s.0.scanner.read();
+    let scanner = scanner_handle.as_ref().map(|handle| handle.state.lock().clone());
+    let consumers = scanner_handle.as_ref()
+        .map(|handle| handle.iq_consumers.iter().map(|ring| ring.status()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    drop(scanner_handle);
+    let now = crate::scanner::now_ms();
+    let frame_ms = scanner.as_ref().map(|runtime| runtime.latest_spectrum_ms).unwrap_or(0);
+    let frame_age_ms = if frame_ms > 0 { Some(now.saturating_sub(frame_ms)) } else { None };
+    let capture_fresh = device.connected && frame_age_ms.is_some_and(|age| age <= 2_000);
+    let vfos = scanner.as_ref().map(|runtime| runtime.vfo_states.clone()).unwrap_or_default();
+    let audible_vfos = vfos.iter().filter(|vfo| !vfo.muted).count();
+    let audio_details = s.0.audio.status();
+    let audio_frames = s.0.audio.remote_frames();
+    let audio_last_frame_ms = s.0.audio.remote_last_frame_ms();
+    let audio_age_ms = if audio_last_frame_ms > 0 { Some(now.saturating_sub(audio_last_frame_ms)) } else { None };
+    let audio_state = if !device.connected {
+        "disconnected"
+    } else if audible_vfos == 0 {
+        "muted"
+    } else if audio_frames == 0 {
+        "buffering"
+    } else if audio_age_ms.is_some_and(|age| age <= 2_000) {
+        "playing"
+    } else {
+        "degraded"
+    };
+    Json(json!({
+        "contract_version": 2,
+        "status": if capture_fresh { "healthy" } else { "degraded" },
+        "timestamp_ms": now,
+        "device": device,
+        "capture": { "fresh": capture_fresh, "consumers": consumers },
+        "fft": {
+            "sequence": scanner.as_ref().map(|runtime| runtime.frames_processed).unwrap_or(0),
+            "captured_ms": frame_ms,
+            "age_ms": frame_age_ms,
+            "bins": scanner.as_ref().map(|runtime| runtime.latest_spectrum.len()).unwrap_or(0),
+            "clients": s.0.spectrum.receiver_count(),
+        },
+        "vfos": { "count": vfos.len(), "audible": audible_vfos, "states": vfos },
+        "audio": { "state": audio_state, "age_ms": audio_age_ms, "details": audio_details },
+        "decoders": s.0.sidecars.statuses(),
+        "event_clients": s.0.events.receiver_count(),
+    }))
+}
+
+async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let mut decoders = vec![
+        json!({"id":"adsb","name":"ADS-B / Mode S","status":"available","input":"iq","integration":"live","verification":"fixture"}),
+        json!({"id":"ais","name":"AIS","status":"available","input":"discriminator","integration":"on_demand","verification":"fixture"}),
+        json!({"id":"aprs","name":"APRS / AX.25","status":"available","input":"audio","integration":"on_demand","verification":"fixture"}),
+        json!({"id":"pocsag","name":"POCSAG","status":"available","input":"audio","integration":"on_demand","verification":"fixture"}),
+        json!({"id":"rds","name":"Broadcast RDS","status":"available","input":"wfm_multiplex","integration":"on_demand","verification":"fixture"}),
+    ];
+    for decoder in s.0.sidecars.statuses().into_iter().filter(|decoder| decoder.running) {
+        decoders.push(json!({"id":decoder.name,"name":decoder.name,"status":"running","input":"managed_sidecar","integration":"live","verification":"health_check","input_samples":decoder.input_samples}));
+    }
+    Json(json!({"contract_version":2,"decoders":decoders}))
+}
+
 async fn get_settings(State(s): State<ApiState>) -> impl IntoResponse {
     let cfg = s.0.config.read().clone();
     Json(serde_json::to_value(&cfg).unwrap())
@@ -618,17 +684,19 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         return Json(json!({"ok": false, "error": format!("failed to tune device: {e}")}));
     }
     // Lazily create the scanner if needed.
-    let existing_cmd = {
+    let existing_handle = {
         let guard = s.0.scanner.read();
-        guard.as_ref().map(|h| h.cmd_tx.clone())
+        guard.as_ref().cloned()
     };
-    if let Some(cmd_tx) = existing_cmd {
+    if let Some(handle) = existing_handle {
+        handle.flush_iq();
+        s.0.audio.clear_queue();
         start_configured_sidecars(&s).await;
-        let _ = cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
+        let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
         return Json(json!({"ok": true}));
     }
     let cfg = s.0.config.read().scanner.clone();
-    let handle = crate::scanner::ScannerHandle::spawn(cfg, s.0.device.clone(), s.0.db.clone(), s.0.recording.clone(), s.0.playback.clone(), s.0.audio.clone(), s.0.iq_network.clone(), s.0.sidecars.clone(), s.0.events.clone());
+    let handle = crate::scanner::ScannerHandle::spawn(cfg, s.0.device.clone(), s.0.db.clone(), s.0.recording.clone(), s.0.playback.clone(), s.0.audio.clone(), s.0.iq_network.clone(), s.0.sidecars.clone(), s.0.events.clone(), s.0.spectrum.clone());
     *s.0.scanner.write() = Some(handle);
     if let Some(handle) = s.0.scanner.read().as_ref() { let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range }); }
     start_configured_sidecars(&s).await;
@@ -930,13 +998,8 @@ async fn talkgroup_export(State(s): State<ApiState>) -> impl IntoResponse { Json
 #[derive(Deserialize)] struct SystemReq { system_name: String }
 async fn talkgroup_delete_system(State(s): State<ApiState>, Json(req): Json<SystemReq>) -> impl IntoResponse { Json(json!({"ok": s.0.db.delete_talkgroup_system(&req.system_name).is_ok()})) }
 
-#[derive(Deserialize)] struct TrunkingStartReq { system: Option<String>, control_channel_hz: Option<u64> }
-async fn trunking_start(State(s): State<ApiState>, req: Option<Json<TrunkingStartReq>>) -> impl IntoResponse {
-    let req = req.map(|Json(v)| v).unwrap_or(TrunkingStartReq { system: None, control_channel_hz: None });
-    let mut t = s.0.trunking.write();
-    t.running = true; t.system = req.system.or_else(|| Some("mock-trunked-system".into())); t.control_channel_hz = req.control_channel_hz.or(Some(851_012_500));
-    t.log.push(format!("{} trunking started", crate::scanner::now_ms()));
-    Json(json!({"ok": true, "status": &*t}))
+async fn trunking_start(State(_s): State<ApiState>, _req: Option<Json<Value>>) -> impl IntoResponse {
+    Json(json!({"ok":false,"available":false,"error":"trunking requires a verified controller decoder; no mock system is exposed"}))
 }
 async fn trunking_stop(State(s): State<ApiState>) -> impl IntoResponse {
     let mut t = s.0.trunking.write(); t.running = false; t.active_talkgroup = None; t.discovery_running = false; t.log.push(format!("{} trunking stopped", crate::scanner::now_ms())); Json(json!({"ok": true, "status": &*t}))
@@ -953,15 +1016,15 @@ async fn trunking_import(State(s): State<ApiState>, Json(def): Json<Value>) -> i
     t.log.push("trunking definition imported".into());
     Json(json!({"ok": true, "status": &*t}))
 }
-async fn trunking_disc_start(State(s): State<ApiState>) -> impl IntoResponse { let mut t = s.0.trunking.write(); t.discovery_running = true; t.discovery_results = vec![json!({"system":"mock-trunked-system","control_channel_hz":851012500,"protocol":"P25"})]; t.log.push("discovery started".into()); Json(json!({"ok": true})) }
+async fn trunking_disc_start(State(_s): State<ApiState>) -> impl IntoResponse { Json(json!({"ok":false,"available":false,"error":"trunking discovery decoder is not installed"})) }
 async fn trunking_disc_stop(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().discovery_running = false; Json(json!({"ok": true})) }
 async fn trunking_disc_results(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&s.0.trunking.read().discovery_results).unwrap()) }
 async fn trunking_disc_snapshot(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&*s.0.trunking.read()).unwrap()) }
 async fn trunking_disc_log(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&s.0.trunking.read().log).unwrap()) }
 async fn trunking_disc_log_clear(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().log.clear(); Json(json!({"ok": true})) }
 async fn trunking_disc_notes() -> impl IntoResponse { Json(json!([])) }
-async fn trunking_disc_promote(State(s): State<ApiState>) -> impl IntoResponse { let mut t = s.0.trunking.write(); t.system = Some("mock-trunked-system".into()); Json(json!({"ok": true})) }
-async fn trunking_disc_identify() -> impl IntoResponse { Json(json!({"ok": true, "protocol":"P25"})) }
+async fn trunking_disc_promote(State(_s): State<ApiState>) -> impl IntoResponse { Json(json!({"ok":false,"available":false,"error":"there is no verified discovery result to promote"})) }
+async fn trunking_disc_identify() -> impl IntoResponse { Json(json!({"ok":false,"available":false,"error":"trunking identification decoder is not installed"})) }
 async fn trunking_disc_clear(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().discovery_results.clear(); Json(json!({"ok": true})) }
 async fn trunking_disc_delete(State(s): State<ApiState>) -> impl IntoResponse { s.0.trunking.write().discovery_results.clear(); Json(json!({"ok": true})) }
 async fn trunking_zone_active(State(s): State<ApiState>) -> impl IntoResponse { Json(serde_json::to_value(&s.0.trunking.read().zones).unwrap()) }
@@ -1018,15 +1081,8 @@ async fn hd_radio_messages() -> impl IntoResponse { Json(json!([])) }
 async fn hd_radio_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.hd_radio.enabled,"auto_on_fm_lock":c.hd_radio.auto_on_fm_lock,"program":c.hd_radio.program,"stations":c.hd_radio.stations})) }
 async fn hd_radio_aas(Path(_filename): Path<String>) -> impl IntoResponse { Json(json!({})) }
 
-async fn ble_devices(State(s): State<ApiState>) -> Json<Value> {
-    let connected = s.0.device.status().connected;
-    if !connected { return Json(json!([])); }
-    Json(json!([
-        {"address":"02:00:00:00:00:01","name":"PulseScope Mock Beacon","rssi":-48,"manufacturer":"PulseScope","service_uuids":["180F"],"last_seen_ms":crate::scanner::now_ms()},
-        {"address":"02:00:00:00:00:02","name":"Mock Environmental Sensor","rssi":-67,"manufacturer":"PulseScope","service_uuids":["181A"],"last_seen_ms":crate::scanner::now_ms()}
-    ]))
-}
-async fn ble_status(State(s): State<ApiState>) -> impl IntoResponse { let connected=s.0.device.status().connected; Json(json!({"enabled":connected,"running":connected,"device_count":if connected {2} else {0},"source":if connected {"mock"} else {"none"}})) }
+async fn ble_devices(State(_s): State<ApiState>) -> Json<Value> { Json(json!([])) }
+async fn ble_status(State(_s): State<ApiState>) -> impl IntoResponse { Json(json!({"available":false,"enabled":false,"running":false,"device_count":0,"source":"none","reason":"BLE capture backend is not installed"})) }
 async fn ble_file() -> impl IntoResponse { Json(json!(null)) }
 async fn ble_clear() -> impl IntoResponse { Json(json!({"ok": true})) }
 
@@ -1406,6 +1462,57 @@ async fn audio_stream(State(s): State<ApiState>, ws: WebSocketUpgrade) -> impl I
     let audio = s.0.audio.clone();
     let receiver = audio.subscribe();
     ws.on_upgrade(move |socket| audio_stream_pump(socket, audio, receiver))
+}
+
+const SPECTRUM_WIRE_VERSION: u16 = 2;
+const SPECTRUM_HEADER_BYTES: usize = 52;
+
+fn encode_spectrum_frame(frame: &SpectrumFrame) -> Vec<u8> {
+    // Half-dB quantization spans -140 dBFS through -12.5 dBFS. Stronger bins
+    // saturate cleanly; the fixed scale prevents waterfall colors pumping.
+    let floor_dbfs = -140.0f32;
+    let scale_db = 0.5f32;
+    let mut packet = Vec::with_capacity(SPECTRUM_HEADER_BYTES + frame.bins_dbfs.len());
+    packet.extend_from_slice(b"PSF2");
+    packet.extend_from_slice(&SPECTRUM_WIRE_VERSION.to_le_bytes());
+    packet.extend_from_slice(&0u16.to_le_bytes());
+    packet.extend_from_slice(&frame.sequence.to_le_bytes());
+    packet.extend_from_slice(&frame.captured_ms.to_le_bytes());
+    packet.extend_from_slice(&frame.center_freq_hz.to_le_bytes());
+    packet.extend_from_slice(&frame.sample_rate_hz.to_le_bytes());
+    packet.extend_from_slice(&frame.usable_span_hz.to_le_bytes());
+    packet.extend_from_slice(&(frame.bins_dbfs.len() as u32).to_le_bytes());
+    packet.extend_from_slice(&floor_dbfs.to_le_bytes());
+    packet.extend_from_slice(&scale_db.to_le_bytes());
+    packet.extend(frame.bins_dbfs.iter().map(|value| {
+        ((value - floor_dbfs) / scale_db).round().clamp(0.0, 255.0) as u8
+    }));
+    packet
+}
+
+async fn spectrum_stream_ws(State(s): State<ApiState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+    let tx = s.0.spectrum.clone();
+    ws.on_upgrade(move |socket| spectrum_ws_pump(socket, tx))
+}
+
+async fn spectrum_ws_pump(socket: WebSocket, tx: tokio::sync::watch::Sender<SpectrumFrame>) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut frames = tx.subscribe();
+    loop {
+        tokio::select! {
+            changed = frames.changed() => {
+                if changed.is_err() { break; }
+                let packet = encode_spectrum_frame(&frames.borrow_and_update().clone());
+                if sender.send(Message::Binary(packet.into())).await.is_err() { break; }
+            }
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 async fn audio_stream_pump(
@@ -1815,5 +1922,29 @@ mod readiness_tests {
             readiness_reasons(true, "rtlsdr", 42, 1_000, 10_000, false),
             vec!["sample_flow_stale"]
         );
+    }
+}
+
+#[cfg(test)]
+mod spectrum_wire_tests {
+    use super::{encode_spectrum_frame, SPECTRUM_HEADER_BYTES};
+    use crate::state::SpectrumFrame;
+
+    #[test]
+    fn binary_frame_has_versioned_header_and_fixed_quantization() {
+        let packet = encode_spectrum_frame(&SpectrumFrame {
+            sequence: 7,
+            captured_ms: 1234,
+            center_freq_hz: 100_700_000,
+            sample_rate_hz: 2_000_000,
+            usable_span_hz: 1_800_000,
+            bins_dbfs: vec![-140.0, -100.0, -12.5, 0.0],
+        });
+        assert_eq!(&packet[..4], b"PSF2");
+        assert_eq!(u16::from_le_bytes(packet[4..6].try_into().unwrap()), 2);
+        assert_eq!(u64::from_le_bytes(packet[8..16].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(packet[40..44].try_into().unwrap()), 4);
+        assert_eq!(packet.len(), SPECTRUM_HEADER_BYTES + 4);
+        assert_eq!(&packet[SPECTRUM_HEADER_BYTES..], &[0, 80, 255, 255]);
     }
 }

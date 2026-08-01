@@ -19,21 +19,12 @@
     </div>
     <ul class="nav-links">
       <li><a href="#/">Scanner</a></li>
-      <li><a href="#/trunking">Trunking</a></li>
       <li><a href="#/messages">Messages</a></li>
-      <li><a href="#/aero">Aero</a></li>
-      <li><a href="#/iridium">Iridium</a></li>
-      <li><a href="#/satellites">Satellites</a></li>
-      <li><a href="#/hd-radio">HD Radio</a></li>
-      <li><a href="#/ble">BLE</a></li>
-      <li><a href="#/lora">LoRa</a></li>
       <li><a href="#/signal-id">Signal ID</a></li>
       <li><a href="#/occupancy">Occupancy</a></li>
       <li><a href="#/recording">Recording</a></li>
       <li><a href="#/jobs">Jobs</a></li>
       <li><a href="#/cases">Cases</a></li>
-      <li><a href="#/aircraft">Aircraft</a></li>
-      <li><a href="#/lookups">Lookups</a></li>
       <li><a href="#/feature-packs">Features</a></li>
       <li><a href="#/blacklist">Blacklist</a></li>
       <li><a href="#/debug">Debug</a></li>

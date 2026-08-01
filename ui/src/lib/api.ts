@@ -93,14 +93,35 @@ export interface PcmAudioFrame {
   samples: Float32Array;
 }
 
+export interface SpectrumStreamFrame {
+  sequence: number;
+  capturedMs: number;
+  centerFreqHz: number;
+  sampleRateHz: number;
+  usableSpanHz: number;
+  bins: number[];
+}
+
+const LIVE_REQUEST_TIMEOUT_MS = 5_000;
+
+async function fetchBounded(input: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), LIVE_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { cache: 'no-store', ...init, signal: controller.signal });
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
 export async function getJson<T = any>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() } });
+  const r = await fetchBounded(`${BASE}${path}`, { headers: { ...authHeader() } });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
   return r.json();
 }
 
 export async function postJson<T = any>(path: string, body?: any): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetchBounded(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -110,7 +131,7 @@ export async function postJson<T = any>(path: string, body?: any): Promise<T> {
 }
 
 export async function putJson<T = any>(path: string, body: any): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetchBounded(`${BASE}${path}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: JSON.stringify(body),
@@ -120,7 +141,7 @@ export async function putJson<T = any>(path: string, body: any): Promise<T> {
 }
 
 export async function deleteJson<T = any>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
+  const r = await fetchBounded(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
   return r.json();
 }
@@ -145,6 +166,39 @@ export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
   };
   ws.onclose = () => console.log('event ws closed');
   ws.onerror = (e) => console.warn('event ws error', e);
+  return ws;
+}
+
+export function openSpectrum(
+  onFrame: (frame: SpectrumStreamFrame) => void,
+  onState?: (state: 'connecting' | 'open' | 'closed' | 'error') => void,
+): WebSocket {
+  onState?.('connecting');
+  const ws = new WebSocket(websocketUrl('/api/v2/spectrum/stream'));
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => onState?.('open');
+  ws.onclose = () => onState?.('closed');
+  ws.onerror = () => onState?.('error');
+  ws.onmessage = (event) => {
+    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 52) return;
+    const bytes = new Uint8Array(event.data);
+    if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'PSF2') return;
+    const view = new DataView(event.data);
+    if (view.getUint16(4, true) !== 2) return;
+    const count = view.getUint32(40, true);
+    if (52 + count !== event.data.byteLength) return;
+    const floor = view.getFloat32(44, true);
+    const scale = view.getFloat32(48, true);
+    const bins = Array.from(bytes.subarray(52), (value) => floor + value * scale);
+    onFrame({
+      sequence: Number(view.getBigUint64(8, true)),
+      capturedMs: Number(view.getBigInt64(16, true)),
+      centerFreqHz: Number(view.getBigUint64(24, true)),
+      sampleRateHz: view.getUint32(32, true),
+      usableSpanHz: view.getUint32(36, true),
+      bins,
+    });
+  };
   return ws;
 }
 
@@ -181,7 +235,7 @@ export function openAudio(
 // remain small and the backend contract has a single source of truth.
 export const Api = {
   health: () => getJson('/health'),
-  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean }>('/spectrum'),
+  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean; frame_sequence?: number; frame_timestamp_ms?: number }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),
   createBank: (body: any) => postJson('/channels/banks/create', body),
   deleteBank: (name: string) => postJson('/channels/banks/delete', { name }),

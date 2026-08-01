@@ -1,44 +1,6 @@
-<script module lang="ts">
-  import { Api as LiveApi } from '$lib/api';
-
-  let liveHubStarted = false;
-  let liveHubBusy = false;
-  let liveHubTick = 0;
-  /** A singleton browser polling hub. It survives an accidental duplicate
-   * Svelte mount; views only subscribe/unsubscribe from its events. */
-  function ensureLiveHub() {
-    if (liveHubStarted || typeof window === 'undefined') return;
-    liveHubStarted = true;
-    const poll = async () => {
-      if (liveHubBusy) return;
-      liveHubBusy = true;
-      try {
-        const spectrum = await LiveApi.spectrum();
-        window.dispatchEvent(new CustomEvent('pulsescope:spectrum', { detail: spectrum }));
-        if (++liveHubTick % 4 === 0) {
-          const [status, vfos] = await Promise.all([LiveApi.deviceStatus(), LiveApi.vfoStates()]);
-          window.dispatchEvent(new CustomEvent('pulsescope:runtime', { detail: { status, vfos } }));
-        }
-      } catch (error) {
-        window.dispatchEvent(new CustomEvent('pulsescope:poll-error', { detail: String(error) }));
-      } finally { liveHubBusy = false; }
-    };
-    void poll();
-    // requestAnimationFrame remains active for a foreground phone/browser
-    // dashboard, unlike timer intervals which Chromium can freeze after a
-    // handful of callbacks when the page loses scheduler priority.
-    let lastPollAt = 0;
-    const frame = (now: number) => {
-      if (now - lastPollAt >= 250) { lastPollAt = now; void poll(); }
-      window.requestAnimationFrame(frame);
-    };
-    window.requestAnimationFrame(frame);
-  }
-</script>
-
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Api, openEvents, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent } from '$lib/api';
+  import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
   import { browser } from '$app/environment';
 
@@ -61,12 +23,25 @@
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
+  let spectrumWs: WebSocket | null = null;
+  let spectrumReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let spectrumConnection = $state<'connecting' | 'open' | 'closed' | 'error'>('connecting');
+  let lastSpectrumAt = $state(0);
+  let lastSpectrumSequence = $state(0);
+  let droppedSpectrumFrames = $state(0);
+  let nowMs = $state(Date.now());
   let waterfallPixels: Uint8ClampedArray | null = null;
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
   let initialLoadInFlight = false;
   let browserAudio: BrowserAudio | null = null;
   let audioState: BrowserAudioState = $state('off');
+  let livePollTimer: ReturnType<typeof setTimeout> | null = null;
+  let livePollBusy = false;
+  let livePollTick = 0;
+  let livePolling = false;
+
+  const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
 
   const filteredBanks = $derived(
     banks.filter((b) => b.name.toLowerCase().includes(filter.toLowerCase()))
@@ -115,7 +90,13 @@
     window.addEventListener('pulsescope:spectrum', onSpectrum);
     window.addEventListener('pulsescope:runtime', onRuntime);
     window.addEventListener('pulsescope:poll-error', onPollError);
-    ensureLiveHub();
+    livePolling = true;
+    connectSpectrum();
+    scheduleLivePoll(0);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') scheduleLivePoll(0);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     void (async () => {
       await loadInitial();
       try { ws = openEvents(handleEvent); }
@@ -125,25 +106,82 @@
       window.removeEventListener('pulsescope:spectrum', onSpectrum);
       window.removeEventListener('pulsescope:runtime', onRuntime);
       window.removeEventListener('pulsescope:poll-error', onPollError);
+      document.removeEventListener('visibilitychange', onVisibility);
+      livePolling = false;
+      if (livePollTimer) window.clearTimeout(livePollTimer);
+      livePollTimer = null;
+      if (spectrumReconnectTimer) window.clearTimeout(spectrumReconnectTimer);
+      spectrumReconnectTimer = null;
+      spectrumWs?.close(); spectrumWs = null;
       ws?.close(); ws = null;
       browserAudio?.stop(); browserAudio = null;
     };
   });
 
-  // Even when the route is mounted by the hash router without a
-  // visible navigation event, Svelte 5 runes still fire `$effect`
-  // on the client. Use it as a belt-and-suspenders to ensure the
-  // initial data load always runs at least once in the browser.
-  $effect(() => {
-    if (!browser) return;
-    // The static-router hydration path reliably runs this effect. Seed the
-    // first FFT frame here; the interval below maintains it afterwards.
-    void pollSpectrum();
-    if (banks.length === 0 && !notice.startsWith('init')) {
-      notice = 'init…';
-      loadInitial().finally(() => { notice = notice === 'init…' ? '' : notice; });
+  function scheduleLivePoll(delayMs: number) {
+    if (!livePolling) return;
+    if (livePollTimer) window.clearTimeout(livePollTimer);
+    livePollTimer = window.setTimeout(() => {
+      livePollTimer = null;
+      void pollLiveData();
+    }, delayMs);
+  }
+
+  async function pollLiveData() {
+    if (!livePolling) return;
+    if (livePollBusy) {
+      scheduleLivePoll(250);
+      return;
     }
-  });
+    livePollBusy = true;
+    try {
+      nowMs = Date.now();
+      if (spectrumConnection !== 'open' || spectrumStale) {
+        if (spectrumConnection === 'open' && spectrumStale) {
+          spectrumWs?.close();
+          spectrumWs = null;
+          reconnectSpectrum(0);
+        }
+        await pollSpectrum();
+      }
+      if (++livePollTick % 4 === 0) await pollRuntime();
+    } finally {
+      livePollBusy = false;
+      scheduleLivePoll(document.visibilityState === 'visible' ? 250 : 1_000);
+    }
+  }
+
+  function connectSpectrum() {
+    if (!livePolling || spectrumWs?.readyState === WebSocket.OPEN || spectrumWs?.readyState === WebSocket.CONNECTING) return;
+    spectrumWs = openSpectrum(
+      (frame) => applyStreamSpectrum(frame),
+      (state) => {
+        spectrumConnection = state;
+        if ((state === 'closed' || state === 'error') && livePolling) reconnectSpectrum(1_000);
+      },
+    );
+  }
+
+  function reconnectSpectrum(delayMs: number) {
+    if (!livePolling || spectrumReconnectTimer) return;
+    spectrumReconnectTimer = window.setTimeout(() => {
+      spectrumReconnectTimer = null;
+      connectSpectrum();
+    }, delayMs);
+  }
+
+  function applyStreamSpectrum(frame: SpectrumStreamFrame) {
+    if (lastSpectrumSequence > 0 && frame.sequence > lastSpectrumSequence + 1) {
+      droppedSpectrumFrames += frame.sequence - lastSpectrumSequence - 1;
+    }
+    lastSpectrumSequence = frame.sequence;
+    lastSpectrumAt = Date.now();
+    nowMs = lastSpectrumAt;
+    centerFreqHz = frame.centerFreqHz;
+    sampleRateHz = frame.sampleRateHz;
+    spectrumError = '';
+    void applySpectrum(frame.bins);
+  }
 
   async function loadInitial() {
     try {
@@ -189,6 +227,8 @@
       scanRunning = Boolean(spectrum?.running);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length > 0) {
         spectrumError = '';
+        lastSpectrumSequence = Number(spectrum.frame_sequence ?? lastSpectrumSequence);
+        lastSpectrumAt = Date.now();
         await applySpectrum(spectrum.bins);
       }
     } catch (e) {
@@ -199,7 +239,8 @@
   function handleEvent(ev: ScannerEvent) {
     switch (ev.kind) {
       case 'Spectrum':
-        void applySpectrum(ev.data.bins);
+        // Dedicated binary transport owns live FFT delivery. The event stream
+        // remains a compatibility path for non-spectrum state.
         break;
       case 'VfoStates':
         vfos = ev.data;
@@ -358,6 +399,7 @@
       }
     }
     await Api.vfoMute(vfo.id, !vfo.muted);
+    if (!vfo.muted && vfos.filter((candidate) => !candidate.muted).length === 1) browserAudio?.stop();
   }
 
   async function identifyVfo(id: number) {
@@ -378,11 +420,6 @@
     link.download = `pulsescope-messages-${Date.now()}.csv`;
     link.click();
     URL.revokeObjectURL(url);
-  }
-
-  function unsupportedAction(action: string) {
-    notice = `${action} is not implemented yet`;
-    setTimeout(() => (notice = ''), 3500);
   }
 
   function miniTrace(frequencyHz: number): string {
@@ -465,9 +502,10 @@
       <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
     </div>
 
-    <div class="spectrum-wrap card">
-      <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
+    <div class="spectrum-wrap card" class:stale={spectrumStale}>
+      <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · frame ${lastSpectrumSequence}${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
       <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune VFO 0"></canvas>
+      {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
     </div>
@@ -511,17 +549,14 @@
               value={v.volume}
               oninput={(e) => Api.vfoVolume(v.id, parseFloat((e.target as HTMLInputElement).value))}
             />
-            <button class="mini" class:off={v.muted}
+            <button class="listen" class:on={!v.muted} aria-label={v.muted ? `Listen to VFO ${v.id}` : `Mute VFO ${v.id}`}
               onclick={() => toggleVfoAudio(v)}>
-              {v.muted ? '🔇' : '🔊'}
+              {v.muted ? '▶ Listen' : '■ Mute'}
             </button>
           </div>
           <div class="vfo-actions">
             <button class="mini" class:on={v.audio_agc} onclick={() => Api.vfoAgc(v.id, !v.audio_agc)}>AGC</button>
             <button class="mini" onclick={() => identifyVfo(v.id)}>ID</button>
-            <button class="mini" onclick={() => unsupportedAction('Hold')}>Hold</button>
-            <button class="mini" onclick={() => unsupportedAction('Per-VFO recording')}>REC</button>
-            <button class="mini" onclick={() => unsupportedAction('VFO zoom')}>Zoom</button>
           </div>
           <div class="vfo-strength">
             <div class="meter">
@@ -614,7 +649,9 @@
   .audio-status { color: var(--fg-dim); text-transform: capitalize; }
   .audio-status.on { color: var(--ok); }
 
-  .spectrum-wrap { flex: 0 0 auto; min-height: 250px; }
+  .spectrum-wrap { flex: 0 0 auto; min-height: 250px; position: relative; }
+  .spectrum-wrap.stale canvas { opacity: 0.45; }
+  .stale-overlay { position:absolute; inset:36px 12px 112px; display:grid; place-items:center; color:var(--warn); background:rgb(7 12 18 / 55%); font:700 12px var(--mono); text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
   .spectrum-wrap canvas { display: block; width: 100%; height: 95px; background: var(--bg); border-radius: 4px; }
   .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
   .waterfall-title { margin-top: 6px !important; }
@@ -646,8 +683,8 @@
   .vfo-controls select { font-size: 11px; }
   .vfo-bar { display: flex; align-items: center; gap: 6px; font-size: 11px; }
   .vfo-bar input[type=range] { flex: 1; }
-  .vfo-bar button.mini { padding: 2px 6px; font-size: 11px; }
-  .vfo-bar button.mini.off { opacity: 0.5; }
+  .vfo-bar .listen { min-width:74px; padding:5px 8px; color:var(--fg); border-color:var(--accent); }
+  .vfo-bar .listen.on { color:#03120f; background:var(--accent); }
   .vfo-strength { display: flex; align-items: center; gap: 6px; }
   .meter { flex: 1; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
   .meter-fill { height: 100%; background: linear-gradient(90deg, var(--ok), var(--warn), var(--danger)); transition: width 0.1s; }

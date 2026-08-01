@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::audio::AudioSink;
 use crate::config::{Config, ScanRange};
@@ -36,6 +36,9 @@ pub struct AppState {
     /// trunking update) to subscribed WS clients. High throughput — receivers
     /// may drop frames if they fall behind.
     pub events: broadcast::Sender<ScannerEvent>,
+    /// Latest-only spectrum transport. A slow browser observes a sequence gap
+    /// and resumes from the newest frame instead of building latency.
+    pub spectrum: watch::Sender<SpectrumFrame>,
     pub data_dir: PathBuf,
     pub started_ms: i64,
 }
@@ -47,6 +50,7 @@ impl AppState {
         let db = Db::open(&data_dir.join("pulsescope.db"))
             .expect("failed to open pulsescope.db");
         let (events_tx, _events_rx) = broadcast::channel(1024);
+        let (spectrum_tx, _spectrum_rx) = watch::channel(SpectrumFrame::default());
         let device = Arc::new(DeviceLayer::new_mock());
         // Prefer a previously selected physical SDR; otherwise the first real
         // Soapy device. Mock is a fallback for machines with no hardware.
@@ -68,6 +72,7 @@ impl AppState {
             trunking: RwLock::new(TrunkingRuntime::default()),
             sidecars: SidecarRegistry::new(),
             events: events_tx,
+            spectrum: spectrum_tx,
             data_dir,
             started_ms: crate::scanner::now_ms(),
         })
@@ -94,7 +99,7 @@ impl AppState {
             return;
         }
         let cfg = self.config.read().scanner.clone();
-        let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone());
+        let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone(), self.spectrum.clone());
         let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
         *self.scanner.write() = Some(handle);
     }
@@ -255,6 +260,16 @@ impl RecordingState {
 
 /// Tagged event sent over `/event-stream` and `ws://127.0.0.1:8765/events`.
 /// UI consumers pick the channels they care about.
+#[derive(Clone, Debug, Default)]
+pub struct SpectrumFrame {
+    pub sequence: u64,
+    pub captured_ms: i64,
+    pub center_freq_hz: u64,
+    pub sample_rate_hz: u32,
+    pub usable_span_hz: u32,
+    pub bins_dbfs: Vec<f32>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum ScannerEvent {

@@ -123,6 +123,26 @@ pub fn resample_linear(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<
     }).collect()
 }
 
+pub fn low_pass_real(input: &[f32], cutoff_hz: f32, sample_rate_hz: u32, state: &mut f32) -> Vec<f32> {
+    if input.is_empty() || sample_rate_hz == 0 { return Vec::new(); }
+    let cutoff = cutoff_hz.max(1.0).min(sample_rate_hz as f32 * 0.45);
+    let alpha = 1.0 - (-TAU * cutoff / sample_rate_hz as f32).exp();
+    input.iter().map(|sample| {
+        *state += (*sample - *state) * alpha;
+        *state
+    }).collect()
+}
+
+pub fn deemphasis(input: &mut [f32], sample_rate_hz: u32, time_constant_us: f32, state: &mut f32) {
+    if sample_rate_hz == 0 || time_constant_us <= 0.0 { return; }
+    let tau = time_constant_us * 1.0e-6;
+    let alpha = 1.0 - (-1.0 / (sample_rate_hz as f32 * tau)).exp();
+    for sample in input {
+        *state += (*sample - *state) * alpha;
+        *sample = *state;
+    }
+}
+
 
 pub fn dc_block(samples: &mut [f32], state: &mut f32, coefficient: f32) {
     let coefficient = coefficient.clamp(0.0, 0.99999);
@@ -795,6 +815,16 @@ mod tests {
         let mut p = None;
         let pcm = demodulate(Mode::Am, &iq, &mut p);
         assert!(pcm.iter().all(|v| v.abs() <= 1.0));
+    }
+
+    #[test]
+    fn broadcast_deemphasis_attenuates_high_frequency_content() {
+        let rate = 192_000u32;
+        let mut state = 0.0;
+        let mut alternating: Vec<f32> = (0..4096).map(|index| if index % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        deemphasis(&mut alternating, rate, 75.0, &mut state);
+        let rms = (alternating[512..].iter().map(|sample| sample * sample).sum::<f32>() / (alternating.len() - 512) as f32).sqrt();
+        assert!(rms < 0.1, "de-emphasis did not suppress high-frequency energy: {rms}");
     }
 
     #[test]

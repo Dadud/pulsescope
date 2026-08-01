@@ -13,17 +13,17 @@ use parking_lot::Mutex;
 use rustfft::{FftPlanner};
 use rustfft::num_complex::Complex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::adsb::AdsbDecoder;
 use crate::audio::AudioSink;
 use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
-use crate::demod::{decimate_average, decimate_complex_average, demodulate, low_pass_complex, mix_down, resample_linear, Mode};
+use crate::demod::{dc_block, decimate_average, decimate_complex_average, deemphasis, demodulate, low_pass_complex, low_pass_real, mix_down, resample_linear, Mode};
 use crate::device::DeviceLayer;
 use crate::db::Db;
 use crate::signal_id;
-use crate::state::{RecordingState, ScannerEvent};
+use crate::state::{RecordingState, ScannerEvent, SpectrumFrame};
 use crate::sidecar::SidecarRegistry;
 
 /// Handle shared between the API and the UI. Cloning is cheap.
@@ -79,7 +79,6 @@ pub enum ScannerCommand {
 }
 
 /// Dedicated audio consumer; keeps demodulation and CPAL feeding off the FFT loop.
-const AUDIO_IQ_CHUNK: usize = 131_072;
 struct AudioWorker { stop: Arc<AtomicBool>, thread: Option<std::thread::JoinHandle<()>> }
 impl AudioWorker {
     fn start(ring: IqRing, audio: Arc<AudioSink>, device: Arc<DeviceLayer>, state: Arc<Mutex<ScannerRuntimeState>>) -> Self {
@@ -89,13 +88,26 @@ impl AudioWorker {
             let mut previous = Vec::<Option<Complex<f32>>>::new();
             let mut phases = Vec::<f64>::new();
             let mut filter_states = Vec::<Complex<f32>>::new();
+            let mut audio_filter_states = Vec::<f32>::new();
+            let mut deemphasis_states = Vec::<f32>::new();
+            let mut dc_states = Vec::<f32>::new();
             while !stop_thread.load(Ordering::Acquire) {
-                let Some(iq) = ring.take_exact(AUDIO_IQ_CHUNK) else { std::thread::sleep(Duration::from_millis(1)); continue; };
-                let vfos = state.lock().vfo_states.clone();
-                if previous.len() != vfos.len() { previous = vec![None; vfos.len()]; phases = vec![0.0; vfos.len()]; filter_states = vec![Complex::new(0.0, 0.0); vfos.len()]; }
+                // Consume approximately 20 ms per DSP block at every device
+                // rate. The former fixed 131072-sample block added more than
+                // half a second of latency at 250 kS/s.
                 let sample_rate = device.status().sample_rate.max(1);
+                let audio_iq_chunk = ((sample_rate as usize) / 50).clamp(1_024, 262_144);
+                let Some(iq) = ring.take_exact(audio_iq_chunk) else { std::thread::sleep(Duration::from_millis(1)); continue; };
+                let vfos = state.lock().vfo_states.clone();
+                if previous.len() != vfos.len() {
+                    previous = vec![None; vfos.len()];
+                    phases = vec![0.0; vfos.len()];
+                    filter_states = vec![Complex::new(0.0, 0.0); vfos.len()];
+                    audio_filter_states = vec![0.0; vfos.len()];
+                    deemphasis_states = vec![0.0; vfos.len()];
+                    dc_states = vec![0.0; vfos.len()];
+                }
                 let predecimation = (sample_rate / 500_000).max(1) as usize;
-                let iq = decimate_complex_average(&iq, predecimation);
                 let effective_rate = (sample_rate / predecimation as u32).max(1);
                 let decimation = (effective_rate / audio.sample_rate().max(1)).max(1) as usize;
                 let mut mixed = Vec::<f32>::new();
@@ -103,11 +115,18 @@ impl AudioWorker {
                 for (idx, vfo) in vfos.iter().enumerate() {
                     if vfo.muted { continue; }
                     let offset = vfo.frequency_hz as f64 - device.status().center_freq_hz as f64;
-                    let baseband = mix_down(&iq, offset, effective_rate, &mut phases[idx]);
+                    // Translate before reducing the wide RF sample rate. Doing
+                    // this in the opposite order aliases offset VFOs.
+                    let baseband = mix_down(&iq, offset, sample_rate, &mut phases[idx]);
                     let mode = Mode::parse(&vfo.mode);
                     let cutoff_hz = match mode { Mode::Wfm => 100_000.0, Mode::Nfm => 12_500.0, _ => 5_000.0 };
-                    let baseband = low_pass_complex(&baseband, cutoff_hz, effective_rate, &mut filter_states[idx]);
-                    let pcm = demodulate(mode, &baseband, &mut previous[idx]);
+                    let baseband = low_pass_complex(&baseband, cutoff_hz, sample_rate, &mut filter_states[idx]);
+                    let baseband = decimate_complex_average(&baseband, predecimation);
+                    let mut pcm = demodulate(mode, &baseband, &mut previous[idx]);
+                    let audio_cutoff_hz = match mode { Mode::Wfm => 15_000.0, Mode::Nfm => 5_000.0, _ => 3_400.0 };
+                    pcm = low_pass_real(&pcm, audio_cutoff_hz, effective_rate, &mut audio_filter_states[idx]);
+                    if mode == Mode::Wfm { deemphasis(&mut pcm, effective_rate, 75.0, &mut deemphasis_states[idx]); }
+                    dc_block(&mut pcm, &mut dc_states[idx], 0.995);
                     let pcm = decimate_average(&pcm, decimation);
                     if mixed.len() < pcm.len() { mixed.resize(pcm.len(), 0.0); }
                     let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
@@ -131,6 +150,10 @@ impl Drop for AudioWorker {
 
 
 impl ScannerHandle {
+    pub fn flush_iq(&self) {
+        for ring in &self.iq_consumers { ring.clear(); }
+    }
+
     pub fn spawn(
         cfg: ScannerConfig,
         device: Arc<DeviceLayer>,
@@ -141,6 +164,7 @@ impl ScannerHandle {
         iq_network: IqNetworkSink,
         sidecars: SidecarRegistry,
         events_tx: broadcast::Sender<ScannerEvent>,
+        spectrum_tx: watch::Sender<SpectrumFrame>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
@@ -148,7 +172,7 @@ impl ScannerHandle {
         let audio_ring = IqRing::new("audio", 2_000_000);
         let handle = ScannerHandle { cmd_tx: cmd_tx.clone(), state: state.clone(), iq_consumers: vec![capture_ring.clone(), audio_ring.clone()] };
 
-        tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, cmd_rx, state, capture_ring, audio_ring));
+        tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, spectrum_tx, cmd_rx, state, capture_ring, audio_ring));
         handle
     }
 }
@@ -164,6 +188,7 @@ async fn scanner_loop(
     iq_network: IqNetworkSink,
     sidecars: SidecarRegistry,
     events_tx: broadcast::Sender<ScannerEvent>,
+    spectrum_tx: watch::Sender<SpectrumFrame>,
     mut cmd_rx: mpsc::UnboundedReceiver<ScannerCommand>,
     state: Arc<Mutex<ScannerRuntimeState>>,
     capture_ring: IqRing,
@@ -178,7 +203,7 @@ async fn scanner_loop(
     let mut spectrum: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); cfg.fft_size];
     let capture_size = cfg.fft_size.saturating_mul(5);
     let _audio_worker = AudioWorker::start(audio_ring.clone(), audio.clone(), device.clone(), state.clone());
-    let _capture_worker = CaptureWorker::start(device.clone(), vec![capture_ring.clone(), audio_ring], cfg.fft_size, playback, iq_network);
+    let _capture_worker = CaptureWorker::start(device.clone(), vec![capture_ring.clone(), audio_ring.clone()], cfg.fft_size, playback, iq_network);
 
     // Simple window coefficients (Hanning) — apodize 1.0 exposes `hanning_iter`.
     let window: Vec<f32> = apodize::hanning_iter(cfg.fft_size).map(|x| x as f32).collect();
@@ -191,10 +216,15 @@ async fn scanner_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 ScannerCommand::Start { range } => {
+                    // Hardware configuration happens before this command. Do
+                    // not process IQ captured under the previous contract.
+                    capture_ring.clear();
+                    audio_ring.clear();
+                    audio.clear_queue();
                     let name = range.name.clone();
-                    let vfos = (0..range.max_vfos.min(cfg.max_vfos as u32))
-                        .map(|i| VfoState {
-                            id: i,
+                    let vfos = if range.max_vfos == 0 || cfg.max_vfos == 0 { Vec::new() } else {
+                        vec![VfoState {
+                            id: 0,
                             frequency_hz: range.start_hz,
                             mode: range.mode.clone(),
                             // Monitoring is opt-in. Scans must never turn into
@@ -205,8 +235,8 @@ async fn scanner_loop(
                             squelch_open: false,
                             strength_db: -120.0,
                             audio_level_db: -120.0,
-                        })
-                        .collect::<Vec<_>>();
+                        }]
+                    };
                     state.lock().vfo_states = vfos.clone();
                     state.lock().active_range = Some(name.clone());
                     state.lock().running = true;
@@ -306,8 +336,9 @@ async fn scanner_loop(
         }
         fft.process(&mut spectrum);
         let half = spectrum.len() / 2;
+        let normalization = window.iter().sum::<f32>().max(1.0);
         let bins: Vec<f32> = spectrum[half..].iter().chain(spectrum[..half].iter())
-            .map(|c| 10.0 * (c.norm_sqr() + 1e-20).log10()).collect();
+            .map(|c| 20.0 * (c.norm() / normalization + 1e-12).log10()).collect();
         let range_name = state.lock().active_range.clone().unwrap_or_default();
         let mut floor_samples = bins.clone();
         floor_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -366,7 +397,7 @@ async fn scanner_loop(
 
         // 5. Broadcast to WS subscribers and retain the same frame for the
         // HTTP `/spectrum` endpoint.
-        {
+        let (frame_sequence, frame_timestamp_ms) = {
             let mut runtime = state.lock();
             runtime.latest_spectrum = bins.clone();
             runtime.frames_processed = runtime.frames_processed.saturating_add(1);
@@ -376,7 +407,17 @@ async fn scanner_loop(
                 vfo.strength_db = peak;
                 vfo.squelch_open = peak - noise_floor >= 12.0;
             }
-        }
+            (runtime.frames_processed, runtime.latest_spectrum_ms)
+        };
+        let status = device.status();
+        spectrum_tx.send_replace(SpectrumFrame {
+            sequence: frame_sequence,
+            captured_ms: frame_timestamp_ms,
+            center_freq_hz: status.center_freq_hz,
+            sample_rate_hz: status.sample_rate,
+            usable_span_hz: (status.sample_rate as f64 * 0.9) as u32,
+            bins_dbfs: bins.clone(),
+        });
         let _ = events_tx.send(ScannerEvent::VfoStates(state.lock().vfo_states.clone()));
         let _ = events_tx.send(ScannerEvent::Spectrum { range: range_name, bins });
         let frame_us = ((capture_size as f64 / device.status().sample_rate.max(1) as f64) * 1_000_000.0).max(500.0) as u64;
