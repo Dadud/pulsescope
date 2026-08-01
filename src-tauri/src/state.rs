@@ -114,6 +114,51 @@ impl AppState {
         });
     }
 
+    /// Re-probe after startup and on hotplug. Some vendor APIs publish the USB
+    /// device a few seconds after the container process starts; previously that
+    /// race permanently selected the mock source until a manual reconnect.
+    pub fn start_hardware_supervisor(self: &Arc<Self>) {
+        if std::env::var("PULSESCOPE_PREFER_PHYSICAL").as_deref() == Ok("0") { return; }
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                tick.tick().await;
+                let status = app.device.status();
+                if status.driver != "mock" { continue; }
+                let devices = tokio::task::spawn_blocking(crate::device::DeviceLayer::discover)
+                    .await
+                    .unwrap_or_default();
+                let Some(candidate) = devices.into_iter().find(|device| device.driver != "mock") else { continue; };
+                let device = app.device.clone();
+                let key = candidate.key.clone();
+                let connected = tokio::task::spawn_blocking(move || device.connect(&key)).await;
+                if !matches!(connected, Ok(Ok(()))) { continue; }
+
+                let active_name = app.scanner.read().as_ref()
+                    .and_then(|handle| handle.state.lock().active_range.clone())
+                    .unwrap_or_else(|| "FM Broadcast".to_string());
+                let range = app.config.read().scan_ranges.iter()
+                    .find(|range| range.name == active_name)
+                    .cloned()
+                    .or_else(|| app.config.read().scan_ranges.first().cloned());
+                let Some(range) = range else { continue; };
+                let sample_rate = if range.name == "FM Broadcast" { 2_000_000 } else { range.sample_rate_hz };
+                if app.device.set_sample_rate(sample_rate).is_err()
+                    || app.device.set_bandwidth(range.channel_bw_hz).is_err()
+                    || app.device.set_frequency(range.start_hz).is_err() {
+                    continue;
+                }
+                if let Some(handle) = app.scanner.read().as_ref() {
+                    handle.flush_iq();
+                    app.audio.clear_queue();
+                    let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
+                }
+                tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
+            }
+        });
+    }
+
     fn run_due_jobs(self: &Arc<Self>) {
         let now = crate::scanner::now_ms();
         let Ok(jobs) = self.db.due_scheduled_jobs(now) else { return; };

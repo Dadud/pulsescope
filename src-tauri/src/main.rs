@@ -47,6 +47,7 @@ async fn main() {
     }
     let app_state = AppState::new();
     app_state.start_job_scheduler();
+    app_state.start_hardware_supervisor();
     let desktop_mode = !server_mode;
     // Both desktop and LAN open onto a visible, muted monitor. Server mode
     // still hard-disables CPAL output above, so this cannot start speaker noise.
