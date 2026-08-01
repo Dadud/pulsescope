@@ -60,7 +60,7 @@ impl IqRing {
     }
     pub fn len(&self) -> usize { self.inner.lock().len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
-    pub fn status(&self) -> serde_json::Value { serde_json::json!({"name":self.name,"capacity_samples":self.capacity,"queued_samples":self.len(),"pushed_samples":self.pushed.load(Ordering::Relaxed),"taken_samples":self.taken.load(Ordering::Relaxed),"dropped_samples":self.dropped.load(Ordering::Relaxed)}) }
+    pub fn status(&self) -> serde_json::Value { serde_json::json!({"name":self.name.as_ref(),"capacity_samples":self.capacity,"queued_samples":self.len(),"pushed_samples":self.pushed.load(Ordering::Relaxed),"taken_samples":self.taken.load(Ordering::Relaxed),"dropped_samples":self.dropped.load(Ordering::Relaxed)}) }
 }
 
 pub struct PlaybackReader {

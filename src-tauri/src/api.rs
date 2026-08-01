@@ -59,6 +59,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
     let api = Router::new()
         // ── health / settings ────────────────────────────────────────────
         .route("/health", get(health))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
         .route("/settings", get(get_settings).put(put_settings))
         // ── device ───────────────────────────────────────────────────────
         .route("/devices", get(list_devices))
@@ -371,7 +373,11 @@ async fn auth_gate(
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     let path = req.uri().path().to_owned();
     // Always allow health and CORS preflight checks.
-    if path == "/api/health" || path == "/health" { return Ok(next.run(req).await); }
+    if matches!(path.as_str(),
+        "/api/health" | "/health" |
+        "/api/health/live" | "/health/live" |
+        "/api/health/ready" | "/health/ready"
+    ) { return Ok(next.run(req).await); }
     let header = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
     let query = req.uri().query().and_then(|q| {
         q.split('&').find_map(|kv| kv.strip_prefix("token="))
@@ -410,6 +416,74 @@ async fn health(State(s): State<ApiState>) -> impl IntoResponse {
             "decoders_total": decoders.len(),
         }
     }))
+}
+
+async fn health_live(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(json!({
+        "status": "live",
+        "name": "pulsescope",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_ms": crate::scanner::now_ms().saturating_sub(s.0.started_ms),
+    }))
+}
+
+fn readiness_reasons(
+    connected: bool,
+    driver: &str,
+    frames_processed: u64,
+    latest_sample_ms: i64,
+    now_ms: i64,
+    allow_mock: bool,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if !connected {
+        reasons.push("device_disconnected");
+    }
+    if driver == "mock" && !allow_mock {
+        reasons.push("physical_device_required");
+    }
+    if frames_processed == 0 || latest_sample_ms <= 0 {
+        reasons.push("samples_not_flowing");
+    } else if now_ms.saturating_sub(latest_sample_ms) > 5_000 {
+        reasons.push("sample_flow_stale");
+    }
+    reasons
+}
+
+async fn health_ready(State(s): State<ApiState>) -> impl IntoResponse {
+    let device = s.0.device.status();
+    let scanner = s.0.scanner.read().as_ref().map(|handle| handle.state.lock().clone());
+    let frames_processed = scanner.as_ref().map(|runtime| runtime.frames_processed).unwrap_or(0);
+    let latest_sample_ms = scanner.as_ref().map(|runtime| runtime.latest_spectrum_ms).unwrap_or(0);
+    let now_ms = crate::scanner::now_ms();
+    let allow_mock = std::env::var("PULSESCOPE_ALLOW_MOCK_READY")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let reasons = readiness_reasons(
+        device.connected,
+        &device.driver,
+        frames_processed,
+        latest_sample_ms,
+        now_ms,
+        allow_mock,
+    );
+    let ready = reasons.is_empty();
+    let status = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+
+    (status, Json(json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "device": {
+            "connected": device.connected,
+            "driver": device.driver,
+            "label": device.label,
+        },
+        "sample_flow": {
+            "frames_processed": frames_processed,
+            "latest_sample_ms": latest_sample_ms,
+            "age_ms": if latest_sample_ms > 0 { Some(now_ms.saturating_sub(latest_sample_ms)) } else { None },
+        },
+        "reasons": reasons,
+    })))
 }
 
 async fn get_settings(State(s): State<ApiState>) -> impl IntoResponse {
@@ -1662,5 +1736,40 @@ async fn ws_pump(socket: WebSocket, tx: tokio::sync::broadcast::Sender<ScannerEv
 fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
     if let Some(h) = s.0.scanner.read().as_ref() {
         let _ = h.cmd_tx.send(cmd);
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::readiness_reasons;
+
+    #[test]
+    fn real_device_with_fresh_samples_is_ready() {
+        assert!(readiness_reasons(true, "sdrplay", 42, 9_000, 10_000, false).is_empty());
+    }
+
+    #[test]
+    fn process_without_sample_flow_is_not_ready() {
+        assert_eq!(
+            readiness_reasons(true, "sdrplay", 0, 0, 10_000, false),
+            vec!["samples_not_flowing"]
+        );
+    }
+
+    #[test]
+    fn mock_requires_an_explicit_test_override() {
+        assert_eq!(
+            readiness_reasons(true, "mock", 42, 9_000, 10_000, false),
+            vec!["physical_device_required"]
+        );
+        assert!(readiness_reasons(true, "mock", 42, 9_000, 10_000, true).is_empty());
+    }
+
+    #[test]
+    fn stale_sample_flow_is_not_ready() {
+        assert_eq!(
+            readiness_reasons(true, "rtlsdr", 42, 1_000, 10_000, false),
+            vec!["sample_flow_stale"]
+        );
     }
 }

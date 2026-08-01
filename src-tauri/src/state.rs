@@ -145,6 +145,9 @@ impl AppState {
     }
 
     pub fn default_data_dir() -> PathBuf {
+        if let Some(path) = std::env::var_os("PULSESCOPE_DATA_DIR") {
+            return PathBuf::from(path);
+        }
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             PathBuf::from(home).join("pulsescope")
         } else {

@@ -1,0 +1,26 @@
+services:
+  pulsescope:
+    build:
+      context: .
+    image: pulsescope:local
+    container_name: pulsescope
+    restart: unless-stopped
+    ports:
+      - "8080:8765"
+    environment:
+      PULSESCOPE_BIND: 0.0.0.0
+      PULSESCOPE_PORT: 8765
+      PULSESCOPE_DATA_DIR: /var/lib/pulsescope
+      PULSESCOPE_UI_DIR: /app/ui
+      PULSESCOPE_AUDIO_OUTPUT: "0"
+      RUST_LOG: pulsescope=info
+    volumes:
+      - pulsescope-data:/var/lib/pulsescope
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - "c 189:* rwm"
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pulsescope-data:

@@ -1,0 +1,49 @@
+name: PulseScope CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check and build web client
+        run: |
+          pnpm --filter pulsescope-ui check
+          pnpm --filter pulsescope-ui build
+
+      - name: Install headless server dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test headless radio server
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --lib
+
+      - name: Check headless server binary
+        run: cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --bin pulsescope
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production container
+        run: docker build --tag pulsescope:ci .

@@ -207,7 +207,11 @@ impl DeviceLayer {
             .filter(|key| devices.iter().any(|d| d.key == *key && d.driver != "mock"))
             .map(str::to_owned)
             .or_else(|| devices.into_iter().find(|d| d.driver != "mock").map(|d| d.key));
-        if let Some(key) = candidate { self.connect(&key) } else { Ok(()) }
+        if let Some(key) = candidate {
+            self.connect(&key)
+        } else {
+            self.connect("driver=mock")
+        }
     }
     pub fn connect(&self,key:&str)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if key!="driver=mock" { let rate=2_000_000; let freq=100_000_000; let mut h=soapy::Hardware::open(&key,rate,freq)?; h.apply_safe_defaults()?; *self.hardware.lock()=Some(h); let mut st=self.state.lock(); st.connected=true; st.sample_rate=rate; st.center_freq_hz=freq; st.driver=key.split(',').find_map(|p|p.trim().strip_prefix("driver=")).unwrap_or("soapy").to_string(); st.label=key.to_string(); return Ok(()); } self.state.lock().connected=true; Ok(()) }
     pub fn disconnect(&self)->anyhow::Result<()> { #[cfg(feature="soapysdr")] { self.hardware.lock().take(); } self.state.lock().connected=false; Ok(()) }

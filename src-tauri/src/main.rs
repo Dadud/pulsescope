@@ -13,24 +13,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod api;
-mod audio;
-mod capture;
-mod config;
-mod db;
-mod demod;
-mod depmanager;
-mod device;
-mod scanner;
-mod sidecar;
-mod aprs;
-mod adsb;
-mod pocsag;
-mod ais;
-mod aviation;
-mod voice_decoder;
-mod signal_id;
-mod state;
+use pulsescope_lib::{api, state};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -235,7 +218,7 @@ fn load_tls_from_env() -> Option<crate::api::TlsConfig> {
 // -------- desktop-only Tauri shell --------
 //
 // Kept under a cfg so server builds can drop the Tauri dependency if desired.
-#[cfg(not(feature = "headless"))]
+#[cfg(feature = "desktop")]
 mod tauri {
     use std::sync::Arc;
     use super::AppState;
@@ -261,11 +244,11 @@ mod tauri {
     }
 }
 
-#[cfg(feature = "headless")]
+#[cfg(not(feature = "desktop"))]
 mod tauri {
     use std::sync::Arc;
     use super::AppState;
     pub fn run(_state: Arc<AppState>) {
-        tracing::info!("headless feature: tauri shell disabled");
+        tracing::info!("desktop feature disabled: Tauri shell unavailable");
     }
 }
