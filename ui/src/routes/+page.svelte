@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
-  import { browser } from '$app/environment';
 
   let banks: ScanRange[] = $state([]);
   let activeRange: string | null = $state(null);
@@ -66,8 +65,11 @@
   ];
 
 
-  onMount(() => {
-    if (!browser) return;
+  // SvelteKit's hash/static production build eliminated the onMount callback
+  // from this route, leaving only a convincing but inert HTML shell. A runes
+  // effect is retained in the client bundle; untrack prevents live state read
+  // during setup from turning reconnects into effect restarts.
+  $effect(() => untrack(() => {
     browserAudio = new BrowserAudio((state) => { audioState = state; });
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
@@ -116,7 +118,7 @@
       ws?.close(); ws = null;
       browserAudio?.stop(); browserAudio = null;
     };
-  });
+  }));
 
   function scheduleLivePoll(delayMs: number) {
     if (!livePolling) return;

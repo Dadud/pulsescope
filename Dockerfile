@@ -13,7 +13,8 @@ COPY ui/package.json ui/package.json
 RUN pnpm install --frozen-lockfile --filter pulsescope-ui...
 
 COPY ui ui
-RUN pnpm --filter pulsescope-ui build
+COPY scripts scripts
+RUN pnpm build
 
 FROM rust:1-bookworm AS server-builder
 
