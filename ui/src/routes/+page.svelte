@@ -64,6 +64,17 @@
     { label: 'Pagers', match: 'Pagers' }
   ];
 
+  function applyVfos(nextVfos: VfoState[]) {
+    vfos = nextVfos;
+    // A band/profile change intentionally creates a muted VFO. Tear down the
+    // old audio subscription instead of continuing to claim "Playing" while
+    // the backend has correctly stopped producing frames.
+    if (!nextVfos.some((vfo) => !vfo.muted) && audioState !== 'off') {
+      browserAudio?.stop();
+      audioState = 'off';
+    }
+  }
+
 
   // SvelteKit's hash/static production build eliminated the onMount callback
   // from this route, leaving only a convincing but inert HTML shell. A runes
@@ -86,7 +97,7 @@
       const { status, vfos: nextVfos } = (event as CustomEvent).detail;
       deviceLabel = status.label; connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
-      sampleRateHz = Number(status.sample_rate ?? sampleRateHz); vfos = nextVfos;
+      sampleRateHz = Number(status.sample_rate ?? sampleRateHz); applyVfos(nextVfos);
     };
     const onPollError = (event: Event) => { spectrumError = (event as CustomEvent).detail; };
     window.addEventListener('pulsescope:spectrum', onSpectrum);
@@ -194,7 +205,7 @@
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
       signalHistory = storedSignals;
-      vfos = await Api.vfoStates();
+      applyVfos(await Api.vfoStates());
       messages = await Api.decodedMessages(100);
     } catch (e) {
       console.warn('init failed', e);
@@ -209,7 +220,7 @@
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
       sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
-      vfos = nextVfos;
+      applyVfos(nextVfos);
     } catch (e) { console.warn('runtime polling failed', e); }
   }
 
@@ -245,7 +256,7 @@
         // remains a compatibility path for non-spectrum state.
         break;
       case 'VfoStates':
-        vfos = ev.data;
+        applyVfos(ev.data);
         break;
       case 'DecodedMessage':
         messages = [ev.data, ...messages].slice(0, 200);
