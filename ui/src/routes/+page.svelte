@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
 
@@ -30,11 +30,14 @@
   let droppedSpectrumFrames = $state(0);
   let nowMs = $state(Date.now());
   let waterfallPixels: Uint8ClampedArray | null = null;
+  let waterfallImage: ImageData | null = null;
+  let drawPending = false;
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
   let initialLoadInFlight = false;
   let browserAudio: BrowserAudio | null = null;
   let audioState: BrowserAudioState = $state('off');
+  let audioGesturePending = false;
   let livePollTimer: ReturnType<typeof setTimeout> | null = null;
   let livePollBusy = false;
   let livePollTick = 0;
@@ -43,7 +46,13 @@
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
 
   const filteredBanks = $derived(
-    banks.filter((b) => b.name.toLowerCase().includes(filter.toLowerCase()))
+    banks.filter((b) => b.enabled !== false && b.name.toLowerCase().includes(filter.toLowerCase()))
+  );
+
+  const groupedBanks = $derived(
+    ['HF', 'VHF', 'UHF', 'Microwave', 'Broadcast', 'Satellite', 'ISM', 'Other']
+      .map((group) => ({ group, banks: filteredBanks.filter((bank) => bandGroup(bank) === group) }))
+      .filter((entry) => entry.banks.length > 0)
   );
 
   const visibleMessages = $derived(
@@ -69,7 +78,7 @@
     // A band/profile change intentionally creates a muted VFO. Tear down the
     // old audio subscription instead of continuing to claim "Playing" while
     // the backend has correctly stopped producing frames.
-    if (!nextVfos.some((vfo) => !vfo.muted) && audioState !== 'off') {
+    if (!audioGesturePending && !nextVfos.some((vfo) => !vfo.muted) && audioState !== 'off') {
       browserAudio?.stop();
       audioState = 'off';
     }
@@ -90,7 +99,7 @@
       scanRunning = Boolean(spectrum?.running);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length) {
         spectrumError = '';
-        void applySpectrum(spectrum.bins);
+        applySpectrum(spectrum.bins);
       }
     };
     const onRuntime = (event: Event) => {
@@ -193,7 +202,7 @@
     centerFreqHz = frame.centerFreqHz;
     sampleRateHz = frame.sampleRateHz;
     spectrumError = '';
-    void applySpectrum(frame.bins);
+    applySpectrum(frame.bins);
   }
 
   async function loadInitial() {
@@ -224,11 +233,15 @@
     } catch (e) { console.warn('runtime polling failed', e); }
   }
 
-  async function applySpectrum(bins: number[]) {
+  function applySpectrum(bins: number[]) {
     spectrumBins = bins;
-    await tick();
-    drawSpectrum();
-    drawWaterfall();
+    if (drawPending) return;
+    drawPending = true;
+    requestAnimationFrame(() => {
+      drawPending = false;
+      drawSpectrum();
+      drawWaterfall();
+    });
   }
 
   async function pollSpectrum() {
@@ -242,7 +255,7 @@
         spectrumError = '';
         lastSpectrumSequence = Number(spectrum.frame_sequence ?? lastSpectrumSequence);
         lastSpectrumAt = Date.now();
-        await applySpectrum(spectrum.bins);
+        applySpectrum(spectrum.bins);
       }
     } catch (e) {
       spectrumError = String(e);
@@ -272,6 +285,19 @@
     // outside Svelte's reactive attributes and only initialize them once.
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
+  }
+
+  function bandGroup(bank: ScanRange): string {
+    const name = bank.name.toLowerCase();
+    if (name.includes('broadcast') || name.includes('fm')) return 'Broadcast';
+    if (name.includes('sat') || name.includes('aircraft') || name.includes('ads-b')) return 'Satellite';
+    if (name.includes('ism') || name.includes('sensor') || name.includes('lora')) return 'ISM';
+    const midpoint = (bank.start_hz + bank.end_hz) / 2;
+    if (midpoint < 30e6) return 'HF';
+    if (midpoint < 300e6) return 'VHF';
+    if (midpoint < 1e9) return 'UHF';
+    if (midpoint < 6e9) return 'Microwave';
+    return 'Other';
   }
 
   function setWaterfallGain(event: Event) {
@@ -362,9 +388,11 @@
     for (let row = 1; row < rowsPerFrame; row++) {
       waterfallPixels.set(waterfallPixels.subarray(0, rowBytes), row * rowBytes);
     }
-    const image = ctx.createImageData(w, h);
-    image.data.set(waterfallPixels);
-    ctx.putImageData(image, 0, 0);
+    if (!waterfallImage || waterfallImage.width !== w || waterfallImage.height !== h) {
+      waterfallImage = ctx.createImageData(w, h);
+    }
+    waterfallImage.data.set(waterfallPixels);
+    ctx.putImageData(waterfallImage, 0, 0);
   }
 
   async function startScan(name: string) {
@@ -393,6 +421,17 @@
     window.setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 1800);
   }
 
+  async function tuneFromSpectrumKeyboard(event: KeyboardEvent) {
+    if (!vfos.length || sampleRateHz <= 0) return;
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const step = event.shiftKey ? 10_000 : 1_000;
+    const direction = event.key === 'ArrowRight' ? 1 : -1;
+    const frequencyHz = Math.max(1, Math.round(vfos[0].frequency_hz + direction * step));
+    await Api.vfoFrequency(vfos[0].id, frequencyHz);
+    notice = `VFO ${vfos[0].id} tuned to ${fmtHz(frequencyHz)}`;
+  }
+
   async function setVfoFrequency(id: number, event: Event) {
     const value = Number((event.currentTarget as HTMLInputElement).value);
     if (Number.isFinite(value) && value > 0) await Api.vfoFrequency(id, value);
@@ -402,16 +441,22 @@
   }
 
   async function toggleVfoAudio(vfo: VfoState) {
+    audioGesturePending = vfo.muted;
     if (vfo.muted) {
       try {
         await browserAudio?.start();
       } catch (error) {
+        audioGesturePending = false;
         audioState = 'error';
         notice = `Browser audio could not start: ${String(error)}`;
         return;
       }
     }
-    await Api.vfoMute(vfo.id, !vfo.muted);
+    try {
+      await Api.vfoMute(vfo.id, !vfo.muted);
+    } finally {
+      audioGesturePending = false;
+    }
     if (!vfo.muted && vfos.filter((candidate) => !candidate.muted).length === 1) browserAudio?.stop();
   }
 
@@ -468,22 +513,31 @@
       <h2>Scan Ranges</h2>
       <input bind:value={filter} placeholder="filter…" />
     </div>
-    <ul>
-      {#each filteredBanks as b (b.name)}
-        <li>
-          <button
-            class="range-row"
-            class:active={activeRange === b.name}
-            onclick={() => (activeRange === b.name ? stopScan() : startScan(b.name))}
-          >
-            <span class="range-name">{b.name}</span>
-            <span class="range-meta">
-              {fmtHz(b.start_hz)}–{fmtHz(b.end_hz)} · {b.mode.toUpperCase()}
-            </span>
-          </button>
-        </li>
+    <div class="bank-groups">
+      {#each groupedBanks as entry (entry.group)}
+        <section class="bank-group">
+          <h3>{entry.group}</h3>
+          <ul>
+            {#each entry.banks as b (b.name)}
+              <li>
+                <button
+                  class="range-row"
+                  class:active={activeRange === b.name}
+                  onclick={() => (activeRange === b.name ? stopScan() : startScan(b.name))}
+                >
+                  <span class="range-name">{b.name}</span>
+                  <span class="range-meta">
+                    {fmtHz(b.start_hz)}–{fmtHz(b.end_hz)} · {b.mode.toUpperCase()}
+                  </span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {:else}
+        <div class="empty-banks">No supported scan ranges match this filter.</div>
       {/each}
-    </ul>
+    </div>
     {#if scanRunning}
       <button class="primary stop" onclick={stopScan}>■ Stop Scan</button>
     {/if}
@@ -505,6 +559,18 @@
         <a href="#/settings" class="settings-link">⚙ Settings</a>
       </div>
     </div>
+    {#if !connected}
+      <section class="setup-card card" role="status">
+        <div>
+          <strong>No SDR is connected</strong>
+          <p>Connect a supported device to start the live spectrum and audio streams.</p>
+        </div>
+        <div class="setup-actions">
+          <a class="primary" href="#/settings">Open device setup</a>
+          <button onclick={() => void pollRuntime()}>Retry detection</button>
+        </div>
+      </section>
+    {/if}
     <div class="device-strip card">
       <div>
         <span class="dot" class:on={connected}></span>
@@ -517,7 +583,7 @@
 
     <div class="spectrum-wrap card" class:stale={spectrumStale}>
       <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · frame ${lastSpectrumSequence}${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
-      <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune VFO 0"></canvas>
+      <canvas bind:this={canvas} onclick={tuneFromSpectrum} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={vfos[0]?.frequency_hz ?? centerFreqHz} aria-label="Spectrum tuner. Use left and right arrows to tune VFO 0; hold Shift for 10 kHz steps." title="Click to tune VFO 0"></canvas>
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
@@ -628,7 +694,10 @@
     padding: 8px;
   }
   .banks-header h2 { margin: 0 0 6px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
-  .banks ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+  .bank-groups { overflow-y: auto; flex: 1; }
+  .bank-group h3 { margin: 10px 4px 4px; color: var(--accent-2); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .bank-group ul { list-style: none; margin: 0; padding: 0; }
+  .empty-banks { color: var(--fg-dim); font-size: 12px; padding: 12px 4px; }
   .banks li { margin: 2px 0; }
   .range-row {
     display: flex; flex-direction: column; width: 100%;
@@ -643,6 +712,11 @@
   .stop { margin-top: 8px; width: 100%; }
 
   .ui-notice { padding: 6px 10px; color: var(--warn); background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); border-radius: 4px; font-size: 12px; }
+  .setup-card { display:flex; align-items:center; justify-content:space-between; gap:12px; border-color:rgba(245,158,11,.45); background:rgba(245,158,11,.08); }
+  .setup-card strong { color:var(--warn); }
+  .setup-card p { margin:3px 0 0; color:var(--fg-dim); font-size:12px; }
+  .setup-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .setup-actions a { display:inline-flex; align-items:center; min-height:30px; padding:6px 12px; border-radius:6px; text-decoration:none; }
   .command-strip { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 4px; background: #13294b; }
   .quick-modes, .runtime-status { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
   .strip-label { color: var(--fg-dim); text-transform: uppercase; font: 10px var(--mono); margin-right: 4px; }
@@ -723,6 +797,7 @@
     .banks { max-height:220px; order:2; }
     .center { order:1; overflow:visible; padding:0; }
     .command-strip { align-items:flex-start; flex-direction:column; gap:6px; }
+    .setup-card { align-items:flex-start; flex-direction:column; }
     .device-strip { gap:6px; flex-wrap:wrap; padding:7px; }
     .receiver-readout { order:-1; width:100%; justify-content:space-between; }
     .spectrum-wrap { min-height:0; }
