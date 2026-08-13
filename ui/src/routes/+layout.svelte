@@ -2,6 +2,7 @@
   import '../app.css';
   let { children } = $props();
   let currentPath = $state('#/');
+  let menuOpen = $state(false);
 
   $effect(() => {
     currentPath = window.location.hash || '#/';
@@ -24,6 +25,7 @@
 
 <div class="app-shell">
   <nav class="topbar">
+    <button class="menu-toggle" aria-label={menuOpen ? 'Close navigation' : 'Open navigation'} aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>☰</button>
     <div class="brand">
       <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
         <circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" stroke-width="2" />
@@ -32,9 +34,9 @@
       </svg>
       <span class="wordmark">PulseScope</span>
     </div>
-    <ul class="nav-links">
+    <ul class:open={menuOpen} class="nav-links">
       {#each links as [href, label]}
-        <li><a href={href} class:active={currentPath === href} aria-current={currentPath === href ? 'page' : undefined}>{label}</a></li>
+        <li><a href={href} class:active={currentPath === href} aria-current={currentPath === href ? 'page' : undefined} onclick={() => (menuOpen = false)}>{label}</a></li>
       {/each}
     </ul>
   </nav>
