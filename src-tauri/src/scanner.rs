@@ -657,9 +657,6 @@ async fn scanner_loop(
                     audio_ring.clear();
                     audio.clear_queue();
                     smoothed_noise_floor = None;
-                    if let Some(vfo) = state.lock().vfo_states.first_mut() {
-                        vfo.frequency_hz = next;
-                    }
                 }
                 next_sweep_at =
                     Instant::now() + Duration::from_millis(range.dwell_ms.max(750) as u64);

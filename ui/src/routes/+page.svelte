@@ -659,6 +659,9 @@
       }
     }
     try {
+      // A survey may have moved the hardware window away from this parked
+      // VFO. Listening is an explicit takeover: recenter first, then unmute.
+      if (vfo.muted) await Api.vfoFrequency(vfo.id, vfo.frequency_hz);
       await Api.vfoMute(vfo.id, !vfo.muted);
     } finally {
       audioGesturePending = false;
