@@ -67,6 +67,10 @@
   );
 
   const quickModes = [
+    { label: 'FM Radio', match: 'FM Broadcast' },
+    { label: 'Weather', match: 'NOAA Weather' },
+    { label: 'Airband', match: 'Aircraft AM' },
+    { label: '2m Amateur', match: '2m Amateur' },
     { label: 'ADS-B 1090', match: 'ADS-B' },
     { label: 'AIS 162', match: 'AIS' },
     { label: 'ACARS 130', match: 'ACARS' },
@@ -581,16 +585,16 @@
     {#if notice}<div class="ui-notice" role="status">{notice}</div>{/if}
     <div class="command-strip card">
       <div class="quick-modes">
-        <span class="strip-label">Quick Modes</span>
+        <span class="strip-label">Listen or monitor</span>
         {#each quickModes as mode}
           <button class="quick" onclick={() => startQuickMode(mode.match)}>{mode.label}</button>
         {/each}
       </div>
       <div class="runtime-status">
-        <span class="status-pill" class:on={connected}>● {connected ? 'PWR' : 'OFF'}</span>
-        <span class="status-pill" class:on={scanRunning}>● {scanRunning ? 'SCANNING' : 'IDLE'}</span>
-        <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection}</span>
-        <a href="#/settings" class="settings-link">⚙ Settings</a>
+        <span class="status-pill" class:on={connected}>● SDR {connected ? 'online' : 'offline'}</span>
+        <span class="status-pill" class:on={scanRunning}>● Receiver {scanRunning ? 'active' : 'idle'}</span>
+        <span class="status-pill" class:on={eventConnection === 'open'}>● Data {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
+        <a href="#/settings" class="settings-link">Hardware</a>
       </div>
     </div>
     {#if !connected}

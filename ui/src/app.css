@@ -68,6 +68,12 @@ body {
 }
 .nav-links a:hover { background: var(--bg-elev-2); color: var(--fg); }
 .nav-links a.active { color: var(--fg); background: var(--bg-elev-2); box-shadow: inset 0 -2px var(--accent); }
+.more-item { position: relative; }
+.more-toggle { min-height: 32px; padding: 5px 10px; border-color: transparent; background: transparent; color: var(--fg-dim); }
+.more-toggle:hover, .more-toggle.active { color: var(--fg); background: var(--bg-elev-2); border-color: transparent; }
+.more-menu { position: absolute; z-index: 30; top: 38px; right: 0; width: 230px; list-style: none; margin: 0; padding: 7px; background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: var(--shadow); }
+.more-menu a { display: block; padding: 9px 10px; }
+.mobile-tabs { display: none; }
 
 .content { overflow: hidden; }
 
@@ -113,15 +119,23 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 /* Phone/tablet shell: navigation stays reachable without crushing the RF UI. */
 @media (max-width: 760px) {
-  .app-shell { grid-template-rows: 56px minmax(0, 1fr); }
+  .app-shell { grid-template-rows: 56px minmax(0, 1fr) 64px; }
   .topbar { position:relative; gap: 8px; padding: 0 12px; }
   .menu-toggle { display:inline-flex; align-items:center; justify-content:center; width:40px; height:40px; padding:0; font-size:20px; background:transparent; border:1px solid var(--line-strong); }
   .brand svg { width: 22px; height: 22px; }
   .wordmark { font-size: 13px; }
   .nav-links { display:none; position:absolute; z-index:20; top:55px; left:8px; right:8px; flex-direction:column; gap:3px; padding:8px; margin:0; background:var(--bg-elev); border:1px solid var(--line-strong); border-radius:10px; box-shadow:var(--shadow); }
   .nav-links.open { display:flex; }
+  .nav-links > li:not(.more-item) { display:none; }
   .nav-links a { display:block; padding:11px 12px; font-size:14px; }
+  .more-item { position:static; }
+  .more-toggle { width:100%; min-height:44px; text-align:left; padding:11px 12px; font-size:14px; }
+  .more-menu { position:static; width:auto; margin-top:4px; box-shadow:none; border-color:var(--line); background:var(--bg); }
   .content { overflow: auto; }
+  .mobile-tabs { display:grid; grid-template-columns:repeat(4,1fr); z-index:25; background:rgba(19,27,34,.98); border-top:1px solid var(--line-strong); padding:5px max(5px, env(safe-area-inset-right)) max(5px, env(safe-area-inset-bottom)) max(5px, env(safe-area-inset-left)); }
+  .mobile-tabs a { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; min-width:0; color:var(--fg-dim); text-decoration:none; font-size:10px; border-radius:6px; }
+  .mobile-tabs a span { font-size:18px; line-height:1; }
+  .mobile-tabs a.active { color:var(--accent); background:var(--bg-elev-2); }
   .card { padding: 9px; border-radius: 6px; }
   button, input, select { min-height: 44px; }
   button, a { touch-action: manipulation; }
