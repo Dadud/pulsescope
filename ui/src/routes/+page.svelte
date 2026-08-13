@@ -501,12 +501,19 @@
 
   async function tuneFoundSignal(hit: any) {
     if (!vfos.length) return;
+    const frequencyHz = Number(hit.frequency_hz);
     audioGesturePending = true;
     try {
       await browserAudio?.start();
-      await Api.vfoFrequency(vfos[0].id, Number(hit.frequency_hz));
+      // A survey result may be anywhere in a much wider band than the current
+      // capture window. Make this explicit action deterministic: move the RF
+      // window first, then park the listening VFO at its centre.
+      await Api.deviceFrequency(frequencyHz);
+      centerFreqHz = frequencyHz;
+      clearWaterfallHistory();
+      await Api.vfoFrequency(vfos[0].id, frequencyHz);
       await Api.vfoMute(vfos[0].id, false);
-      notice = `Listening at ${fmtHz(Number(hit.frequency_hz))}`;
+      notice = `Capture window centered and listening at ${fmtHz(frequencyHz)}`;
     } catch (error) {
       browserAudio?.stop();
       notice = `Could not listen to signal: ${String(error)}`;
@@ -786,8 +793,8 @@
         <span class="dot" class:on={connected}></span>
         {deviceLabel}
       </div>
-      <div class="receiver-readout"><span>CENTER</span><strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Tuning…'}</strong><small>{sampleRateHz > 0 ? `${fmtHz(sampleRateHz)} visible span` : ''}</small></div>
-      {#if availableSampleRates().length}<label class="span-select"><span>VISIBLE SPECTRUM</span><select value={sampleRateHz} onchange={setVisibleSpan} aria-label="Visible spectrum sample rate">{#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS · {(rate * 0.9 / 1e6).toFixed(1)} MHz usable</option>{/each}</select></label>{/if}
+      <div class="receiver-readout"><span>HARDWARE CENTER</span><strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Tuning…'}</strong><small>Moves the entire sampled RF window</small></div>
+      {#if availableSampleRates().length}<label class="span-select"><span>CAPTURE WINDOW</span><select value={sampleRateHz} onchange={setVisibleSpan} aria-label="SDR capture sample rate and usable spectrum width">{#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS · {(rate * 0.9 / 1e6).toFixed(1)} MHz usable RF</option>{/each}</select><small>RSP1B: up to 10 MSPS; usable span reserves filter edges</small></label>{/if}
       <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
       <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
     </div>
@@ -796,17 +803,17 @@
       <div class="spectrum-heading">
         <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · frame ${lastSpectrumSequence}${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
         <div class="spectrum-tools" role="group" aria-label="Spectrum interaction">
-          <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Tune VFO</button>
-          <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Move center</button>
+          <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Pick listening frequency</button>
+          <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Move capture window</button>
         </div>
       </div>
       <div class="center-controls">
         <button onclick={() => panCenter(-0.25)} aria-label="Move center left by one quarter of the visible span">← ¼ span</button>
-        <label><span>Center frequency</span><span class="frequency-entry"><input type="number" min="0.001" step="0.001" value={(displayedCenterHz / 1e6).toFixed(6)} onchange={setCenterFromInput} aria-label="Center frequency in megahertz" /><b>MHz</b></span></label>
+        <label><span>Hardware center frequency</span><span class="frequency-entry"><input type="number" min="0.001" step="0.001" value={(displayedCenterHz / 1e6).toFixed(6)} onchange={setCenterFromInput} aria-label="Hardware center frequency in megahertz" /><b>MHz</b></span></label>
         <button onclick={centerOnVfo} disabled={!vfos.length} title="Put VFO 0 in the middle of the visible spectrum">Center on VFO</button>
         <button onclick={() => panCenter(0.25)} aria-label="Move center right by one quarter of the visible span">¼ span →</button>
       </div>
-      <p class="interaction-help">{spectrumTool === 'vfo' ? 'Click a signal to tune VFO 0. Scroll to move across the band.' : 'Click to make that frequency the new center, or drag the spectrum and waterfall left or right.'}</p>
+      <p class="interaction-help">{spectrumTool === 'vfo' ? 'Click a signal to move only the listening VFO inside the current RF window. Scroll to move the whole window.' : 'Click or drag to move the entire sampled RF window without changing the listening VFO.'}</p>
       <canvas class:center-mode={spectrumTool === 'center'} bind:this={canvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)} aria-label={spectrumTool === 'center' ? 'Spectrum center control. Click or drag to change center frequency; use arrow keys for fine adjustment.' : 'Spectrum tuner. Click to tune VFO 0; scroll to pan center frequency; use arrow keys to fine tune.'} title={spectrumTool === 'center' ? 'Click or drag to move the receiver center' : 'Click to tune VFO 0; scroll to pan'}></canvas>
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
@@ -817,13 +824,13 @@
     </div>
 
     <section class="signal-history card">
-      <div class="history-head"><div><h2>Signals found</h2><small>Survey results do not move your listening VFO.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
+      <div class="history-head"><div><h2>Signals found</h2><small>The survey moves the capture window while your listening VFO stays parked.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
       {#if foundSignals.length === 0}
         <div class="history-empty">No signals found in this survey yet.</div>
       {:else}
         <div class="history-list">
           {#each foundSignals as hit}
-            <div class="history-row"><span>{hit.timestamp_ms ? fmtTime(hit.timestamp_ms) : 'live'}</span><b>{fmtHz(Number(hit.frequency_hz ?? 0))}</b><span>{hit.sub_protocol ?? hit.signal_class ?? hit.family ?? 'signal'}</span><span>SNR {Number(hit.snr_db ?? 0).toFixed(1)} dB</span><button class="mini listen-hit" onclick={() => tuneFoundSignal(hit)}>Tune & listen</button></div>
+            <div class="history-row"><span>{hit.timestamp_ms ? fmtTime(hit.timestamp_ms) : 'live'}</span><b>{fmtHz(Number(hit.frequency_hz ?? 0))}</b><span>{hit.sub_protocol ?? hit.signal_class ?? hit.family ?? 'signal'}</span><span>SNR {Number(hit.snr_db ?? 0).toFixed(1)} dB</span><button class="mini listen-hit" onclick={() => tuneFoundSignal(hit)}>Center & listen</button></div>
           {/each}
         </div>
       {/if}
@@ -833,6 +840,7 @@
       {#each vfos as v (v.id)}
         <div class="vfo-tile card">
           <div class="vfo-freq">{fmtHz(v.frequency_hz)}</div>
+          <small class="vfo-offset">Listening VFO · {v.frequency_hz >= centerFreqHz ? '+' : '−'}{fmtHz(Math.abs(v.frequency_hz - centerFreqHz))} from center</small>
           <div class="vfo-controls">
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
             <select aria-label="VFO {v.id} mode" value={v.mode} onchange={(e) => setVfoMode(v.id, e)}>
@@ -954,11 +962,12 @@
 
   .center { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }
   .device-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 12px; font-size: 13px; }
-  .receiver-readout { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); }
+  .receiver-readout { display: flex; flex-direction:column; align-items:flex-start; gap: 2px; font-family: var(--mono); }
   .receiver-readout span, .receiver-readout small { color: var(--fg-dim); font-size: 10px; }
   .receiver-readout strong { color: var(--accent); font-size: 14px; }
   .span-select { display:flex; flex-direction:column; gap:2px; color:var(--fg-dim); font:9px var(--mono); }
   .span-select select { min-height:30px; padding:4px 7px; font-size:11px; }
+  .span-select small { max-width:260px; color:var(--fg-dim); font:9px/1.3 var(--mono); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 8px; }
   .dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .vfo-summary { color: var(--fg-dim); }
@@ -1013,6 +1022,7 @@
   .vfo-grid { order: 2; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
   .vfo-tile { display: flex; flex-direction: column; gap: 4px; }
   .vfo-freq { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
+  .vfo-offset { color:var(--fg-dim); font:9px var(--mono); }
   .vfo-mode { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .vfo-controls { display: flex; gap: 4px; }
   .vfo-actions { display: flex; gap: 3px; flex-wrap: wrap; }
@@ -1069,7 +1079,7 @@
     .span-select select { min-height:42px; width:100%; font-size:14px; }
     .vfo-summary { margin-left:auto; }
     .audio-status { width:100%; padding-top:6px; border-top:1px solid var(--line); }
-    .receiver-readout { order:-1; width:100%; justify-content:space-between; }
+    .receiver-readout { order:-1; width:100%; }
     .spectrum-wrap { min-height:0; }
     .spectrum-wrap h2 { display:flex; flex-wrap:wrap; gap:5px; align-items:baseline; }
     .spectrum-heading { align-items:flex-start; }
