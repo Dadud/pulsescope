@@ -639,7 +639,7 @@ pub enum ScannerEvent {
 
 #[cfg(test)]
 mod recording_tests {
-    use super::{receiver_needs_recovery, RecordingState};
+    use super::{receiver_needs_recovery, ReceiverSession, RecordingState};
     use crate::scanner::{ScannerRuntimeState, VfoState};
     use rustfft::num_complex::Complex;
     use std::fs::{self, File};
@@ -706,5 +706,21 @@ mod recording_tests {
             Some(&running_receiver(9_000)),
             10_000
         ));
+    }
+
+    #[test]
+    fn receiver_session_revision_advances_only_on_applied_changes() {
+        let mut session = ReceiverSession::default();
+        session.claim("scanner", false).unwrap();
+        assert_eq!(session.revision, 1);
+        assert!(session.claim("operator", false).is_err());
+        assert_eq!(session.revision, 1);
+        session.claim("operator", true).unwrap();
+        assert_eq!(session.revision, 2);
+        assert_eq!(session.takeovers, 1);
+        session.release("scanner");
+        assert_eq!(session.revision, 2);
+        session.release("operator");
+        assert_eq!(session.revision, 3);
     }
 }

@@ -98,7 +98,7 @@ pub fn demodulate(
 /// provide a stable 15 kHz audio boundary without block-edge state loss.
 #[derive(Clone, Debug)]
 pub struct WfmStereoState {
-    sample_clock: u64,
+    pilot_reference_phase: f64,
     mono_filter: [f32; 4],
     difference_filter: [f32; 4],
     left_deemphasis: f32,
@@ -110,7 +110,7 @@ pub struct WfmStereoState {
 impl Default for WfmStereoState {
     fn default() -> Self {
         Self {
-            sample_clock: 0,
+            pilot_reference_phase: 0.0,
             mono_filter: [0.0; 4],
             difference_filter: [0.0; 4],
             left_deemphasis: 0.0,
@@ -145,14 +145,15 @@ pub fn decode_wfm_stereo(
     if multiplex.is_empty() || sample_rate_hz < 114_000 {
         return Vec::new();
     }
-    let pilot_step = TAU * 19_000.0 / sample_rate_hz as f32;
+    let pilot_step = std::f64::consts::TAU * 19_000.0 / sample_rate_hz as f64;
+    let reference_phase = state.pilot_reference_phase;
     let mut pilot_i = 0.0;
     let mut pilot_q = 0.0;
     let mut power = 0.0;
     for (index, &sample) in multiplex.iter().enumerate() {
-        let phase = pilot_step * (state.sample_clock + index as u64) as f32;
-        pilot_i += sample * phase.cos();
-        pilot_q += sample * phase.sin();
+        let phase = reference_phase + pilot_step * index as f64;
+        pilot_i += sample * phase.cos() as f32;
+        pilot_q += sample * phase.sin() as f32;
         power += sample * sample;
     }
     let pilot_phase = (-pilot_q).atan2(pilot_i);
@@ -163,9 +164,9 @@ pub fn decode_wfm_stereo(
         1.0 - (-1.0 / (sample_rate_hz as f32 * deemphasis_us.max(1.0) * 1e-6)).exp();
     let mut output = Vec::with_capacity(multiplex.len());
     for (index, &sample) in multiplex.iter().enumerate() {
-        let phase = pilot_step * (state.sample_clock + index as u64) as f32 + pilot_phase;
+        let phase = reference_phase + pilot_step * index as f64 + pilot_phase as f64;
         let mono = cascaded_low_pass(sample, 15_000.0, sample_rate_hz, &mut state.mono_filter);
-        let translated = sample * 2.0 * (2.0 * phase).cos();
+        let translated = sample * 2.0 * (2.0 * phase).cos() as f32;
         let difference = cascaded_low_pass(
             translated,
             15_000.0,
@@ -182,7 +183,8 @@ pub fn decode_wfm_stereo(
         state.right_dc = state.right_deemphasis * 0.995 + state.right_dc * 0.005;
         output.push([left_dc.clamp(-1.0, 1.0), right_dc.clamp(-1.0, 1.0)]);
     }
-    state.sample_clock = state.sample_clock.saturating_add(multiplex.len() as u64);
+    state.pilot_reference_phase =
+        (reference_phase + pilot_step * multiplex.len() as f64).rem_euclid(std::f64::consts::TAU);
     output
 }
 

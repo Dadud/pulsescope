@@ -29,11 +29,11 @@ for (const component of matrix.components ?? []) {
   }
   if (['hardware_verified', 'production'].includes(component.status)) {
     const hardwareEvidence = component.evidence.some((item) => item.type === 'hardware_run' && item.date && item.device);
-    if (component.group === 'hardware' && !hardwareEvidence) failures.push(`${component.id}: hardware verification requires dated device evidence`);
+    if (component.status === 'hardware_verified' && !hardwareEvidence) failures.push(`${component.id}: hardware verification requires dated device evidence`);
   }
   const minimum = matrix.rules?.normal_ui_minimum_status;
-  if (component.visibility === 'normal' && rank.get(component.status) < rank.get(minimum) && !component.acceptance_gate) {
-    failures.push(`${component.id}: normal UI items below ${minimum} must explain their missing gate`);
+  if (component.visibility === 'normal' && rank.get(component.status) < rank.get(minimum)) {
+    failures.push(`${component.id}: normal UI items must be at least ${minimum}`);
   }
 }
 
@@ -41,6 +41,13 @@ for (const certifiedId of matrix.rules?.certified_hardware ?? []) {
   const component = matrix.components.find((item) => item.id === certifiedId);
   if (!component || !['hardware_verified', 'production'].includes(component.status)) failures.push(`${certifiedId}: certified hardware must be hardware_verified or production`);
 }
+
+const apiSource = readFileSync(new URL('../src-tauri/src/api.rs', import.meta.url), 'utf8');
+const decoderUi = readFileSync(new URL('../ui/src/routes/feature-packs/+page.svelte', import.meta.url), 'utf8');
+for (const decoderId of matrix.rules?.decoder_catalog_required_ids ?? []) {
+  if (!apiSource.includes(`decoder_development_entry("${decoderId}"`)) failures.push(`decoder catalog is missing ${decoderId}`);
+}
+if (!decoderUi.includes('missing_gate') || !decoderUi.includes('Beta')) failures.push('normal decoder UI must show beta status and missing gate');
 
 if (failures.length) {
   console.error(failures.join('\n'));

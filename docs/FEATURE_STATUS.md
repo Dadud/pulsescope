@@ -61,7 +61,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Manifest decoder scheduler | Beta | normal | yes | Checksummed manifests, resource limits, typed parameters, health/restart policy, and normalized events. |
 | ADS-B, AIS and APRS | Beta | normal | yes | Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads. |
 | Broadcast RDS | Beta | normal | yes | RDS recovered from the same stereo multiplex fixture and verified live on broadcast FM. |
-| DMR, P25, NXDN, D-Star, YSF and M17 | Planned | normal | yes | Continuous discriminator feed and per-mode recorded-IQ fixtures; encrypted calls only labeled. |
+| DMR, P25, NXDN, D-Star, YSF and M17 | Beta | normal | yes | Continuous discriminator feed and per-mode recorded-IQ fixtures; encrypted calls only labeled. |
 | rtl_433, ACARS, VDL2, paging and UAT | Beta | normal | no | Per-protocol recorded-IQ fixtures and normalized events. |
 | FT8, WSPR, JS8, CW, RTTY, NAVTEX, SSTV and WEFAX | Beta | normal | no | Per-protocol recorded-IQ/audio fixtures and normalized events. |
 
@@ -70,7 +70,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Docker receiver appliance | Hardware verified | normal | yes | Clean install, preflight, health, persistent data, upgrade and rollback on the acceptance laptop. |
-| Compose profiles and hardware preflight | Planned | expert | yes | USB, permissions, speed, API compatibility, buffers, storage and ports checked before startup. |
+| Compose profiles and hardware preflight | Beta | expert | yes | USB, permissions, speed, API compatibility, buffers, storage and ports checked before startup. |
 | Guided proprietary driver installation | Planned | expert | yes | Pinned allowlisted packages show license, source, checksum, impact and support rollback. |
 
 ## Operations
@@ -78,7 +78,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Trusted LAN and optional secure access | Beta | expert | yes | Open LAN default is explicit; optional TLS/token mode passes unauthorized-access and secret-storage tests. |
-| Backup, restore and rollback | Planned | expert | yes | Configuration, calibration, drivers, decoder settings, recordings and database restore into a clean install. |
+| Backup, restore and rollback | Beta | expert | yes | Configuration, calibration, drivers, decoder settings, recordings and database restore into a clean install. |
 | Sample-flow health and readiness | Fixture verified | normal | yes | Capture and FFT staleness fail readiness; audio reports muted/buffering/degraded without false crashes. |
 
 ## Api
@@ -86,4 +86,4 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Versioned API v2 contract | Beta | expert | yes | Devices, receivers, sessions, media, jobs, recordings, health, backup and update endpoints pass conformance tests. |
-| Idempotent commands and sequenced events | Planned | expert | yes | Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time. |
+| Idempotent commands and sequenced events | Beta | expert | yes | Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time. |

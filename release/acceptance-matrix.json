@@ -11,7 +11,8 @@
     "normal_ui_minimum_status": "development",
     "normal_ui_requires_gate_explanation_below": "fixture_verified",
     "merge_target": "agent/ultrasdr-pulsescope-refactor",
-    "trusted_lan_open_by_default": true
+    "trusted_lan_open_by_default": true,
+    "decoder_catalog_required_ids": ["adsb", "ais", "aprs", "pocsag", "rds", "uat", "acars", "vdl2", "rtl433", "ft8", "wspr", "rtty", "navtex", "dmr", "p25", "nxdn", "dstar", "ysf", "m17"]
   },
   "components": [
     {
@@ -160,7 +161,7 @@
     },
     {
       "id": "decoder-digital-voice", "name": "DMR, P25, NXDN, D-Star, YSF and M17", "group": "decoder",
-      "status": "planned", "visibility": "normal", "required": true,
+      "status": "development", "visibility": "normal", "required": true,
       "acceptance_gate": "Continuous discriminator feed and per-mode recorded-IQ fixtures; encrypted calls only labeled.", "evidence": []
     },
     {
@@ -183,7 +184,7 @@
     },
     {
       "id": "compose-profiles-preflight", "name": "Compose profiles and hardware preflight", "group": "packaging",
-      "status": "planned", "visibility": "expert", "required": true,
+      "status": "development", "visibility": "expert", "required": true,
       "acceptance_gate": "USB, permissions, speed, API compatibility, buffers, storage and ports checked before startup.", "evidence": []
     },
     {
@@ -198,7 +199,7 @@
     },
     {
       "id": "backup-restore-rollback", "name": "Backup, restore and rollback", "group": "operations",
-      "status": "planned", "visibility": "expert", "required": true,
+      "status": "development", "visibility": "expert", "required": true,
       "acceptance_gate": "Configuration, calibration, drivers, decoder settings, recordings and database restore into a clean install.", "evidence": []
     },
     {
@@ -214,7 +215,7 @@
     },
     {
       "id": "command-event-consistency", "name": "Idempotent commands and sequenced events", "group": "api",
-      "status": "planned", "visibility": "expert", "required": true,
+      "status": "development", "visibility": "expert", "required": true,
       "acceptance_gate": "Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time.", "evidence": []
     }
   ]
