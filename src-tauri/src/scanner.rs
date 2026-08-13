@@ -575,8 +575,10 @@ async fn scanner_loop(
                     confidence: classification.top_confidence,
                     decoder,
                 });
-                if let Some(vfo) = state.lock().vfo_states.first_mut() {
-                    if vfo.muted {
+                let mut runtime = state.lock();
+                let manually_tuned = runtime.scan_locked;
+                if let Some(vfo) = runtime.vfo_states.first_mut() {
+                    if vfo.muted && !manually_tuned {
                         vfo.frequency_hz = frequency_hz;
                     }
                 }

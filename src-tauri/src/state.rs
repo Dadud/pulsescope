@@ -127,16 +127,16 @@ impl AppState {
             self.receiver_session.lock().release("scanner");
             return Err("no receiver ranges are configured".into());
         };
-        if self
+        let requested_rate = self
+            .config
+            .read()
             .device
-            .set_sample_contract(range.sample_rate_hz)
-            .is_err()
+            .sample_rate
+            .max(range.sample_rate_hz);
+        if self.device.set_sample_contract(requested_rate).is_err()
             || self
                 .device
-                .set_frequency(crate::scanner::initial_scan_center(
-                    &range,
-                    range.sample_rate_hz,
-                ))
+                .set_frequency(crate::scanner::initial_scan_center(&range, requested_rate))
                 .is_err()
         {
             self.receiver_session.lock().release("scanner");
@@ -399,16 +399,16 @@ impl AppState {
                 let _ = self.db.mark_scheduled_job(id, "blocked", &error, true, now);
                 continue;
             }
-            if self
+            let requested_rate = self
+                .config
+                .read()
                 .device
-                .set_sample_contract(range.sample_rate_hz)
-                .is_err()
+                .sample_rate
+                .max(range.sample_rate_hz);
+            if self.device.set_sample_contract(requested_rate).is_err()
                 || self
                     .device
-                    .set_frequency(crate::scanner::initial_scan_center(
-                        &range,
-                        range.sample_rate_hz,
-                    ))
+                    .set_frequency(crate::scanner::initial_scan_center(&range, requested_rate))
                     .is_err()
             {
                 self.receiver_session.lock().release(&owner);

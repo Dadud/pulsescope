@@ -879,6 +879,11 @@ async fn device_sample_rate(
 ) -> impl IntoResponse {
     match s.0.device.set_sample_contract(req.sample_rate) {
         Ok(bandwidth_hz) => {
+            {
+                let mut config = s.0.config.write();
+                config.device.sample_rate = req.sample_rate;
+                let _ = config.save(&s.0.data_dir);
+            }
             if let Some(handle) = s.0.scanner.read().as_ref() {
                 handle.flush_iq();
             }
@@ -939,11 +944,12 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     let Some(range) = range else {
         return Json(json!({"ok": false, "error": "unknown range"}));
     };
-    let requested_rate = if req.range_name == "FM Broadcast" {
-        2_000_000
-    } else {
-        range.sample_rate_hz
-    };
+    let requested_rate =
+        s.0.config
+            .read()
+            .device
+            .sample_rate
+            .max(range.sample_rate_hz);
     if let Err(e) = s.0.device.set_sample_contract(requested_rate) {
         return Json(json!({"ok": false, "error": format!("failed to set sampled spectrum: {e}")}));
     }

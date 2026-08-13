@@ -124,7 +124,7 @@ pub struct DeviceConfig {
 impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
-            sample_rate: 10_000_000,
+            sample_rate: 2_000_000,
             ppm_correction: 0.0,
             gain: "auto".into(),
             plutosdr_ip: String::new(),
