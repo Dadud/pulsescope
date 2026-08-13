@@ -32,12 +32,14 @@ pub struct ScannerHandle {
     pub cmd_tx: mpsc::UnboundedSender<ScannerCommand>,
     pub state: Arc<Mutex<ScannerRuntimeState>>,
     pub iq_consumers: Vec<IqRing>,
+    task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScannerRuntimeState {
     pub active_range: Option<String>,
     pub running: bool,
+    pub started_ms: i64,
     pub vfo_states: Vec<VfoState>,
     pub latest_spectrum: Vec<f32>,
     pub frames_processed: u64,
@@ -154,6 +156,10 @@ impl ScannerHandle {
         for ring in &self.iq_consumers { ring.clear(); }
     }
 
+    pub fn abort(&self) {
+        if let Some(task) = self.task.lock().take() { task.abort(); }
+    }
+
     pub fn spawn(
         cfg: ScannerConfig,
         device: Arc<DeviceLayer>,
@@ -170,9 +176,14 @@ impl ScannerHandle {
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
         let capture_ring = IqRing::new("fft", cfg.fft_size.saturating_mul(5).saturating_mul(16));
         let audio_ring = IqRing::new("audio", 2_000_000);
-        let handle = ScannerHandle { cmd_tx: cmd_tx.clone(), state: state.clone(), iq_consumers: vec![capture_ring.clone(), audio_ring.clone()] };
+        let task = tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, spectrum_tx, cmd_rx, state.clone(), capture_ring.clone(), audio_ring.clone()));
+        let handle = ScannerHandle {
+            cmd_tx: cmd_tx.clone(),
+            state,
+            iq_consumers: vec![capture_ring, audio_ring],
+            task: Arc::new(Mutex::new(Some(task))),
+        };
 
-        tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, spectrum_tx, cmd_rx, state, capture_ring, audio_ring));
         handle
     }
 }
@@ -240,6 +251,7 @@ async fn scanner_loop(
                     state.lock().vfo_states = vfos.clone();
                     state.lock().active_range = Some(name.clone());
                     state.lock().running = true;
+                    state.lock().started_ms = now_ms();
                     active_range = Some(range);
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                     tracing::info!(range = %name, "scanner started");

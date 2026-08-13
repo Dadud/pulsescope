@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +42,8 @@ pub struct AppState {
     pub spectrum: watch::Sender<SpectrumFrame>,
     pub data_dir: PathBuf,
     pub started_ms: i64,
+    pub receiver_recoveries: AtomicU64,
+    pub last_receiver_recovery_ms: AtomicI64,
 }
 
 impl AppState {
@@ -75,6 +78,8 @@ impl AppState {
             spectrum: spectrum_tx,
             data_dir,
             started_ms: crate::scanner::now_ms(),
+            receiver_recoveries: AtomicU64::new(0),
+            last_receiver_recovery_ms: AtomicI64::new(0),
         })
     }
 
@@ -82,26 +87,64 @@ impl AppState {
     /// onto an empty spectrum/VFO dashboard. Audio stays muted until the user
     /// explicitly unmutes a VFO.
     pub fn start_default_monitor(self: &Arc<Self>) {
-        if !self.device.status().connected || self.scanner.read().is_some() { return; }
-        if let Err(error) = self.receiver_session.lock().claim("scanner", false) {
-            tracing::warn!(%error, "default monitor could not claim receiver");
-            return;
+        if let Err(error) = self.ensure_receiver_flow(false) {
+            tracing::warn!(%error, "default monitor could not start");
         }
-        let range: Option<ScanRange> = self.config.read().scan_ranges.iter()
-            .find(|r| r.name == "FM Broadcast")
-            .cloned()
-            .or_else(|| self.config.read().scan_ranges.first().cloned());
-        let Some(range) = range else { return; };
+    }
+
+    fn default_monitor_range(&self) -> Option<ScanRange> {
+        let active_name = self.scanner.read().as_ref()
+            .and_then(|handle| handle.state.lock().active_range.clone());
+        let config = self.config.read();
+        active_name.as_deref()
+            .and_then(|name| config.scan_ranges.iter().find(|range| range.name == name).cloned())
+            .or_else(|| config.scan_ranges.iter().find(|range| range.name == "FM Broadcast").cloned())
+            .or_else(|| config.scan_ranges.first().cloned())
+    }
+
+    fn ensure_receiver_flow(self: &Arc<Self>, recovering: bool) -> Result<(), String> {
+        if !self.device.status().connected {
+            return Err("device is disconnected".into());
+        }
+        self.receiver_session.lock().claim("scanner", false)?;
+        let Some(range) = self.default_monitor_range() else {
+            self.receiver_session.lock().release("scanner");
+            return Err("no receiver ranges are configured".into());
+        };
         if self.device.set_sample_rate(range.sample_rate_hz).is_err()
             || self.device.set_bandwidth(range.channel_bw_hz).is_err()
             || self.device.set_frequency(range.start_hz).is_err() {
             self.receiver_session.lock().release("scanner");
-            return;
+            return Err("device configuration failed".into());
         }
+
+        if recovering {
+            if let Some(handle) = self.scanner.write().take() {
+                handle.abort();
+            }
+        } else {
+            let existing = self.scanner.read().as_ref().map(|handle| handle.cmd_tx.clone());
+            if let Some(command) = existing {
+                if command.send(crate::scanner::ScannerCommand::Start { range: range.clone() }).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
         let cfg = self.config.read().scanner.clone();
         let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone(), self.spectrum.clone());
-        let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
+        handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range })
+            .map_err(|_| "receiver task did not accept its startup command".to_string())?;
         *self.scanner.write() = Some(handle);
+        if recovering { self.observe_receiver_recovery(); }
+        Ok(())
+    }
+
+    fn observe_receiver_recovery(&self) {
+        let now = crate::scanner::now_ms();
+        self.receiver_recoveries.fetch_add(1, Ordering::Relaxed);
+        self.last_receiver_recovery_ms.store(now, Ordering::Relaxed);
+        tracing::warn!(timestamp_ms = now, "receiver flow restarted by supervisor");
     }
 
     /// Poll and execute due one-shot scan jobs. Jobs intentionally need an
@@ -125,36 +168,26 @@ impl AppState {
             loop {
                 tick.tick().await;
                 let status = app.device.status();
-                if status.driver != "mock" { continue; }
-                let devices = tokio::task::spawn_blocking(crate::device::DeviceLayer::discover)
-                    .await
-                    .unwrap_or_default();
-                let Some(candidate) = devices.into_iter().find(|device| device.driver != "mock") else { continue; };
-                let device = app.device.clone();
-                let key = candidate.key.clone();
-                let connected = tokio::task::spawn_blocking(move || device.connect(&key)).await;
-                if !matches!(connected, Ok(Ok(()))) { continue; }
+                if status.driver == "mock" {
+                    let devices = tokio::task::spawn_blocking(crate::device::DeviceLayer::discover)
+                        .await
+                        .unwrap_or_default();
+                    let Some(candidate) = devices.into_iter().find(|device| device.driver != "mock") else { continue; };
+                    let device = app.device.clone();
+                    let key = candidate.key.clone();
+                    let connected = tokio::task::spawn_blocking(move || device.connect(&key)).await;
+                    if !matches!(connected, Ok(Ok(()))) { continue; }
+                    tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
+                }
 
-                let active_name = app.scanner.read().as_ref()
-                    .and_then(|handle| handle.state.lock().active_range.clone())
-                    .unwrap_or_else(|| "FM Broadcast".to_string());
-                let range = app.config.read().scan_ranges.iter()
-                    .find(|range| range.name == active_name)
-                    .cloned()
-                    .or_else(|| app.config.read().scan_ranges.first().cloned());
-                let Some(range) = range else { continue; };
-                let sample_rate = if range.name == "FM Broadcast" { 2_000_000 } else { range.sample_rate_hz };
-                if app.device.set_sample_rate(sample_rate).is_err()
-                    || app.device.set_bandwidth(range.channel_bw_hz).is_err()
-                    || app.device.set_frequency(range.start_hz).is_err() {
-                    continue;
-                }
-                if let Some(handle) = app.scanner.read().as_ref() {
-                    handle.flush_iq();
+                let now = crate::scanner::now_ms();
+                let runtime = app.scanner.read().as_ref().map(|handle| handle.state.lock().clone());
+                if receiver_needs_recovery(runtime.as_ref(), now) {
                     app.audio.clear_queue();
-                    let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range });
+                    if let Err(error) = app.ensure_receiver_flow(true) {
+                        tracing::warn!(%error, "receiver supervisor could not restore sample flow");
+                    }
                 }
-                tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
             }
         });
     }
@@ -315,6 +348,15 @@ pub struct SpectrumFrame {
     pub bins_dbfs: Vec<f32>,
 }
 
+fn receiver_needs_recovery(runtime: Option<&crate::scanner::ScannerRuntimeState>, now_ms: i64) -> bool {
+    let Some(runtime) = runtime else { return true; };
+    if !runtime.running || runtime.vfo_states.is_empty() { return true; }
+    if runtime.latest_spectrum_ms <= 0 {
+        return runtime.started_ms > 0 && now_ms.saturating_sub(runtime.started_ms) > 5_000;
+    }
+    now_ms.saturating_sub(runtime.latest_spectrum_ms) > 5_000
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum ScannerEvent {
@@ -343,7 +385,8 @@ pub enum ScannerEvent {
 
 #[cfg(test)]
 mod recording_tests {
-    use super::RecordingState;
+    use super::{receiver_needs_recovery, RecordingState};
+    use crate::scanner::{ScannerRuntimeState, VfoState};
     use rustfft::num_complex::Complex;
     use std::fs::{self, File};
     use std::path::PathBuf;
@@ -365,5 +408,34 @@ mod recording_tests {
         assert_eq!(&bytes[0..4], &0.25f32.to_le_bytes());
         assert_eq!(&bytes[4..8], &(-0.5f32).to_le_bytes());
         fs::remove_file(path).unwrap();
+    }
+
+    fn running_receiver(latest_spectrum_ms: i64) -> ScannerRuntimeState {
+        ScannerRuntimeState {
+            active_range: Some("FM Broadcast".into()),
+            running: true,
+            started_ms: 1_000,
+            vfo_states: vec![VfoState {
+                id: 0,
+                frequency_hz: 100_000_000,
+                mode: "wfm".into(),
+                muted: true,
+                volume: 0.7,
+                audio_agc: true,
+                squelch_open: false,
+                strength_db: -120.0,
+                audio_level_db: -120.0,
+            }],
+            latest_spectrum_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn receiver_supervisor_recovers_missing_stopped_and_stale_flows() {
+        assert!(receiver_needs_recovery(None, 10_000));
+        assert!(receiver_needs_recovery(Some(&ScannerRuntimeState::default()), 10_000));
+        assert!(receiver_needs_recovery(Some(&running_receiver(2_000)), 10_000));
+        assert!(!receiver_needs_recovery(Some(&running_receiver(9_000)), 10_000));
     }
 }

@@ -540,6 +540,10 @@ async fn system_health_v2(State(s): State<ApiState>) -> impl IntoResponse {
         "audio": { "state": audio_state, "age_ms": audio_age_ms, "details": audio_details },
         "decoders": s.0.sidecars.statuses(),
         "event_clients": s.0.events.receiver_count(),
+        "recovery": {
+            "receiver_restarts": s.0.receiver_recoveries.load(std::sync::atomic::Ordering::Relaxed),
+            "last_receiver_restart_ms": s.0.last_receiver_recovery_ms.load(std::sync::atomic::Ordering::Relaxed),
+        },
     }))
 }
 
@@ -597,6 +601,8 @@ async fn device_connect(State(s): State<ApiState>, Json(req): Json<DevKeyReq>) -
     cfg.device.last_device_key = req.key;
     cfg.device.last_device_label = req.label.unwrap_or_else(|| s.0.device.status().label);
     let _ = cfg.save(&s.0.data_dir);
+    drop(cfg);
+    s.0.start_default_monitor();
     Json(json!({"ok": true, "status": s.0.device.status()}))
 }
 
