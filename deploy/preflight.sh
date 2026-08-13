@@ -14,7 +14,7 @@ if [ -d /dev/shm ] && [ -w /dev/shm ]; then pass 'shared memory is writable'; el
 available_kb=$(df -Pk /var/lib/pulsescope 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -n "${available_kb:-}" ] && [ "$available_kb" -ge 1048576 ]; then pass 'at least 1 GiB data storage is free'; else warn 'less than 1 GiB data storage appears free'; fi
 
-receive_buffer=$(cat /proc/sys/net/core/rmem_max 2>/dev/null || printf 0)
+receive_buffer=$(cat /host/rmem_max 2>/dev/null || cat /proc/sys/net/core/rmem_max 2>/dev/null || printf 0)
 if [ "$receive_buffer" -ge 4194304 ]; then pass "socket receive buffer max is $receive_buffer"; else warn "net.core.rmem_max=$receive_buffer; 4194304 or higher is recommended"; fi
 
 if command -v SoapySDRUtil >/dev/null 2>&1; then
