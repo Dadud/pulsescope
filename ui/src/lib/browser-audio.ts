@@ -25,12 +25,23 @@ export class BrowserAudio {
 
   constructor(onState: (state: BrowserAudioState) => void) {
     this.stateListener = onState;
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.setActionHandler('play', () => { void this.start(); });
+      navigator.mediaSession.setActionHandler('pause', () => this.stop());
+      navigator.mediaSession.setActionHandler('stop', () => this.stop());
+    }
+  }
+
+  setMetadata(title: string, artist = 'PulseScope receiver'): void {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title, artist, album: 'Live SDR' });
   }
 
   async start(): Promise<void> {
     this.wanted = true;
     if (!this.context) this.context = new AudioContext({ latencyHint: 'playback', sampleRate: 48_000 });
     await this.context.resume();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
     if (!this.socket || this.socket.readyState > WebSocket.OPEN) this.connect();
   }
 
@@ -44,6 +55,7 @@ export class BrowserAudio {
     this.resetPlayback(true);
     void this.context?.suspend();
     this.stateListener('off');
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
   }
 
   private connect(): void {

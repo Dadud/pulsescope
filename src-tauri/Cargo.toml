@@ -82,6 +82,10 @@ which = "7"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+ed25519-dalek = "2"
 
 [features]
 default = ["desktop", "mock-source", "soapysdr"]

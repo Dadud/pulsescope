@@ -12,6 +12,7 @@ pub mod aviation;
 pub mod capture;
 pub mod config;
 pub mod db;
+pub mod decoder_manifest;
 pub mod demod;
 pub mod depmanager;
 pub mod device;

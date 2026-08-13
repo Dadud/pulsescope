@@ -25,8 +25,8 @@ use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
 use crate::db::Db;
 use crate::demod::{
-    dc_block, decimate_complex_average, deemphasis, demodulate, low_pass_complex, low_pass_real,
-    mix_down, Mode, SincResampler,
+    dc_block, decimate_complex_average, decode_wfm_stereo, deemphasis, demodulate,
+    low_pass_complex, low_pass_real, mix_down, Mode, SincResampler, WfmStereoState,
 };
 use crate::device::DeviceLayer;
 use crate::sidecar::SidecarRegistry;
@@ -53,6 +53,7 @@ pub struct ScannerDependencies {
     pub sidecars: SidecarRegistry,
     pub events_tx: broadcast::Sender<ScannerEvent>,
     pub spectrum_tx: watch::Sender<SpectrumFrame>,
+    pub wfm_deemphasis_us: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -134,50 +135,6 @@ fn stable_channel_frequency(range: &ScanRange, detected_hz: u64, fallback_step_h
         .clamp(range.start_hz, range.end_hz)
 }
 
-#[cfg(test)]
-mod scan_window_tests {
-    use super::*;
-
-    #[test]
-    fn initial_center_reserves_both_window_edges() {
-        let range = ScanRange {
-            start_hz: 88_000_000,
-            end_hz: 108_000_000,
-            ..Default::default()
-        };
-        assert_eq!(initial_scan_center(&range, 1_800_000), 88_900_000);
-    }
-
-    #[test]
-    fn narrow_range_centers_at_its_upper_edge_without_overflow() {
-        let range = ScanRange {
-            start_hz: 144_000_000,
-            end_hz: 144_100_000,
-            ..Default::default()
-        };
-        assert_eq!(initial_scan_center(&range, 2_000_000), 144_100_000);
-    }
-
-    #[test]
-    fn broadcast_fm_peaks_snap_to_stable_channel_centers() {
-        let range = ScanRange {
-            start_hz: 88_000_000,
-            end_hz: 108_000_000,
-            mode: "wfm".into(),
-            channel_bw_hz: 200_000,
-            ..Default::default()
-        };
-        assert_eq!(
-            stable_channel_frequency(&range, 90_283_980, 5_000),
-            90_300_000
-        );
-        assert_eq!(
-            stable_channel_frequency(&range, 92_714_511, 5_000),
-            92_700_000
-        );
-    }
-}
-
 /// Dedicated audio consumer; keeps demodulation and CPAL feeding off the FFT loop.
 struct AudioWorker {
     stop: Arc<AtomicBool>,
@@ -189,6 +146,7 @@ impl AudioWorker {
         audio: Arc<AudioSink>,
         device: Arc<DeviceLayer>,
         state: Arc<Mutex<ScannerRuntimeState>>,
+        wfm_deemphasis_us: u32,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
@@ -201,6 +159,9 @@ impl AudioWorker {
             let mut dc_states = Vec::<f32>::new();
             let mut agc_gains = Vec::<f32>::new();
             let mut resampler = SincResampler::default();
+            let mut stereo_left_resampler = SincResampler::default();
+            let mut stereo_right_resampler = SincResampler::default();
+            let mut stereo_states = Vec::<WfmStereoState>::new();
             while !stop_thread.load(Ordering::Acquire) {
                 // Consume approximately 20 ms per DSP block at every device
                 // rate. The former fixed 131072-sample block added more than
@@ -220,11 +181,14 @@ impl AudioWorker {
                     deemphasis_states = vec![0.0; vfos.len()];
                     dc_states = vec![0.0; vfos.len()];
                     agc_gains = vec![1.0; vfos.len()];
+                    stereo_states = vec![WfmStereoState::default(); vfos.len()];
                 }
                 let predecimation = (sample_rate / 500_000).max(1) as usize;
                 let effective_rate = (sample_rate / predecimation as u32).max(1);
                 let mut mixed = Vec::<f32>::new();
                 let mut active = 0usize;
+                let mut stereo_candidate: Option<Vec<[f32; 2]>> = None;
+                let mut stereo_gain = 1.0f32;
                 for (idx, vfo) in vfos.iter().enumerate() {
                     if vfo.muted {
                         continue;
@@ -246,7 +210,16 @@ impl AudioWorker {
                         &mut filter_states[idx],
                     );
                     let baseband = decimate_complex_average(&baseband, predecimation);
-                    let mut pcm = demodulate(mode, &baseband, &mut previous[idx]);
+                    let multiplex = demodulate(mode, &baseband, &mut previous[idx]);
+                    if mode == Mode::Wfm {
+                        stereo_candidate = Some(decode_wfm_stereo(
+                            &multiplex,
+                            effective_rate,
+                            wfm_deemphasis_us as f32,
+                            &mut stereo_states[idx],
+                        ));
+                    }
+                    let mut pcm = multiplex;
                     let audio_cutoff_hz = match mode {
                         Mode::Wfm => 15_000.0,
                         Mode::Nfm => 5_000.0,
@@ -259,7 +232,12 @@ impl AudioWorker {
                         &mut audio_filter_states[idx],
                     );
                     if mode == Mode::Wfm {
-                        deemphasis(&mut pcm, effective_rate, 75.0, &mut deemphasis_states[idx]);
+                        deemphasis(
+                            &mut pcm,
+                            effective_rate,
+                            wfm_deemphasis_us as f32,
+                            &mut deemphasis_states[idx],
+                        );
                     }
                     dc_block(&mut pcm, &mut dc_states[idx], 0.995);
                     if mixed.len() < pcm.len() {
@@ -273,6 +251,9 @@ impl AudioWorker {
                         agc_gains[idx] += (target - agc_gains[idx]) * smoothing;
                     } else {
                         agc_gains[idx] = 1.0;
+                    }
+                    if mode == Mode::Wfm {
+                        stereo_gain = agc_gains[idx] * vfo.volume;
                     }
                     if let Some(current) =
                         state.lock().vfo_states.iter_mut().find(|x| x.id == vfo.id)
@@ -290,6 +271,28 @@ impl AudioWorker {
                 if active > 1 {
                     for sample in &mut mixed {
                         *sample /= active as f32;
+                    }
+                }
+                if active == 1 {
+                    if let Some(stereo) = stereo_candidate.filter(|frames| !frames.is_empty()) {
+                        let left = stereo.iter().map(|frame| frame[0]).collect::<Vec<_>>();
+                        let right = stereo.iter().map(|frame| frame[1]).collect::<Vec<_>>();
+                        let left = stereo_left_resampler.process(
+                            &left,
+                            effective_rate,
+                            audio.sample_rate(),
+                        );
+                        let right = stereo_right_resampler.process(
+                            &right,
+                            effective_rate,
+                            audio.sample_rate(),
+                        );
+                        let mut interleaved = Vec::with_capacity(left.len().min(right.len()) * 2);
+                        for (left, right) in left.into_iter().zip(right) {
+                            interleaved.extend_from_slice(&[left, right]);
+                        }
+                        audio.push_interleaved(&interleaved, 2, stereo_gain);
+                        continue;
                     }
                 }
                 let output = resampler.process(&mixed, effective_rate, audio.sample_rate());
@@ -369,6 +372,7 @@ async fn scanner_loop(
         sidecars,
         events_tx,
         spectrum_tx,
+        wfm_deemphasis_us,
     } = dependencies;
     let mut active_range: Option<ScanRange> = None;
     let poll = Duration::from_micros((1_000_000.0 / cfg.update_rate_hz.max(1.0)) as u64);
@@ -383,6 +387,7 @@ async fn scanner_loop(
         audio.clone(),
         device.clone(),
         state.clone(),
+        wfm_deemphasis_us,
     );
     let _capture_worker = CaptureWorker::start(
         device.clone(),
@@ -834,6 +839,50 @@ pub fn now_ms() -> i64 {
 #[allow(dead_code)]
 pub fn instant_ms(t: Instant) -> i64 {
     t.elapsed().as_millis() as i64
+}
+
+#[cfg(test)]
+mod scan_window_tests {
+    use super::*;
+
+    #[test]
+    fn initial_center_reserves_both_window_edges() {
+        let range = ScanRange {
+            start_hz: 88_000_000,
+            end_hz: 108_000_000,
+            ..Default::default()
+        };
+        assert_eq!(initial_scan_center(&range, 1_800_000), 88_900_000);
+    }
+
+    #[test]
+    fn narrow_range_centers_at_its_upper_edge_without_overflow() {
+        let range = ScanRange {
+            start_hz: 144_000_000,
+            end_hz: 144_100_000,
+            ..Default::default()
+        };
+        assert_eq!(initial_scan_center(&range, 2_000_000), 144_100_000);
+    }
+
+    #[test]
+    fn broadcast_fm_peaks_snap_to_stable_channel_centers() {
+        let range = ScanRange {
+            start_hz: 88_000_000,
+            end_hz: 108_000_000,
+            mode: "wfm".into(),
+            channel_bw_hz: 200_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            stable_channel_frequency(&range, 90_283_980, 5_000),
+            90_300_000
+        );
+        assert_eq!(
+            stable_channel_frequency(&range, 92_714_511, 5_000),
+            92_700_000
+        );
+    }
 }
 
 #[cfg(all(test, feature = "soapysdr"))]

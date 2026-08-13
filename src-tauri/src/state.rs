@@ -1,6 +1,7 @@
 // state.rs — application state shared between the Tauri command handlers and
 // the HTTP/WS API server. Holds config, scanner core handle, DB pool, sidecars.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -31,6 +32,10 @@ pub struct AppState {
     /// Exclusive physical SDR lease. Consumers must claim this before retuning
     /// or creating a capture stream; force takeover is explicit and visible.
     pub receiver_session: Mutex<ReceiverSession>,
+    /// Bounded result ledger for idempotent v2 commands. A retried command ID
+    /// returns its original response instead of applying a second retune or
+    /// session takeover.
+    pub command_results: Mutex<HashMap<String, serde_json::Value>>,
     pub trunking: RwLock<TrunkingRuntime>,
     pub sidecars: SidecarRegistry,
     /// Broadcasts every scanner event (spectrum, signal hit, decoded message,
@@ -72,6 +77,7 @@ impl AppState {
             iq_network: crate::capture::IqNetworkSink::new(),
             scanner: RwLock::new(None),
             receiver_session: Mutex::new(ReceiverSession::default()),
+            command_results: Mutex::new(HashMap::new()),
             trunking: RwLock::new(TrunkingRuntime::default()),
             sidecars: SidecarRegistry::new(),
             events: events_tx,
@@ -166,6 +172,7 @@ impl AppState {
         }
 
         let cfg = self.config.read().scanner.clone();
+        let wfm_deemphasis_us = self.config.read().demodulator.de_emphasis_us;
         let dependencies = ScannerDependencies {
             device: self.device.clone(),
             db: self.db.clone(),
@@ -176,6 +183,7 @@ impl AppState {
             sidecars: self.sidecars.clone(),
             events_tx: self.events.clone(),
             spectrum_tx: self.spectrum.clone(),
+            wfm_deemphasis_us,
         };
         let handle = ScannerHandle::spawn(cfg, dependencies);
         handle
@@ -469,6 +477,7 @@ pub struct ReceiverSession {
     pub owner: Option<String>,
     pub acquired_ms: Option<i64>,
     pub takeovers: u64,
+    pub revision: u64,
 }
 
 impl ReceiverSession {
@@ -483,12 +492,14 @@ impl ReceiverSession {
         }
         self.owner = Some(owner.to_owned());
         self.acquired_ms = Some(crate::scanner::now_ms());
+        self.revision = self.revision.saturating_add(1);
         Ok(())
     }
     pub fn release(&mut self, owner: &str) {
         if self.owner.as_deref() == Some(owner) {
             self.owner = None;
             self.acquired_ms = None;
+            self.revision = self.revision.saturating_add(1);
         }
     }
 }

@@ -1,28 +1,221 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "product": "PulseScope",
-  "release": "1.0.0",
+  "release": "2.0.0-dev",
+  "generated_document": "docs/FEATURE_STATUS.md",
   "status_values": ["planned", "development", "fixture_verified", "hardware_verified", "production"],
+  "visibility_values": ["normal", "expert", "hidden"],
   "rules": {
     "decoder_availability_requires": "recorded_iq_e2e",
-    "certified_hardware": ["sdrplay-rsp", "rtl-sdr"],
-    "normal_ui_minimum_status": "fixture_verified",
-    "merge_target": "main"
+    "certified_hardware": ["sdrplay-rsp"],
+    "normal_ui_minimum_status": "development",
+    "normal_ui_requires_gate_explanation_below": "fixture_verified",
+    "merge_target": "agent/ultrasdr-pulsescope-refactor",
+    "trusted_lan_open_by_default": true
   },
   "components": [
-    {"id": "receiver-session-recovery", "group": "receiver", "status": "development", "required": true, "evidence": ["state::recording_tests::receiver_supervisor_recovers_missing_stopped_and_stale_flows"]},
-    {"id": "sdrplay-rsp", "group": "hardware", "status": "hardware_verified", "required": true, "evidence": ["live RSP1B capture and reconnect tests"]},
-    {"id": "rtl-sdr", "group": "hardware", "status": "planned", "required": true, "evidence": []},
-    {"id": "spectrum", "group": "media", "status": "development", "required": true, "evidence": ["versioned binary spectrum unit test"]},
-    {"id": "webrtc-opus", "group": "media", "status": "planned", "required": true, "evidence": []},
-    {"id": "wfm-stereo-rds", "group": "dsp", "status": "development", "required": true, "evidence": ["RDS and deemphasis unit tests"]},
-    {"id": "web-pwa", "group": "client", "status": "development", "required": true, "evidence": ["Svelte check and production build"]},
-    {"id": "tauri-desktop", "group": "client", "status": "development", "required": true, "evidence": []},
-    {"id": "ios-capacitor", "group": "client", "status": "planned", "required": true, "evidence": []},
-    {"id": "android-capacitor", "group": "client", "status": "planned", "required": true, "evidence": []},
-    {"id": "decoder-platform", "group": "decoder", "status": "development", "required": true, "evidence": ["decoder catalog truthfulness regression"]},
-    {"id": "docker-appliance", "group": "packaging", "status": "development", "required": true, "evidence": ["multi-stage image build"]},
-    {"id": "security", "group": "operations", "status": "planned", "required": true, "evidence": []},
-    {"id": "backup-restore-rollback", "group": "operations", "status": "planned", "required": true, "evidence": []}
+    {
+      "id": "receiver-session-recovery", "name": "Receiver session recovery", "group": "receiver",
+      "status": "fixture_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Retune recovers in 700 ms and USB recovery in 20 s without restarting the service.",
+      "evidence": [{"type": "test", "ref": "state::recording_tests::receiver_supervisor_recovers_missing_stopped_and_stale_flows"}]
+    },
+    {
+      "id": "multi-device-registry", "name": "Multi-device registry and allocator", "group": "receiver",
+      "status": "planned", "visibility": "expert", "required": true,
+      "acceptance_gate": "Discover, select, allocate, and independently recover two simultaneous receivers.", "evidence": []
+    },
+    {
+      "id": "radio-device-contract", "name": "Versioned RadioDevice contract", "group": "receiver",
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Every control and capability is reported at runtime and unsupported controls are rejected.",
+      "evidence": [{"type": "test", "ref": "device::tests::capability_and_control_tests"}]
+    },
+    {
+      "id": "sdrplay-rsp", "name": "SDRplay RSP family", "group": "hardware",
+      "status": "hardware_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Eight-hour clean run and unplug/replug recovery; 72-hour RSP1B release soak.",
+      "evidence": [{"type": "hardware_run", "ref": "RSP1B live capture, 10 MSPS probe, gain and scanner verification", "date": "2026-08-13", "device": "RSP1B"}]
+    },
+    {
+      "id": "rtl-sdr", "name": "RTL-SDR family", "group": "hardware",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Physical RTL-SDR test at 2.4 MSPS plus clean 3.2 MSPS stability probe where supported.", "evidence": []
+    },
+    {
+      "id": "soapy-compatibility", "name": "SoapySDR compatibility tier", "group": "hardware",
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Capability-driven discovery, MTU-sized reads, controls, counters, and explicit compatibility label.",
+      "evidence": [{"type": "test", "ref": "device::tests"}]
+    },
+    {
+      "id": "airspy-hackrf", "name": "Airspy and HackRF", "group": "hardware",
+      "status": "planned", "visibility": "expert", "required": false,
+      "acceptance_gate": "Adapter integration tests and a physical-device eight-hour run per family.", "evidence": []
+    },
+    {
+      "id": "iio-pluto", "name": "PlutoSDR and libiio", "group": "hardware",
+      "status": "planned", "visibility": "expert", "required": false,
+      "acceptance_gate": "libiio adapter tests and a physical PlutoSDR eight-hour run.", "evidence": []
+    },
+    {
+      "id": "uhd-usrp", "name": "USRP and UHD", "group": "hardware",
+      "status": "planned", "visibility": "expert", "required": false,
+      "acceptance_gate": "UHD adapter tests and a physical USRP eight-hour run.", "evidence": []
+    },
+    {
+      "id": "extended-soapy-families", "name": "bladeRF, Lime, RX888, Fobos, FUNcube and Hydra", "group": "hardware",
+      "status": "planned", "visibility": "expert", "required": false,
+      "acceptance_gate": "Per-family capability audit, integration fixture, and physical-device certification before promotion.", "evidence": []
+    },
+    {
+      "id": "network-iq", "name": "KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ", "group": "hardware",
+      "status": "planned", "visibility": "expert", "required": false,
+      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests.", "evidence": []
+    },
+    {
+      "id": "spectrum-stream", "name": "Bounded binary spectrum stream", "group": "media",
+      "status": "fixture_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Sequence-numbered latest-frame stream remains below 500 ms frame age on LAN.",
+      "evidence": [{"type": "test", "ref": "api::tests::spectrum_binary_frame_has_versioned_header"}]
+    },
+    {
+      "id": "webrtc-opus", "name": "WebRTC Opus audio", "group": "media",
+      "status": "planned", "visibility": "hidden", "required": true,
+      "acceptance_gate": "20 ms Opus, FEC, no DTX, p95 start below 2 s, two-hour underrun-free LAN run.", "evidence": []
+    },
+    {
+      "id": "pcm-audio-fallback", "name": "PCM WebSocket audio fallback", "group": "media",
+      "status": "fixture_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "User-gesture start, advancing timestamps, bounded buffering, and automatic reconnect.",
+      "evidence": [{"type": "test", "ref": "api::tests::audio_frame_contract"}]
+    },
+    {
+      "id": "am-ssb-nfm", "name": "AM, USB, LSB and NFM demodulation", "group": "dsp",
+      "status": "fixture_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Deterministic fixtures meet frequency, bandwidth, level, and distortion limits.",
+      "evidence": [{"type": "test", "ref": "dsp::tests"}]
+    },
+    {
+      "id": "sam-cw", "name": "SAM and CW demodulation", "group": "dsp",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Recorded-IQ fixtures verify lock, pitch, passband, and recovery.", "evidence": []
+    },
+    {
+      "id": "wfm-stereo-rds", "name": "WFM stereo and RDS", "group": "dsp",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "THD+N below 1%, stereo separation above 30 dB, correct 50/75 us de-emphasis and RDS fixture.",
+      "evidence": [{"type": "test", "ref": "RDS and de-emphasis unit tests"}]
+    },
+    {
+      "id": "waterfall-renderer", "name": "Worker waterfall renderer", "group": "client",
+      "status": "fixture_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "50 FPS desktop, 30 FPS mobile, bounded queues and no normal main-thread task over 100 ms.",
+      "evidence": [{"type": "build", "ref": "OffscreenCanvas Canvas2D worker and runtime asset verifier"}]
+    },
+    {
+      "id": "webgl2-waterfall", "name": "WebGL2 waterfall acceleration", "group": "client",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "WebGL2 worker passes visual parity and performance tests with Canvas2D fallback.", "evidence": []
+    },
+    {
+      "id": "scanner-vfo-locking", "name": "Scanner and VFO signal locking", "group": "client",
+      "status": "hardware_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Stable deduplicated locks, held VFO state, event logging, and resume behavior on live RF.",
+      "evidence": [{"type": "hardware_run", "ref": "RSP1B FM raster scan and lock verification", "date": "2026-08-13", "device": "RSP1B"}]
+    },
+    {
+      "id": "mobile-pwa", "name": "Installable touch-first PWA", "group": "client",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Install, tune, listen, background/resume, saved station, and responsive browser tests on iOS and Android.",
+      "evidence": [{"type": "build", "ref": "manifest, service worker, Svelte production build"}]
+    },
+    {
+      "id": "tauri-desktop", "name": "Tauri desktop wrapper", "group": "client",
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Remote and managed-local server modes pass API conformance tests on Windows, macOS, and Linux.", "evidence": []
+    },
+    {
+      "id": "capacitor-mobile", "name": "Capacitor iOS and Android clients", "group": "client",
+      "status": "planned", "visibility": "hidden", "required": false,
+      "acceptance_gate": "Background audio, lock-screen controls, notifications, credentials, discovery, and deep links pass device tests.", "evidence": []
+    },
+    {
+      "id": "decoder-platform", "name": "Manifest decoder scheduler", "group": "decoder",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Checksummed manifests, resource limits, typed parameters, health/restart policy, and normalized events.",
+      "evidence": [{"type": "test", "ref": "decoder catalog truthfulness regression"}]
+    },
+    {
+      "id": "decoder-adsb-ais-aprs", "name": "ADS-B, AIS and APRS", "group": "decoder",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads.",
+      "evidence": [{"type": "test", "ref": "native decoder unit tests; recorded-IQ gate remains open"}]
+    },
+    {
+      "id": "decoder-rds", "name": "Broadcast RDS", "group": "decoder",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "RDS recovered from the same stereo multiplex fixture and verified live on broadcast FM.",
+      "evidence": [{"type": "test", "ref": "native RDS unit tests; recorded-IQ gate remains open"}]
+    },
+    {
+      "id": "decoder-digital-voice", "name": "DMR, P25, NXDN, D-Star, YSF and M17", "group": "decoder",
+      "status": "planned", "visibility": "normal", "required": true,
+      "acceptance_gate": "Continuous discriminator feed and per-mode recorded-IQ fixtures; encrypted calls only labeled.", "evidence": []
+    },
+    {
+      "id": "decoder-utility", "name": "rtl_433, ACARS, VDL2, paging and UAT", "group": "decoder",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Per-protocol recorded-IQ fixtures and normalized events.",
+      "evidence": [{"type": "test", "ref": "native and sidecar unit tests; recorded-IQ gate remains open"}]
+    },
+    {
+      "id": "decoder-hf", "name": "FT8, WSPR, JS8, CW, RTTY, NAVTEX, SSTV and WEFAX", "group": "decoder",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Per-protocol recorded-IQ/audio fixtures and normalized events.",
+      "evidence": [{"type": "test", "ref": "native and sidecar integration scaffolding; recorded-IQ gate remains open"}]
+    },
+    {
+      "id": "docker-appliance", "name": "Docker receiver appliance", "group": "packaging",
+      "status": "hardware_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Clean install, preflight, health, persistent data, upgrade and rollback on the acceptance laptop.",
+      "evidence": [{"type": "hardware_run", "ref": "pulsescope:0ee8545 healthy on RSP1B laptop", "date": "2026-08-13", "device": "RSP1B"}]
+    },
+    {
+      "id": "compose-profiles-preflight", "name": "Compose profiles and hardware preflight", "group": "packaging",
+      "status": "planned", "visibility": "expert", "required": true,
+      "acceptance_gate": "USB, permissions, speed, API compatibility, buffers, storage and ports checked before startup.", "evidence": []
+    },
+    {
+      "id": "guided-driver-install", "name": "Guided proprietary driver installation", "group": "packaging",
+      "status": "planned", "visibility": "expert", "required": true,
+      "acceptance_gate": "Pinned allowlisted packages show license, source, checksum, impact and support rollback.", "evidence": []
+    },
+    {
+      "id": "trusted-lan-security", "name": "Trusted LAN and optional secure access", "group": "operations",
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Open LAN default is explicit; optional TLS/token mode passes unauthorized-access and secret-storage tests.", "evidence": []
+    },
+    {
+      "id": "backup-restore-rollback", "name": "Backup, restore and rollback", "group": "operations",
+      "status": "planned", "visibility": "expert", "required": true,
+      "acceptance_gate": "Configuration, calibration, drivers, decoder settings, recordings and database restore into a clean install.", "evidence": []
+    },
+    {
+      "id": "system-health-readiness", "name": "Sample-flow health and readiness", "group": "operations",
+      "status": "fixture_verified", "visibility": "normal", "required": true,
+      "acceptance_gate": "Capture and FFT staleness fail readiness; audio reports muted/buffering/degraded without false crashes.",
+      "evidence": [{"type": "test", "ref": "system health and receiver supervisor tests"}]
+    },
+    {
+      "id": "api-v2-contract", "name": "Versioned API v2 contract", "group": "api",
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Devices, receivers, sessions, media, jobs, recordings, health, backup and update endpoints pass conformance tests.", "evidence": []
+    },
+    {
+      "id": "command-event-consistency", "name": "Idempotent commands and sequenced events", "group": "api",
+      "status": "planned", "visibility": "expert", "required": true,
+      "acceptance_gate": "Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time.", "evidence": []
+    }
   ]
 }

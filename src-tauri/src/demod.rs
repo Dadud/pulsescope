@@ -92,6 +92,100 @@ pub fn demodulate(
     out
 }
 
+/// Stateful broadcast-FM stereo multiplex decoder. Pilot phase is estimated
+/// from each 20 ms block, doubled for the 38 kHz DSB-SC channel, and blended
+/// toward mono when the 19 kHz pilot is weak. Four cascaded one-pole sections
+/// provide a stable 15 kHz audio boundary without block-edge state loss.
+#[derive(Clone, Debug)]
+pub struct WfmStereoState {
+    sample_clock: u64,
+    mono_filter: [f32; 4],
+    difference_filter: [f32; 4],
+    left_deemphasis: f32,
+    right_deemphasis: f32,
+    left_dc: f32,
+    right_dc: f32,
+}
+
+impl Default for WfmStereoState {
+    fn default() -> Self {
+        Self {
+            sample_clock: 0,
+            mono_filter: [0.0; 4],
+            difference_filter: [0.0; 4],
+            left_deemphasis: 0.0,
+            right_deemphasis: 0.0,
+            left_dc: 0.0,
+            right_dc: 0.0,
+        }
+    }
+}
+
+fn cascaded_low_pass(
+    sample: f32,
+    cutoff_hz: f32,
+    sample_rate_hz: u32,
+    states: &mut [f32; 4],
+) -> f32 {
+    let alpha = 1.0 - (-TAU * cutoff_hz / sample_rate_hz.max(1) as f32).exp();
+    let mut value = sample;
+    for state in states {
+        *state += alpha * (value - *state);
+        value = *state;
+    }
+    value
+}
+
+pub fn decode_wfm_stereo(
+    multiplex: &[f32],
+    sample_rate_hz: u32,
+    deemphasis_us: f32,
+    state: &mut WfmStereoState,
+) -> Vec<[f32; 2]> {
+    if multiplex.is_empty() || sample_rate_hz < 114_000 {
+        return Vec::new();
+    }
+    let pilot_step = TAU * 19_000.0 / sample_rate_hz as f32;
+    let mut pilot_i = 0.0;
+    let mut pilot_q = 0.0;
+    let mut power = 0.0;
+    for (index, &sample) in multiplex.iter().enumerate() {
+        let phase = pilot_step * (state.sample_clock + index as u64) as f32;
+        pilot_i += sample * phase.cos();
+        pilot_q += sample * phase.sin();
+        power += sample * sample;
+    }
+    let pilot_phase = (-pilot_q).atan2(pilot_i);
+    let pilot_amplitude = 2.0 * pilot_i.hypot(pilot_q) / multiplex.len() as f32;
+    let rms = (power / multiplex.len() as f32).sqrt().max(1e-6);
+    let blend = ((pilot_amplitude / rms - 0.025) / 0.12).clamp(0.0, 1.0);
+    let deemphasis_alpha =
+        1.0 - (-1.0 / (sample_rate_hz as f32 * deemphasis_us.max(1.0) * 1e-6)).exp();
+    let mut output = Vec::with_capacity(multiplex.len());
+    for (index, &sample) in multiplex.iter().enumerate() {
+        let phase = pilot_step * (state.sample_clock + index as u64) as f32 + pilot_phase;
+        let mono = cascaded_low_pass(sample, 15_000.0, sample_rate_hz, &mut state.mono_filter);
+        let translated = sample * 2.0 * (2.0 * phase).cos();
+        let difference = cascaded_low_pass(
+            translated,
+            15_000.0,
+            sample_rate_hz,
+            &mut state.difference_filter,
+        ) * blend;
+        let left = mono + difference;
+        let right = mono - difference;
+        state.left_deemphasis += deemphasis_alpha * (left - state.left_deemphasis);
+        state.right_deemphasis += deemphasis_alpha * (right - state.right_deemphasis);
+        let left_dc = state.left_deemphasis - state.left_dc;
+        let right_dc = state.right_deemphasis - state.right_dc;
+        state.left_dc = state.left_deemphasis * 0.995 + state.left_dc * 0.005;
+        state.right_dc = state.right_deemphasis * 0.995 + state.right_dc * 0.005;
+        output.push([left_dc.clamp(-1.0, 1.0), right_dc.clamp(-1.0, 1.0)]);
+    }
+    state.sample_clock = state.sample_clock.saturating_add(multiplex.len() as u64);
+    output
+}
+
 /// Translate a VFO offset to zero-IF while preserving oscillator phase.
 pub fn mix_down(
     input: &[Complex<f32>],
@@ -1588,5 +1682,32 @@ mod tests {
         }
         let decoded = decode_navtex(&samples, sample_rate).expect("NAVTEX should decode");
         assert_eq!(decoded, "HELLO", "decoded '{decoded}'");
+    }
+
+    #[test]
+    fn wfm_stereo_fixture_recovers_left_channel_with_separation() {
+        let rate = 192_000u32;
+        let count = rate as usize / 5;
+        let multiplex = (0..count)
+            .map(|index| {
+                let t = index as f32 / rate as f32;
+                let left = (TAU * 1_000.0 * t).sin() * 0.5;
+                let mono = left * 0.5;
+                let difference = left * 0.5;
+                mono + difference * (TAU * 38_000.0 * t).cos() + 0.1 * (TAU * 19_000.0 * t).cos()
+            })
+            .collect::<Vec<_>>();
+        let stereo = decode_wfm_stereo(&multiplex, rate, 75.0, &mut WfmStereoState::default());
+        let settled = &stereo[rate as usize / 20..];
+        let left_rms = (settled.iter().map(|frame| frame[0] * frame[0]).sum::<f32>()
+            / settled.len() as f32)
+            .sqrt();
+        let right_rms = (settled.iter().map(|frame| frame[1] * frame[1]).sum::<f32>()
+            / settled.len() as f32)
+            .sqrt();
+        assert!(
+            left_rms > right_rms * 10.0,
+            "stereo separation too low: left={left_rms} right={right_rms}"
+        );
     }
 }

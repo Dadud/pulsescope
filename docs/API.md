@@ -18,6 +18,48 @@ ws://127.0.0.1:8765
 |--------|-------------|-------------|
 | GET    | `/health`   | `{ status, name, version }` |
 
+## Version 2 control plane
+
+The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should use the `/api` namespace. It reports desired and actual receiver state separately. Mutating commands require a unique `command_id` and the last observed `expected_revision`; retries with the same command ID return the original response and stale revisions return HTTP 409.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v2/features` | Machine-readable release maturity, visibility, evidence, and open gates |
+| GET | `/api/v2/devices` | Discovered devices and active lifecycle |
+| GET | `/api/v2/devices/:id/capabilities` | Runtime RF ranges, rates, bandwidth, MTU, antennas, gains, and settings |
+| GET | `/api/v2/receivers` | Receiver desired/actual state and revision |
+| POST | `/api/v2/receivers/:id/tune` | `{ command_id, expected_revision, frequency_hz }` |
+| GET | `/api/v2/receivers/:id/controls` | Generated control contract plus actual values |
+| GET/POST | `/api/v2/sessions` | List or claim/release the physical receiver lease |
+| GET | `/api/v2/system/health` | Capture, FFT, VFO, audio, decoder, client, and recovery freshness |
+| GET | `/api/v2/decoders/catalog` | Truthful beta/installed decoder catalog and missing verification gate |
+| GET | `/api/v2/decoder-jobs` | Isolated decoder-process state |
+| GET | `/api/v2/recordings` | Active recording and persisted files |
+
+### Binary spectrum stream v3
+
+`ws(s)://host/api/v2/spectrum/stream` is a latest-frame-only stream. Every packet starts with a fixed 64-byte little-endian header followed by one unsigned byte per FFT bin. The floor and scale fields convert a bin with `floor_dbfs + byte * scale_db`.
+
+| Offset | Type | Meaning |
+|---:|---|---|
+| 0 | `[u8;4]` | `PSF3` |
+| 4 | `u16` | protocol version 3 |
+| 6 | `u16` | flags |
+| 8 | `u64` | frame sequence |
+| 16 | `i64` | capture Unix time in milliseconds |
+| 24 | `u64` | capture center frequency Hz |
+| 32 | `u32` | sample rate Hz |
+| 36 | `u32` | usable span Hz |
+| 40 | `u32` | bin count |
+| 44 | `f32` | floor dBFS |
+| 48 | `f32` | dB per integer step |
+| 52 | `u32` | receiver ID (`0` = `receiver-0`) |
+| 56 | `u64` | receiver-session revision |
+
+### Browser PCM compatibility stream
+
+`/audio/stream` remains the fallback until WebRTC parity is complete. Frames are 20 ms, 48 kHz float PCM. General receiver audio is mono; WFM with one audible VFO is stereo. The browser batches three wire frames for a 60 ms scheduling cadence and owns the LAN jitter buffer.
+
 ## Settings
 
 | Method | Path         | Description |

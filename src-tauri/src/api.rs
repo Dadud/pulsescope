@@ -67,7 +67,16 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/v2/system/health", get(system_health_v2))
+        .route("/v2/features", get(feature_status_v2))
+        .route("/v2/devices", get(devices_v2))
+        .route("/v2/devices/:id/capabilities", get(device_capabilities_v2))
+        .route("/v2/receivers", get(receivers_v2))
+        .route("/v2/receivers/:id/tune", post(receiver_tune_v2))
+        .route("/v2/receivers/:id/controls", get(receiver_controls_v2))
+        .route("/v2/sessions", get(sessions_v2).post(session_command_v2))
         .route("/v2/decoders/catalog", get(decoder_catalog_v2))
+        .route("/v2/decoder-jobs", get(decoder_jobs_v2))
+        .route("/v2/recordings", get(recordings_v2))
         .route("/settings", get(get_settings).put(put_settings))
         // ── device ───────────────────────────────────────────────────────
         .route("/devices", get(list_devices))
@@ -658,6 +667,237 @@ async fn system_health_v2(State(s): State<ApiState>) -> impl IntoResponse {
     }))
 }
 
+async fn feature_status_v2() -> impl IntoResponse {
+    // Embedded at build time so the running server and documentation use the
+    // exact same release contract. Docker copies `release/` into the builder.
+    let contract: Value =
+        serde_json::from_str(include_str!("../../release/acceptance-matrix.json"))
+            .expect("release acceptance matrix must be valid JSON");
+    Json(contract)
+}
+
+fn stable_device_id(
+    status: &crate::device::DeviceStatus,
+    capabilities: &crate::device::DeviceCapabilities,
+) -> String {
+    if !capabilities.identity.stable_id.trim().is_empty() {
+        capabilities.identity.stable_id.clone()
+    } else {
+        format!("{}:active", status.driver)
+    }
+}
+
+async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let status = s.0.device.status();
+    let capabilities = s.0.device.capabilities();
+    let active_id = stable_device_id(&status, &capabilities);
+    let discovered = crate::device::DeviceLayer::discover().into_iter().map(|device| {
+        let is_active = status.connected && (device.driver == status.driver || device.key == s.0.config.read().device.last_device_key);
+        json!({
+            "id": if is_active { active_id.clone() } else { device.hardware_key.clone() },
+            "driver": device.driver,
+            "label": device.label,
+            "connection": "local_usb",
+            "active": is_active,
+            "lifecycle": if is_active { serde_json::to_value(status.lifecycle).unwrap_or(json!("disconnected")) } else { json!("detected") },
+            "certification": if is_active && status.driver == "sdrplay" { "hardware_verified" } else { "compatibility" }
+        })
+    }).collect::<Vec<_>>();
+    Json(json!({"contract_version": 2, "active_device_id": active_id, "devices": discovered}))
+}
+
+async fn device_capabilities_v2(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let status = s.0.device.status();
+    let capabilities = s.0.device.capabilities();
+    if id != stable_device_id(&status, &capabilities) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"device is not active","device_id":id})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(json!({"contract_version":2,"device_id":id,"status":status,"capabilities":capabilities}))).into_response()
+}
+
+async fn receivers_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let status = s.0.device.status();
+    let runtime =
+        s.0.scanner
+            .read()
+            .as_ref()
+            .map(|handle| handle.state.lock().clone());
+    let session = s.0.receiver_session.lock().clone();
+    Json(json!({"contract_version":2,"receivers":[{
+        "id":"receiver-0", "device_id":stable_device_id(&status, &s.0.device.capabilities()),
+        "desired":{"running":runtime.as_ref().is_some_and(|state| state.running)},
+        "actual":{"running":runtime.as_ref().is_some_and(|state| state.running),"center_frequency_hz":status.center_freq_hz,"sample_rate_hz":status.sample_rate,"bandwidth_hz":status.bandwidth_hz,"vfos":runtime.map(|state| state.vfo_states).unwrap_or_default()},
+        "revision":session.revision
+    }]}))
+}
+
+#[derive(Deserialize)]
+struct ReceiverTuneV2Req {
+    command_id: String,
+    expected_revision: u64,
+    frequency_hz: u64,
+}
+
+fn cached_command(s: &ApiState, command_id: &str) -> Option<Value> {
+    s.0.command_results.lock().get(command_id).cloned()
+}
+
+fn remember_command(s: &ApiState, command_id: String, result: Value) {
+    let mut commands = s.0.command_results.lock();
+    if commands.len() >= 1024 {
+        commands.clear();
+    }
+    commands.insert(command_id, result);
+}
+
+async fn receiver_tune_v2(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<ReceiverTuneV2Req>,
+) -> impl IntoResponse {
+    if id != "receiver-0" {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"unknown receiver"})),
+        )
+            .into_response();
+    }
+    if req.command_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"command_id is required"})),
+        )
+            .into_response();
+    }
+    if let Some(result) = cached_command(&s, &req.command_id) {
+        return (StatusCode::OK, Json(result)).into_response();
+    }
+    let revision = s.0.receiver_session.lock().revision;
+    if req.expected_revision != revision {
+        return (StatusCode::CONFLICT, Json(json!({"error":"stale revision","expected":revision,"received":req.expected_revision}))).into_response();
+    }
+    let result = match s.0.device.set_frequency(req.frequency_hz) {
+        Ok(()) => {
+            json!({"ok":true,"command_id":req.command_id,"receiver_id":id,"actual_frequency_hz":s.0.device.status().center_freq_hz,"revision":revision})
+        }
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok":false,"error":error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    remember_command(&s, req.command_id, result.clone());
+    (StatusCode::OK, Json(result)).into_response()
+}
+
+async fn receiver_controls_v2(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if id != "receiver-0" {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"unknown receiver"})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(json!({"contract_version":2,"receiver_id":id,"capabilities":s.0.device.capabilities(),"actual":s.0.device.status()}))).into_response()
+}
+
+async fn sessions_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(
+        json!({"contract_version":2,"sessions":[{"id":"primary","receiver_id":"receiver-0","state":s.0.receiver_session.lock().clone()}]}),
+    )
+}
+
+#[derive(Deserialize)]
+struct SessionCommandV2Req {
+    command_id: String,
+    expected_revision: u64,
+    action: String,
+    owner: String,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn session_command_v2(
+    State(s): State<ApiState>,
+    Json(req): Json<SessionCommandV2Req>,
+) -> impl IntoResponse {
+    if req.command_id.trim().is_empty() || req.owner.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"command_id and owner are required"})),
+        )
+            .into_response();
+    }
+    if let Some(result) = cached_command(&s, &req.command_id) {
+        return (StatusCode::OK, Json(result)).into_response();
+    }
+    let mut session = s.0.receiver_session.lock();
+    if req.expected_revision != session.revision {
+        return (StatusCode::CONFLICT, Json(json!({"error":"stale revision","expected":session.revision,"received":req.expected_revision}))).into_response();
+    }
+    let operation = match req.action.as_str() {
+        "claim" => session.claim(&req.owner, req.force),
+        "release" => {
+            session.release(&req.owner);
+            Ok(())
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"action must be claim or release"})),
+            )
+                .into_response()
+        }
+    };
+    if let Err(error) = operation {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok":false,"error":error,"session":session.clone()})),
+        )
+            .into_response();
+    }
+    let result = json!({"ok":true,"command_id":req.command_id,"session":session.clone()});
+    drop(session);
+    remember_command(&s, req.command_id, result.clone());
+    (StatusCode::OK, Json(result)).into_response()
+}
+
+async fn decoder_jobs_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(
+        json!({"contract_version":2,"jobs":s.0.sidecars.statuses(),"scheduler":{"isolation":"process","arbitrary_client_commands":false}}),
+    )
+}
+
+async fn recordings_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let path = s.0.data_dir.join("recordings");
+    let recordings = std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(
+                || json!({"name":entry.file_name().to_string_lossy(),"size_bytes":metadata.len()}),
+            )
+        })
+        .collect::<Vec<_>>();
+    Json(
+        json!({"contract_version":2,"active":s.0.recording.lock().status(),"recordings":recordings}),
+    )
+}
+
 async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
     let mut decoders = vec![
         decoder_development_entry("adsb", "ADS-B / Mode S", "iq", "live"),
@@ -665,6 +905,20 @@ async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
         decoder_development_entry("aprs", "APRS / AX.25", "audio", "on_demand"),
         decoder_development_entry("pocsag", "POCSAG", "audio", "on_demand"),
         decoder_development_entry("rds", "Broadcast RDS", "wfm_multiplex", "on_demand"),
+        decoder_development_entry("uat", "978 UAT", "iq", "on_demand"),
+        decoder_development_entry("acars", "ACARS", "audio", "managed_sidecar"),
+        decoder_development_entry("vdl2", "VDL Mode 2", "iq", "managed_sidecar"),
+        decoder_development_entry("rtl433", "rtl_433 sensors", "iq", "managed_sidecar"),
+        decoder_development_entry("ft8", "FT8 / FT4", "audio", "managed_sidecar"),
+        decoder_development_entry("wspr", "WSPR", "audio", "managed_sidecar"),
+        decoder_development_entry("rtty", "RTTY / FSK", "audio", "on_demand"),
+        decoder_development_entry("navtex", "NAVTEX", "audio", "on_demand"),
+        decoder_development_entry("dmr", "DMR", "discriminator", "managed_sidecar"),
+        decoder_development_entry("p25", "P25", "discriminator", "managed_sidecar"),
+        decoder_development_entry("nxdn", "NXDN", "discriminator", "managed_sidecar"),
+        decoder_development_entry("dstar", "D-Star", "discriminator", "planned_sidecar"),
+        decoder_development_entry("ysf", "YSF", "discriminator", "planned_sidecar"),
+        decoder_development_entry("m17", "M17", "discriminator", "planned_sidecar"),
     ];
     for decoder in
         s.0.sidecars
@@ -976,6 +1230,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         return Json(json!({"ok": true}));
     }
     let cfg = s.0.config.read().scanner.clone();
+    let wfm_deemphasis_us = s.0.config.read().demodulator.de_emphasis_us;
     let dependencies = crate::scanner::ScannerDependencies {
         device: s.0.device.clone(),
         db: s.0.db.clone(),
@@ -986,6 +1241,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         sidecars: s.0.sidecars.clone(),
         events_tx: s.0.events.clone(),
         spectrum_tx: s.0.spectrum.clone(),
+        wfm_deemphasis_us,
     };
     let handle = crate::scanner::ScannerHandle::spawn(cfg, dependencies);
     *s.0.scanner.write() = Some(handle);
@@ -2483,16 +2739,16 @@ async fn audio_stream(State(s): State<ApiState>, ws: WebSocketUpgrade) -> impl I
     ws.on_upgrade(move |socket| audio_stream_pump(socket, audio, receiver))
 }
 
-const SPECTRUM_WIRE_VERSION: u16 = 2;
-const SPECTRUM_HEADER_BYTES: usize = 52;
+const SPECTRUM_WIRE_VERSION: u16 = 3;
+const SPECTRUM_HEADER_BYTES: usize = 64;
 
-fn encode_spectrum_frame(frame: &SpectrumFrame) -> Vec<u8> {
+fn encode_spectrum_frame(frame: &SpectrumFrame, session_revision: u64) -> Vec<u8> {
     // Half-dB quantization spans -140 dBFS through -12.5 dBFS. Stronger bins
     // saturate cleanly; the fixed scale prevents waterfall colors pumping.
     let floor_dbfs = -140.0f32;
     let scale_db = 0.5f32;
     let mut packet = Vec::with_capacity(SPECTRUM_HEADER_BYTES + frame.bins_dbfs.len());
-    packet.extend_from_slice(b"PSF2");
+    packet.extend_from_slice(b"PSF3");
     packet.extend_from_slice(&SPECTRUM_WIRE_VERSION.to_le_bytes());
     packet.extend_from_slice(&0u16.to_le_bytes());
     packet.extend_from_slice(&frame.sequence.to_le_bytes());
@@ -2503,6 +2759,11 @@ fn encode_spectrum_frame(frame: &SpectrumFrame) -> Vec<u8> {
     packet.extend_from_slice(&(frame.bins_dbfs.len() as u32).to_le_bytes());
     packet.extend_from_slice(&floor_dbfs.to_le_bytes());
     packet.extend_from_slice(&scale_db.to_le_bytes());
+    // Numeric receiver identity is stable within this server contract. The
+    // session revision changes on claim/release and lets clients discard
+    // frames from a previous ownership epoch after an atomic takeover.
+    packet.extend_from_slice(&0u32.to_le_bytes()); // receiver-0
+    packet.extend_from_slice(&session_revision.to_le_bytes());
     packet.extend(
         frame
             .bins_dbfs
@@ -2513,18 +2774,19 @@ fn encode_spectrum_frame(frame: &SpectrumFrame) -> Vec<u8> {
 }
 
 async fn spectrum_stream_ws(State(s): State<ApiState>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    let tx = s.0.spectrum.clone();
-    ws.on_upgrade(move |socket| spectrum_ws_pump(socket, tx))
+    let state = s.0.clone();
+    ws.on_upgrade(move |socket| spectrum_ws_pump(socket, state))
 }
 
-async fn spectrum_ws_pump(socket: WebSocket, tx: tokio::sync::watch::Sender<SpectrumFrame>) {
+async fn spectrum_ws_pump(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
-    let mut frames = tx.subscribe();
+    let mut frames = state.spectrum.subscribe();
     loop {
         tokio::select! {
             changed = frames.changed() => {
                 if changed.is_err() { break; }
-                let packet = encode_spectrum_frame(&frames.borrow_and_update().clone());
+                let revision = state.receiver_session.lock().revision;
+                let packet = encode_spectrum_frame(&frames.borrow_and_update().clone(), revision);
                 if sender.send(Message::Binary(packet)).await.is_err() { break; }
             }
             incoming = receiver.next() => {
@@ -3551,18 +3813,23 @@ mod spectrum_wire_tests {
 
     #[test]
     fn binary_frame_has_versioned_header_and_fixed_quantization() {
-        let packet = encode_spectrum_frame(&SpectrumFrame {
-            sequence: 7,
-            captured_ms: 1234,
-            center_freq_hz: 100_700_000,
-            sample_rate_hz: 2_000_000,
-            usable_span_hz: 1_800_000,
-            bins_dbfs: vec![-140.0, -100.0, -12.5, 0.0],
-        });
-        assert_eq!(&packet[..4], b"PSF2");
-        assert_eq!(u16::from_le_bytes(packet[4..6].try_into().unwrap()), 2);
+        let packet = encode_spectrum_frame(
+            &SpectrumFrame {
+                sequence: 7,
+                captured_ms: 1234,
+                center_freq_hz: 100_700_000,
+                sample_rate_hz: 2_000_000,
+                usable_span_hz: 1_800_000,
+                bins_dbfs: vec![-140.0, -100.0, -12.5, 0.0],
+            },
+            11,
+        );
+        assert_eq!(&packet[..4], b"PSF3");
+        assert_eq!(u16::from_le_bytes(packet[4..6].try_into().unwrap()), 3);
         assert_eq!(u64::from_le_bytes(packet[8..16].try_into().unwrap()), 7);
         assert_eq!(u32::from_le_bytes(packet[40..44].try_into().unwrap()), 4);
+        assert_eq!(u32::from_le_bytes(packet[52..56].try_into().unwrap()), 0);
+        assert_eq!(u64::from_le_bytes(packet[56..64].try_into().unwrap()), 11);
         assert_eq!(packet.len(), SPECTRUM_HEADER_BYTES + 4);
         assert_eq!(&packet[SPECTRUM_HEADER_BYTES..], &[0, 80, 255, 255]);
     }

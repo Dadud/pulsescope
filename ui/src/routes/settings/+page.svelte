@@ -195,6 +195,7 @@
 
     <section class="card">
       <h2>Audio</h2>
+      <label class="row"><span>Broadcast FM de-emphasis<small>75 µs for the Americas; 50 µs for most other regions.</small></span><select bind:value={cfg.demodulator.de_emphasis_us}><option value={75}>75 µs</option><option value={50}>50 µs</option></select></label>
       <div class="row">
         <label for="master-volume">Master volume</label>
         <input id="master-volume" type="range" min="0" max="1" step="0.01" bind:value={cfg.audio.master_volume} />

@@ -129,6 +129,27 @@ pub struct DeviceCapabilities {
     pub frequency_correction_ppm: f64,
 }
 
+/// Versioned hardware boundary used by capture, allocation, API, and future
+/// native/network adapters. `DeviceLayer` is the first implementation and
+/// continues to own the proven Soapy hot path while callers migrate from the
+/// concrete type. Adapters must report capabilities; model-name guessing is
+/// deliberately not part of this contract.
+pub trait RadioDevice: Send + Sync {
+    fn contract_version(&self) -> u16 {
+        2
+    }
+    fn status(&self) -> DeviceStatus;
+    fn capabilities(&self) -> DeviceCapabilities;
+    fn connect(&self, key: &str) -> anyhow::Result<()>;
+    fn disconnect(&self) -> anyhow::Result<()>;
+    fn recover(&self) -> anyhow::Result<()>;
+    fn set_frequency(&self, frequency_hz: u64) -> anyhow::Result<()>;
+    fn set_sample_contract(&self, sample_rate_hz: u32) -> anyhow::Result<u32>;
+    fn set_gain(&self, gain: String) -> anyhow::Result<()>;
+    fn set_control(&self, control: &str, value: &str) -> anyhow::Result<()>;
+    fn read_iq(&self, sample_count: usize) -> anyhow::Result<Vec<Complex<f32>>>;
+}
+
 #[derive(Default)]
 struct StreamCounters {
     read_calls: AtomicU64,
@@ -1244,6 +1265,39 @@ impl DeviceLayer {
         *phase += count as f32;
         drop(phase);
         self.observe_read(count, Ok(samples))
+    }
+}
+
+impl RadioDevice for DeviceLayer {
+    fn status(&self) -> DeviceStatus {
+        DeviceLayer::status(self)
+    }
+    fn capabilities(&self) -> DeviceCapabilities {
+        DeviceLayer::capabilities(self)
+    }
+    fn connect(&self, key: &str) -> anyhow::Result<()> {
+        DeviceLayer::connect(self, key)
+    }
+    fn disconnect(&self) -> anyhow::Result<()> {
+        DeviceLayer::disconnect(self)
+    }
+    fn recover(&self) -> anyhow::Result<()> {
+        DeviceLayer::recover(self)
+    }
+    fn set_frequency(&self, frequency_hz: u64) -> anyhow::Result<()> {
+        DeviceLayer::set_frequency(self, frequency_hz)
+    }
+    fn set_sample_contract(&self, sample_rate_hz: u32) -> anyhow::Result<u32> {
+        DeviceLayer::set_sample_contract(self, sample_rate_hz)
+    }
+    fn set_gain(&self, gain: String) -> anyhow::Result<()> {
+        DeviceLayer::set_gain(self, gain)
+    }
+    fn set_control(&self, control: &str, value: &str) -> anyhow::Result<()> {
+        DeviceLayer::set_control(self, control, value)
+    }
+    fn read_iq(&self, sample_count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
+        DeviceLayer::read_iq(self, sample_count)
     }
 }
 

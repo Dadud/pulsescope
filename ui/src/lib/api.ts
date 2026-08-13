@@ -103,6 +103,8 @@ export interface SpectrumStreamFrame {
   sampleRateHz: number;
   usableSpanHz: number;
   bins: number[];
+  receiverId: number;
+  sessionRevision: number;
 }
 
 const LIVE_REQUEST_TIMEOUT_MS = 5_000;
@@ -208,22 +210,24 @@ export function openSpectrum(
   ws.onclose = () => onState?.('closed');
   ws.onerror = () => onState?.('error');
   ws.onmessage = (event) => {
-    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 52) return;
+    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 64) return;
     const bytes = new Uint8Array(event.data);
-    if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'PSF2') return;
+    if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'PSF3') return;
     const view = new DataView(event.data);
-    if (view.getUint16(4, true) !== 2) return;
+    if (view.getUint16(4, true) !== 3) return;
     const count = view.getUint32(40, true);
-    if (52 + count !== event.data.byteLength) return;
+    if (64 + count !== event.data.byteLength) return;
     const floor = view.getFloat32(44, true);
     const scale = view.getFloat32(48, true);
-    const bins = Array.from(bytes.subarray(52), (value) => floor + value * scale);
+    const bins = Array.from(bytes.subarray(64), (value) => floor + value * scale);
     onFrame({
       sequence: Number(view.getBigUint64(8, true)),
       capturedMs: Number(view.getBigInt64(16, true)),
       centerFreqHz: Number(view.getBigUint64(24, true)),
       sampleRateHz: view.getUint32(32, true),
       usableSpanHz: view.getUint32(36, true),
+      receiverId: view.getUint32(52, true),
+      sessionRevision: Number(view.getBigUint64(56, true)),
       bins,
     });
   };
@@ -353,6 +357,8 @@ export const Api = {
   transcriptionStop: () => postJson('/transcription/stop'),
 
   featurePacks: () => getJson('/feature-packs'),
+  decoderCatalogV2: () => getJson<{ contract_version: number; decoders: any[] }>('/api/v2/decoders/catalog'),
+  featureStatusV2: () => getJson('/api/v2/features'),
   featurePackEnable: (id: string, enabled: boolean) => postJson(`/feature-packs/${encodeURIComponent(id)}/enable`, { enabled }),
   sidecarsStatus: () => getJson<any[]>('/sidecars/status'),
   sidecarStderr: (name: string) => getJson<string[]>(`/sidecars/${encodeURIComponent(name)}/stderr`),

@@ -35,6 +35,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Enforce Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Enforce warning-free headless server
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --all-targets -- -D warnings
+
       - name: Test headless radio server
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --lib
 

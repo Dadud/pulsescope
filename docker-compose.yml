@@ -1,4 +1,19 @@
 services:
+  preflight:
+    build:
+      context: .
+    image: pulsescope:local
+    profiles: ["preflight"]
+    user: root
+    entrypoint: ["/bin/sh", "/usr/local/lib/pulsescope/preflight.sh"]
+    volumes:
+      - pulsescope-data:/var/lib/pulsescope
+      - sdr-drivers:/opt/pulsescope/drivers:ro
+      - /dev/bus/usb:/dev/bus/usb
+      - /dev/shm:/dev/shm
+    device_cgroup_rules:
+      - "c 189:* rwm"
+
   pulsescope:
     build:
       context: .

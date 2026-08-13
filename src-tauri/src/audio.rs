@@ -46,6 +46,7 @@ pub struct AudioSink {
     started: Arc<Mutex<bool>>,
     remote_tx: broadcast::Sender<AudioFrame>,
     remote_accumulator: Arc<Mutex<VecDeque<f32>>>,
+    remote_channels: Arc<Mutex<u16>>,
     remote_sequence: Arc<AtomicU64>,
     remote_frames: Arc<AtomicU64>,
     remote_lagged_frames: Arc<AtomicU64>,
@@ -90,6 +91,7 @@ impl AudioSink {
             started: Arc::new(Mutex::new(false)),
             remote_tx,
             remote_accumulator: Arc::new(Mutex::new(VecDeque::with_capacity(48_000))),
+            remote_channels: Arc::new(Mutex::new(1)),
             remote_sequence: Arc::new(AtomicU64::new(0)),
             remote_frames: Arc::new(AtomicU64::new(0)),
             remote_lagged_frames: Arc::new(AtomicU64::new(0)),
@@ -200,7 +202,7 @@ impl AudioSink {
             .iter()
             .map(|sample| (sample * gain).clamp(-1.0, 1.0))
             .collect();
-        self.push_remote(&scaled);
+        self.push_remote(&scaled, 1);
         self.pushed_samples
             .fetch_add(samples.len() as u64, Ordering::Relaxed);
 
@@ -220,10 +222,51 @@ impl AudioSink {
         }
     }
 
-    fn push_remote(&self, samples: &[f32]) {
+    /// Push interleaved browser audio while preserving the mono local-output
+    /// contract. Used by WFM stereo; other modes remain mono.
+    pub fn push_interleaved(&self, samples: &[f32], channels: u16, volume: f32) {
+        let channels = channels.max(1);
+        if !samples.len().is_multiple_of(channels as usize) {
+            return;
+        }
+        let gain = volume.clamp(0.0, 1.0);
+        let scaled = samples
+            .iter()
+            .map(|sample| (sample * gain).clamp(-1.0, 1.0))
+            .collect::<Vec<_>>();
+        self.push_remote(&scaled, channels);
+        self.pushed_samples.fetch_add(
+            (samples.len() / channels as usize) as u64,
+            Ordering::Relaxed,
+        );
+        if std::env::var("PULSESCOPE_AUDIO_OUTPUT").as_deref() == Ok("0") {
+            return;
+        }
+        let mono = scaled
+            .chunks(channels as usize)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect::<Vec<_>>();
+        self.start();
+        let mut queue = self.queue.lock();
+        for sample in mono {
+            if queue.len() >= MAX_QUEUE_SAMPLES {
+                queue.pop_front();
+            }
+            queue.push_back(sample);
+        }
+    }
+
+    fn push_remote(&self, samples: &[f32], channels: u16) {
         let sample_rate = self.sample_rate().max(1);
-        let frame_samples =
-            ((sample_rate as u64 * REMOTE_FRAME_MILLIS as u64) / 1_000).max(1) as usize;
+        let frame_samples = ((sample_rate as u64 * REMOTE_FRAME_MILLIS as u64) / 1_000).max(1)
+            as usize
+            * channels as usize;
+        let mut current_channels = self.remote_channels.lock();
+        if *current_channels != channels {
+            self.remote_accumulator.lock().clear();
+            *current_channels = channels;
+        }
+        drop(current_channels);
         let mut pending = self.remote_accumulator.lock();
         pending.extend(samples.iter().copied());
         while pending.len() >= frame_samples {
@@ -233,7 +276,7 @@ impl AudioSink {
             let frame = AudioFrame {
                 sequence,
                 sample_rate,
-                channels: 1,
+                channels,
                 captured_ms,
                 samples,
             };
@@ -452,7 +495,7 @@ mod tests {
     fn browser_stream_emits_exact_twenty_millisecond_frames() {
         let sink = AudioSink::new();
         let mut receiver = sink.subscribe();
-        sink.push_remote(&vec![0.25; 1_920]);
+        sink.push_remote(&vec![0.25; 1_920], 1);
         let first = receiver.try_recv().expect("first browser PCM frame");
         let second = receiver.try_recv().expect("second browser PCM frame");
         assert_eq!(first.sample_rate, 48_000);
@@ -460,5 +503,16 @@ mod tests {
         assert_eq!(first.samples.len(), 960);
         assert_eq!(second.sequence, first.sequence + 1);
         assert_eq!(sink.remote_frames(), 2);
+    }
+
+    #[test]
+    fn browser_stream_preserves_twenty_millisecond_stereo_frames() {
+        let sink = AudioSink::new();
+        let mut receiver = sink.subscribe();
+        sink.push_interleaved(&vec![0.25; 1_920], 2, 1.0);
+        let frame = receiver.try_recv().expect("stereo browser PCM frame");
+        assert_eq!(frame.sample_rate, 48_000);
+        assert_eq!(frame.channels, 2);
+        assert_eq!(frame.samples.len(), 1_920);
     }
 }

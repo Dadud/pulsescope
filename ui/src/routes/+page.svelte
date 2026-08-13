@@ -36,6 +36,7 @@
   let waterfallPixels: Uint8ClampedArray | null = null;
   let waterfallImage: ImageData | null = null;
   let waterfallWorker: Worker | null = null;
+  let waterfallRenderer = $state('canvas2d');
   let drawPending = false;
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
@@ -108,6 +109,8 @@
 
   function applyVfos(nextVfos: VfoState[]) {
     vfos = nextVfos;
+    const audible = nextVfos.find((vfo) => !vfo.muted) ?? nextVfos[0];
+    if (audible) browserAudio?.setMetadata(`${(audible.frequency_hz / 1e6).toFixed(5)} MHz · ${audible.mode.toUpperCase()}`, activeRange ?? 'PulseScope receiver');
     // A band/profile change intentionally creates a muted VFO. Tear down the
     // old audio subscription instead of continuing to claim "Playing" while
     // the backend has correctly stopped producing frames.
@@ -419,6 +422,7 @@
       if (!waterfallWorker) {
         const offscreen = waterfallCanvas.transferControlToOffscreen();
         waterfallWorker = new Worker(new URL('../lib/waterfall-worker.ts', import.meta.url), { type: 'module' });
+        waterfallWorker.onmessage = (event) => { if (event.data?.type === 'ready') waterfallRenderer = event.data.renderer; };
         waterfallWorker.postMessage({ canvas: offscreen, width: 900, height: 180 }, [offscreen]);
       }
       waterfallWorker.postMessage({ bins: spectrumBins, gain: waterfallGain, palette: waterfallPalette });
@@ -821,7 +825,7 @@
       <p class="interaction-help">{spectrumTool === 'vfo' ? 'Click a signal to move only the listening VFO inside the current RF window. Scroll to move the whole window.' : 'Click or drag to move the entire sampled RF window without changing the listening VFO.'}</p>
       <canvas class:center-mode={spectrumTool === 'center'} bind:this={canvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)} aria-label={spectrumTool === 'center' ? 'Spectrum center control. Click or drag to change center frequency; use arrow keys for fine adjustment.' : 'Spectrum tuner. Click to tune VFO 0; scroll to pan center frequency; use arrow keys to fine tune.'} title={spectrumTool === 'center' ? 'Click or drag to move the receiver center' : 'Click to tune VFO 0; scroll to pan'}></canvas>
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
-      <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
+      <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history <small>{waterfallRenderer}</small></h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} bind:this={waterfallCanvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Scroll to pan the receiver center; select Move center to click or drag."></canvas>
       {#if scanRunning && activeBank}
         <div class="scan-progress" role="status"><span><b>Scanning {activeBank.name}</b><small>{fmtHz(activeBank.start_hz)} – {fmtHz(activeBank.end_hz)}</small></span><div class="scan-track"><i style={`width:${scanProgress}%`}></i></div><strong>{scanProgress.toFixed(0)}%</strong></div>

@@ -38,6 +38,7 @@ RUN apt-get update \
 
 WORKDIR /build
 COPY src-tauri src-tauri
+COPY release release
 
 RUN cargo build \
     --manifest-path src-tauri/Cargo.toml \
@@ -77,6 +78,7 @@ RUN groupadd --gid 500 pulsescope \
 
 COPY --from=server-builder /build/src-tauri/target/release/pulsescope /usr/local/bin/pulsescope
 COPY --from=ui-builder /build/ui/build /app/ui
+COPY deploy/preflight.sh /usr/local/lib/pulsescope/preflight.sh
 
 USER pulsescope
 WORKDIR /app
