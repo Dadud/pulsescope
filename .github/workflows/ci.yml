@@ -27,8 +27,8 @@ jobs:
 
       - name: Check and build web client
         run: |
-          pnpm --filter pulsescope-ui check
-          pnpm --filter pulsescope-ui build
+          pnpm check
+          pnpm build
 
       - name: Install headless server dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev

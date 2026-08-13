@@ -4,8 +4,10 @@
   "license": "MIT",
   "scripts": {
     "dev": "pnpm --filter pulsescope-ui dev",
+    "check": "pnpm --filter pulsescope-ui check && pnpm verify:release",
     "build": "pnpm --filter pulsescope-ui build && pnpm verify:ui-runtime",
     "verify:ui-runtime": "node scripts/verify-ui-runtime.mjs",
+    "verify:release": "node scripts/verify-release-contract.mjs",
     "preview": "pnpm --filter pulsescope-ui preview",
     "tauri": "tauri",
     "tauri:dev": "pnpm exec tauri dev",

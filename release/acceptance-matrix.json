@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "product": "PulseScope",
+  "release": "1.0.0",
+  "status_values": ["planned", "development", "fixture_verified", "hardware_verified", "production"],
+  "rules": {
+    "decoder_availability_requires": "recorded_iq_e2e",
+    "certified_hardware": ["sdrplay-rsp", "rtl-sdr"],
+    "normal_ui_minimum_status": "fixture_verified",
+    "merge_target": "main"
+  },
+  "components": [
+    {"id": "receiver-session-recovery", "group": "receiver", "status": "development", "required": true, "evidence": ["state::recording_tests::receiver_supervisor_recovers_missing_stopped_and_stale_flows"]},
+    {"id": "sdrplay-rsp", "group": "hardware", "status": "hardware_verified", "required": true, "evidence": ["live RSP1B capture and reconnect tests"]},
+    {"id": "rtl-sdr", "group": "hardware", "status": "planned", "required": true, "evidence": []},
+    {"id": "spectrum", "group": "media", "status": "development", "required": true, "evidence": ["versioned binary spectrum unit test"]},
+    {"id": "webrtc-opus", "group": "media", "status": "planned", "required": true, "evidence": []},
+    {"id": "wfm-stereo-rds", "group": "dsp", "status": "development", "required": true, "evidence": ["RDS and deemphasis unit tests"]},
+    {"id": "web-pwa", "group": "client", "status": "development", "required": true, "evidence": ["Svelte check and production build"]},
+    {"id": "tauri-desktop", "group": "client", "status": "development", "required": true, "evidence": []},
+    {"id": "ios-capacitor", "group": "client", "status": "planned", "required": true, "evidence": []},
+    {"id": "android-capacitor", "group": "client", "status": "planned", "required": true, "evidence": []},
+    {"id": "decoder-platform", "group": "decoder", "status": "development", "required": true, "evidence": ["decoder catalog truthfulness regression"]},
+    {"id": "docker-appliance", "group": "packaging", "status": "development", "required": true, "evidence": ["multi-stage image build"]},
+    {"id": "security", "group": "operations", "status": "planned", "required": true, "evidence": []},
+    {"id": "backup-restore-rollback", "group": "operations", "status": "planned", "required": true, "evidence": []}
+  ]
+}
