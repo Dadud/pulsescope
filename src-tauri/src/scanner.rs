@@ -6,6 +6,7 @@
 // runs multiple virtual channels inside one captured I/Q span — the same
 // ergonomics used across the SDR scanner category, implemented originally.
 
+use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -112,6 +113,27 @@ pub fn initial_scan_center(range: &ScanRange, usable_span_hz: u32) -> u64 {
         .min(range.end_hz)
 }
 
+/// Convert a noisy FFT-bin peak into a stable channel frequency. Broadcast FM
+/// channels are centered half a channel above the stored lower band edge
+/// (88.1, 88.3, ... MHz in the North American preset). Other services use the
+/// configured scanner raster while staying inside the selected range.
+fn stable_channel_frequency(range: &ScanRange, detected_hz: u64, fallback_step_hz: u32) -> u64 {
+    let (origin, step) = if range.mode.eq_ignore_ascii_case("wfm") && range.channel_bw_hz > 0 {
+        (
+            range
+                .start_hz
+                .saturating_add(range.channel_bw_hz as u64 / 2),
+            range.channel_bw_hz as u64,
+        )
+    } else {
+        (range.start_hz, fallback_step_hz.max(1) as u64)
+    };
+    let steps = detected_hz.saturating_sub(origin).saturating_add(step / 2) / step;
+    origin
+        .saturating_add(steps.saturating_mul(step))
+        .clamp(range.start_hz, range.end_hz)
+}
+
 #[cfg(test)]
 mod scan_window_tests {
     use super::*;
@@ -134,6 +156,25 @@ mod scan_window_tests {
             ..Default::default()
         };
         assert_eq!(initial_scan_center(&range, 2_000_000), 144_100_000);
+    }
+
+    #[test]
+    fn broadcast_fm_peaks_snap_to_stable_channel_centers() {
+        let range = ScanRange {
+            start_hz: 88_000_000,
+            end_hz: 108_000_000,
+            mode: "wfm".into(),
+            channel_bw_hz: 200_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            stable_channel_frequency(&range, 90_283_980, 5_000),
+            90_300_000
+        );
+        assert_eq!(
+            stable_channel_frequency(&range, 92_714_511, 5_000),
+            92_700_000
+        );
     }
 }
 
@@ -361,6 +402,7 @@ async fn scanner_loop(
     let mut next_sweep_at = Instant::now();
     let mut signal_hold_started: Option<Instant> = None;
     let mut signal_hold_until: Option<Instant> = None;
+    let mut logged_channels = HashSet::<u64>::new();
 
     loop {
         // Drain commands
@@ -407,6 +449,7 @@ async fn scanner_loop(
                         );
                     signal_hold_started = None;
                     signal_hold_until = None;
+                    logged_channels.clear();
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                     tracing::info!(range = %name, "scanner started");
                 }
@@ -417,6 +460,7 @@ async fn scanner_loop(
                     active_range = None;
                     signal_hold_started = None;
                     signal_hold_until = None;
+                    logged_channels.clear();
                     let _ = events_tx.send(ScannerEvent::VfoStates(Vec::new()));
                     tracing::info!("scanner stopped");
                 }
@@ -540,7 +584,7 @@ async fn scanner_loop(
             if snr >= 12.0 && last_signal_hit.elapsed() >= Duration::from_secs(1) {
                 let status = device.status();
                 let offset = bin as f64 / bins.len() as f64 - 0.5;
-                let frequency_hz = (status.center_freq_hz as f64
+                let detected_frequency_hz = (status.center_freq_hz as f64
                     + offset * status.sample_rate as f64)
                     .max(0.0) as u64;
                 let bandwidth_hz = (status.sample_rate / bins.len().max(1) as u32).max(1);
@@ -553,6 +597,12 @@ async fn scanner_loop(
                     .as_ref()
                     .map(|r| r.channel_bw_hz)
                     .unwrap_or(bandwidth_hz);
+                let frequency_hz = active_range
+                    .as_ref()
+                    .map(|range| {
+                        stable_channel_frequency(range, detected_frequency_hz, cfg.freq_step_hz)
+                    })
+                    .unwrap_or(detected_frequency_hz);
                 let classification = signal_id::classify(
                     frequency_hz,
                     channel_bw,
@@ -565,22 +615,25 @@ async fn scanner_loop(
                 let decoder = top
                     .map(|c| c.decoder.clone())
                     .unwrap_or_else(|| "none".into());
-                let _ = db.insert_classified_signal_event(
-                    frequency_hz,
-                    snr,
-                    channel_bw,
-                    &range_name,
-                    now_ms(),
-                    &classification.signal_class,
-                    &classification.top_family,
-                    classification.top_confidence,
-                    &classification.sub_protocol,
-                    classification.decode_success,
-                    &classification.decode_protocol,
-                    &classification.decode_summary,
-                    classification.likely_proprietary,
-                    classification.is_novel,
-                );
+                let first_observation = logged_channels.insert(frequency_hz);
+                if first_observation {
+                    let _ = db.insert_classified_signal_event(
+                        frequency_hz,
+                        snr,
+                        channel_bw,
+                        &range_name,
+                        now_ms(),
+                        &classification.signal_class,
+                        &classification.top_family,
+                        classification.top_confidence,
+                        &classification.sub_protocol,
+                        classification.decode_success,
+                        &classification.decode_protocol,
+                        &classification.decode_summary,
+                        classification.likely_proprietary,
+                        classification.is_novel,
+                    );
+                }
                 // A real scanner must surface a hit through a VFO, not merely
                 // write an invisible database row. Reuse an unlocked slot or
                 // allocate another one up to the range/device limit. Slots are
@@ -649,16 +702,18 @@ async fn scanner_loop(
                         .min(maximum),
                     );
                 }
-                let _ = events_tx.send(ScannerEvent::SignalHit {
-                    frequency_hz,
-                    strength_db: *peak,
-                    snr_db: snr,
-                    bandwidth_hz: channel_bw,
-                    protocol: classification.sub_protocol.clone(),
-                    family: classification.top_family.clone(),
-                    confidence: classification.top_confidence,
-                    decoder,
-                });
+                if first_observation {
+                    let _ = events_tx.send(ScannerEvent::SignalHit {
+                        frequency_hz,
+                        strength_db: *peak,
+                        snr_db: snr,
+                        bandwidth_hz: channel_bw,
+                        protocol: classification.sub_protocol.clone(),
+                        family: classification.top_family.clone(),
+                        confidence: classification.top_confidence,
+                        decoder,
+                    });
+                }
                 last_signal_hit = Instant::now();
             }
         }
@@ -749,6 +804,7 @@ async fn scanner_loop(
                     smoothed_noise_floor = None;
                     signal_hold_started = None;
                     signal_hold_until = None;
+                    logged_channels.clear();
                     let mut runtime = state.lock();
                     for vfo in &mut runtime.vfo_states {
                         vfo.locked = false;
