@@ -179,7 +179,7 @@ impl ScannerHandle {
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
         // FFT is a latest-frame consumer. Two complete FFT windows absorb
         // driver burstiness without accumulating stale waterfall history.
-        let capture_ring = IqRing::new("fft", cfg.fft_size.saturating_mul(5).saturating_mul(2));
+        let capture_ring = IqRing::new_latest("fft", cfg.fft_size.saturating_mul(5).saturating_mul(2));
         let audio_ring = IqRing::new("audio", 2_000_000);
         let task = tokio::spawn(scanner_loop(
             cfg,

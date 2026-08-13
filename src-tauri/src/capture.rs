@@ -44,12 +44,16 @@ pub struct IqRing {
     taken: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     skipped: Arc<AtomicU64>,
+    latest_only: bool,
 }
 
 impl IqRing {
     pub fn new(name: impl Into<Arc<str>>, capacity: usize) -> Self {
         assert!(capacity > 0, "IQ ring capacity must be nonzero");
-        Self { inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity, name: name.into(), pushed: Arc::new(AtomicU64::new(0)), taken: Arc::new(AtomicU64::new(0)), dropped: Arc::new(AtomicU64::new(0)), skipped: Arc::new(AtomicU64::new(0)) }
+        Self { inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity, name: name.into(), pushed: Arc::new(AtomicU64::new(0)), taken: Arc::new(AtomicU64::new(0)), dropped: Arc::new(AtomicU64::new(0)), skipped: Arc::new(AtomicU64::new(0)), latest_only: false }
+    }
+    pub fn new_latest(name: impl Into<Arc<str>>, capacity: usize) -> Self {
+        Self { latest_only: true, ..Self::new(name, capacity) }
     }
     pub fn push(&self, samples: &[Complex<f32>]) {
         let mut q = self.inner.lock();
@@ -66,7 +70,11 @@ impl IqRing {
             q.extend(samples.iter().copied());
         }
         self.pushed.fetch_add(samples.len() as u64, Ordering::Relaxed);
-        self.dropped.fetch_add(overflow as u64, Ordering::Relaxed);
+        if self.latest_only {
+            self.skipped.fetch_add(overflow as u64, Ordering::Relaxed);
+        } else {
+            self.dropped.fetch_add(overflow as u64, Ordering::Relaxed);
+        }
     }
     pub fn take_exact(&self, count: usize) -> Option<Vec<Complex<f32>>> {
         let mut q = self.inner.lock();
@@ -223,12 +231,20 @@ mod tests {
     }
     #[test]
     fn latest_frame_skips_obsolete_history_without_overflow() {
-        let ring = IqRing::new("fft", 8);
+        let ring = IqRing::new_latest("fft", 8);
         ring.push(&(1..=8).map(|value| Complex::new(value as f32, 0.0)).collect::<Vec<_>>());
         let frame = ring.take_latest_exact(3).unwrap();
         assert_eq!(frame.iter().map(|sample| sample.re).collect::<Vec<_>>(), vec![6.0, 7.0, 8.0]);
         let status = ring.status();
         assert_eq!(status["dropped_samples"], 0);
         assert_eq!(status["skipped_samples"], 5);
+    }
+    #[test]
+    fn latest_ring_classifies_capacity_discard_as_skip() {
+        let ring = IqRing::new_latest("fft", 3);
+        ring.push(&(1..=5).map(|value| Complex::new(value as f32, 0.0)).collect::<Vec<_>>());
+        let status = ring.status();
+        assert_eq!(status["dropped_samples"], 0);
+        assert_eq!(status["skipped_samples"], 2);
     }
 }
