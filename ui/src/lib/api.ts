@@ -104,6 +104,16 @@ export interface SpectrumStreamFrame {
 
 const LIVE_REQUEST_TIMEOUT_MS = 5_000;
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly path: string,
+    readonly status: number,
+    readonly retryable: boolean,
+    readonly requestId?: string,
+  ) { super(message); this.name = 'ApiError'; }
+}
+
 async function fetchBounded(input: string, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), LIVE_REQUEST_TIMEOUT_MS);
@@ -114,9 +124,19 @@ async function fetchBounded(input: string, init: RequestInit = {}): Promise<Resp
   }
 }
 
+async function throwHttpError(path: string, response: Response): Promise<never> {
+  let message = `HTTP ${response.status}`;
+  try {
+    const payload = await response.clone().json();
+    message = payload?.error || payload?.message || payload?.detail || message;
+  } catch { /* non-JSON error bodies are still represented by status */ }
+  const requestId = response.headers.get('x-request-id') ?? undefined;
+  throw new ApiError(`${path}: ${message}`, path, response.status, response.status >= 500 || response.status === 408 || response.status === 429, requestId);
+}
+
 export async function getJson<T = any>(path: string): Promise<T> {
   const r = await fetchBounded(`${BASE}${path}`, { headers: { ...authHeader() } });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
@@ -126,7 +146,7 @@ export async function postJson<T = any>(path: string, body?: any): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
@@ -136,13 +156,13 @@ export async function putJson<T = any>(path: string, body: any): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
 export async function deleteJson<T = any>(path: string): Promise<T> {
   const r = await fetchBounded(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
@@ -158,14 +178,19 @@ function websocketUrl(path: string): string {
   return `${base}${tokenParam}`;
 }
 
-export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
+export function openEvents(
+  cb: (ev: ScannerEvent) => void,
+  onState?: (state: 'connecting' | 'open' | 'closed' | 'error') => void,
+): WebSocket {
+  onState?.('connecting');
   const ws = new WebSocket(websocketUrl('/events'));
+  ws.onopen = () => onState?.('open');
   ws.onmessage = (e) => {
     try { cb(JSON.parse(e.data)); }
     catch (err) { console.warn('bad ws frame', err); }
   };
-  ws.onclose = () => console.log('event ws closed');
-  ws.onerror = (e) => console.warn('event ws error', e);
+  ws.onclose = () => onState?.('closed');
+  ws.onerror = () => onState?.('error');
   return ws;
 }
 

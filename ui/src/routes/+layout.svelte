@@ -1,6 +1,21 @@
 <script lang="ts">
   import '../app.css';
   let { children } = $props();
+  let currentPath = $state('#/');
+
+  $effect(() => {
+    currentPath = window.location.hash || '#/';
+    const update = () => (currentPath = window.location.hash || '#/');
+    window.addEventListener('hashchange', update);
+    return () => window.removeEventListener('hashchange', update);
+  });
+
+  const links = [
+    ['#/', 'Scanner'], ['#/messages', 'Messages'], ['#/signal-id', 'Signal ID'],
+    ['#/occupancy', 'Occupancy'], ['#/recording', 'Recording'], ['#/jobs', 'Jobs'],
+    ['#/cases', 'Cases'], ['#/feature-packs', 'Features'], ['#/blacklist', 'Blacklist'],
+    ['#/debug', 'Debug'], ['#/settings', 'Settings']
+  ];
 </script>
 
 <svelte:head>
@@ -18,17 +33,9 @@
       <span class="wordmark">PulseScope</span>
     </div>
     <ul class="nav-links">
-      <li><a href="#/">Scanner</a></li>
-      <li><a href="#/messages">Messages</a></li>
-      <li><a href="#/signal-id">Signal ID</a></li>
-      <li><a href="#/occupancy">Occupancy</a></li>
-      <li><a href="#/recording">Recording</a></li>
-      <li><a href="#/jobs">Jobs</a></li>
-      <li><a href="#/cases">Cases</a></li>
-      <li><a href="#/feature-packs">Features</a></li>
-      <li><a href="#/blacklist">Blacklist</a></li>
-      <li><a href="#/debug">Debug</a></li>
-      <li><a href="#/settings">Settings</a></li>
+      {#each links as [href, label]}
+        <li><a href={href} class:active={currentPath === href} aria-current={currentPath === href ? 'page' : undefined}>{label}</a></li>
+      {/each}
     </ul>
   </nav>
   <main class="content">

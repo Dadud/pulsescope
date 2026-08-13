@@ -34,10 +34,11 @@
     setTimeout(() => (saved = false), 1500);
   }
 
-  let deviceKey = $state('driver=mock');
-  let deviceLabel = $state('Mock Source (Test Tones)');
+  let deviceKey = $state('');
+  let deviceLabel = $state('');
   async function connect() {
     deviceError = '';
+    if (!deviceKey) { deviceError = 'No physical SDR is available. Connect hardware or choose Simulation mode explicitly.'; return; }
     try { await Api.deviceConnect(deviceKey, deviceLabel); status = await Api.deviceStatus(); await refreshCaps(); }
     catch (e) { deviceError = String(e); }
   }
@@ -61,6 +62,7 @@
     {/if}
     <div class="row">
       <select bind:value={deviceKey} aria-label="SDR device" onchange={() => { const d = devices.find((item) => item.key === deviceKey); if (d) deviceLabel = d.label; }} style="flex:1">
+        <option value="">Select a device…</option>
         {#each devices as device}
           <option value={device.key}>{device.label} · {device.key}</option>
         {/each}

@@ -22,6 +22,8 @@
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
+  let eventReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let eventConnection = $state<'connecting' | 'open' | 'closed' | 'error'>('connecting');
   let spectrumWs: WebSocket | null = null;
   let spectrumReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let spectrumConnection = $state<'connecting' | 'open' | 'closed' | 'error'>('connecting');
@@ -121,8 +123,7 @@
     document.addEventListener('visibilitychange', onVisibility);
     void (async () => {
       await loadInitial();
-      try { ws = openEvents(handleEvent); }
-      catch (e) { console.warn('event ws unavailable; singleton polling remains active', e); }
+      connectEvents();
     })();
     return () => {
       window.removeEventListener('pulsescope:spectrum', onSpectrum);
@@ -134,11 +135,32 @@
       livePollTimer = null;
       if (spectrumReconnectTimer) window.clearTimeout(spectrumReconnectTimer);
       spectrumReconnectTimer = null;
+      if (eventReconnectTimer) window.clearTimeout(eventReconnectTimer);
+      eventReconnectTimer = null;
       spectrumWs?.close(); spectrumWs = null;
       ws?.close(); ws = null;
       browserAudio?.stop(); browserAudio = null;
     };
   }));
+
+  function connectEvents() {
+    if (!livePolling || ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
+    try {
+      ws = openEvents(handleEvent, (state) => {
+        eventConnection = state;
+        if ((state === 'closed' || state === 'error') && livePolling) {
+          eventReconnectTimer ??= window.setTimeout(() => {
+            eventReconnectTimer = null;
+            ws = null;
+            connectEvents();
+          }, 1_000);
+        }
+      });
+    } catch (error) {
+      eventConnection = 'error';
+      if (livePolling) eventReconnectTimer ??= window.setTimeout(() => { eventReconnectTimer = null; connectEvents(); }, 1_000);
+    }
+  }
 
   function scheduleLivePoll(delayMs: number) {
     if (!livePolling) return;
@@ -556,6 +578,7 @@
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● {connected ? 'PWR' : 'OFF'}</span>
         <span class="status-pill" class:on={scanRunning}>● {scanRunning ? 'SCANNING' : 'IDLE'}</span>
+        <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection}</span>
         <a href="#/settings" class="settings-link">⚙ Settings</a>
       </div>
     </div>
