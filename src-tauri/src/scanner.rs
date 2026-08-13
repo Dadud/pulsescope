@@ -179,7 +179,9 @@ impl ScannerHandle {
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
-        let capture_ring = IqRing::new("fft", cfg.fft_size.saturating_mul(5).saturating_mul(16));
+        // FFT is a latest-frame consumer. Two complete FFT windows absorb
+        // driver burstiness without accumulating stale waterfall history.
+        let capture_ring = IqRing::new("fft", cfg.fft_size.saturating_mul(5).saturating_mul(2));
         let audio_ring = IqRing::new("audio", 2_000_000);
         let task = tokio::spawn(scanner_loop(
             cfg,
@@ -316,7 +318,7 @@ async fn scanner_loop(
         // replace DeviceLayer::read_iq; the scanner does not care which source
         // produced the samples.
         let iq = loop {
-            if let Some(frame) = capture_ring.take_exact(capture_size) { break frame; }
+            if let Some(frame) = capture_ring.take_latest_exact(capture_size) { break frame; }
             if !state.lock().running { tokio::time::sleep(Duration::from_millis(2)).await; }
             else { tokio::time::sleep(Duration::from_millis(1)).await; }
         };

@@ -43,24 +43,50 @@ pub struct IqRing {
     pushed: Arc<AtomicU64>,
     taken: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+    skipped: Arc<AtomicU64>,
 }
 
 impl IqRing {
     pub fn new(name: impl Into<Arc<str>>, capacity: usize) -> Self {
         assert!(capacity > 0, "IQ ring capacity must be nonzero");
-        Self { inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity, name: name.into(), pushed: Arc::new(AtomicU64::new(0)), taken: Arc::new(AtomicU64::new(0)), dropped: Arc::new(AtomicU64::new(0)) }
+        Self { inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity, name: name.into(), pushed: Arc::new(AtomicU64::new(0)), taken: Arc::new(AtomicU64::new(0)), dropped: Arc::new(AtomicU64::new(0)), skipped: Arc::new(AtomicU64::new(0)) }
     }
     pub fn push(&self, samples: &[Complex<f32>]) {
         let mut q = self.inner.lock();
-        for &sample in samples {
-            if q.len() == self.capacity { q.pop_front(); self.dropped.fetch_add(1, Ordering::Relaxed); }
-            q.push_back(sample); self.pushed.fetch_add(1, Ordering::Relaxed);
+        let queued = q.len();
+        let overflow = queued.saturating_add(samples.len()).saturating_sub(self.capacity);
+        if overflow >= queued {
+            q.clear();
+            let incoming_skip = overflow - queued;
+            q.extend(samples[incoming_skip.min(samples.len())..].iter().copied());
+        } else if overflow > 0 {
+            q.drain(..overflow);
+            q.extend(samples.iter().copied());
+        } else {
+            q.extend(samples.iter().copied());
         }
+        self.pushed.fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.dropped.fetch_add(overflow as u64, Ordering::Relaxed);
     }
     pub fn take_exact(&self, count: usize) -> Option<Vec<Complex<f32>>> {
         let mut q = self.inner.lock();
         if q.len() < count { return None; }
         let out = (0..count).map(|_| q.pop_front().expect("length checked")).collect();
+        self.taken.fetch_add(count as u64, Ordering::Relaxed);
+        Some(out)
+    }
+    /// Return the newest complete frame and discard obsolete queued history.
+    /// Spectrum consumers need current RF state, not every intermediate IQ
+    /// sample; audio and decoder consumers continue to use `take_exact`.
+    pub fn take_latest_exact(&self, count: usize) -> Option<Vec<Complex<f32>>> {
+        let mut q = self.inner.lock();
+        if q.len() < count { return None; }
+        let skip = q.len() - count;
+        if skip > 0 {
+            q.drain(..skip);
+            self.skipped.fetch_add(skip as u64, Ordering::Relaxed);
+        }
+        let out = q.drain(..count).collect();
         self.taken.fetch_add(count as u64, Ordering::Relaxed);
         Some(out)
     }
@@ -70,7 +96,7 @@ impl IqRing {
     /// Keeping them would briefly render and demodulate the old band after a
     /// retune, which looks like a frozen VFO and produces a burst of bad audio.
     pub fn clear(&self) { self.inner.lock().clear(); }
-    pub fn status(&self) -> serde_json::Value { serde_json::json!({"name":self.name.as_ref(),"capacity_samples":self.capacity,"queued_samples":self.len(),"pushed_samples":self.pushed.load(Ordering::Relaxed),"taken_samples":self.taken.load(Ordering::Relaxed),"dropped_samples":self.dropped.load(Ordering::Relaxed)}) }
+    pub fn status(&self) -> serde_json::Value { serde_json::json!({"name":self.name.as_ref(),"capacity_samples":self.capacity,"queued_samples":self.len(),"pushed_samples":self.pushed.load(Ordering::Relaxed),"taken_samples":self.taken.load(Ordering::Relaxed),"dropped_samples":self.dropped.load(Ordering::Relaxed),"skipped_samples":self.skipped.load(Ordering::Relaxed)}) }
 }
 
 pub struct PlaybackReader {
@@ -194,5 +220,15 @@ mod tests {
         ring.push(&[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0), Complex::new(3.0, 0.0), Complex::new(4.0, 0.0)]);
         let frame = ring.take_exact(3).unwrap();
         assert_eq!(frame.iter().map(|x| x.re).collect::<Vec<_>>(), vec![2.0, 3.0, 4.0]);
+    }
+    #[test]
+    fn latest_frame_skips_obsolete_history_without_overflow() {
+        let ring = IqRing::new("fft", 8);
+        ring.push(&(1..=8).map(|value| Complex::new(value as f32, 0.0)).collect::<Vec<_>>());
+        let frame = ring.take_latest_exact(3).unwrap();
+        assert_eq!(frame.iter().map(|sample| sample.re).collect::<Vec<_>>(), vec![6.0, 7.0, 8.0]);
+        let status = ring.status();
+        assert_eq!(status["dropped_samples"], 0);
+        assert_eq!(status["skipped_samples"], 5);
     }
 }
