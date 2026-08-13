@@ -481,7 +481,6 @@
     centerTuneBusy = true;
     pendingCenterHz = requestedHz;
     try {
-      if (scanRunning) await stopScan();
       await Api.deviceFrequency(requestedHz);
       centerFreqHz = requestedHz;
       clearWaterfallHistory();

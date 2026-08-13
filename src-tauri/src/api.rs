@@ -671,7 +671,16 @@ async fn device_gain(State(s): State<ApiState>, Json(req): Json<GainReq>) -> imp
 #[derive(Deserialize)] struct FreqReq { frequency_hz: u64 }
 async fn device_frequency(State(s): State<ApiState>, Json(req): Json<FreqReq>) -> impl IntoResponse {
     match s.0.device.set_frequency(req.frequency_hz) {
-        Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "status": s.0.device.status()}))),
+        Ok(()) => {
+            // A center-frequency change alters the meaning of every buffered
+            // IQ sample. Keep the receiver task alive, but atomically discard
+            // samples and audio captured under the previous RF window.
+            if let Some(handle) = s.0.scanner.read().as_ref() {
+                handle.flush_iq();
+            }
+            s.0.audio.clear_queue();
+            (StatusCode::OK, Json(json!({"ok": true, "status": s.0.device.status()})))
+        }
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": error.to_string(), "status": s.0.device.status()}))),
     }
 }
