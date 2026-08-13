@@ -19,7 +19,7 @@ use crate::adsb::AdsbDecoder;
 use crate::audio::AudioSink;
 use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
-use crate::demod::{dc_block, decimate_average, decimate_complex_average, deemphasis, demodulate, low_pass_complex, low_pass_real, mix_down, resample_linear, Mode};
+use crate::demod::{dc_block, decimate_complex_average, deemphasis, demodulate, low_pass_complex, low_pass_real, mix_down, Mode, SincResampler};
 use crate::device::DeviceLayer;
 use crate::db::Db;
 use crate::signal_id;
@@ -106,6 +106,7 @@ impl AudioWorker {
             let mut audio_filter_states = Vec::<f32>::new();
             let mut deemphasis_states = Vec::<f32>::new();
             let mut dc_states = Vec::<f32>::new();
+            let mut resampler = SincResampler::default();
             while !stop_thread.load(Ordering::Acquire) {
                 // Consume approximately 20 ms per DSP block at every device
                 // rate. The former fixed 131072-sample block added more than
@@ -124,7 +125,6 @@ impl AudioWorker {
                 }
                 let predecimation = (sample_rate / 500_000).max(1) as usize;
                 let effective_rate = (sample_rate / predecimation as u32).max(1);
-                let decimation = (effective_rate / audio.sample_rate().max(1)).max(1) as usize;
                 let mut mixed = Vec::<f32>::new();
                 let mut active = 0usize;
                 for (idx, vfo) in vfos.iter().enumerate() {
@@ -142,7 +142,6 @@ impl AudioWorker {
                     pcm = low_pass_real(&pcm, audio_cutoff_hz, effective_rate, &mut audio_filter_states[idx]);
                     if mode == Mode::Wfm { deemphasis(&mut pcm, effective_rate, 75.0, &mut deemphasis_states[idx]); }
                     dc_block(&mut pcm, &mut dc_states[idx], 0.995);
-                    let pcm = decimate_average(&pcm, decimation);
                     if mixed.len() < pcm.len() { mixed.resize(pcm.len(), 0.0); }
                     let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
                     if let Some(current) = state.lock().vfo_states.iter_mut().find(|x| x.id == vfo.id) { current.audio_level_db = 20.0 * rms.max(1e-6).log10() + 60.0; }
@@ -151,8 +150,7 @@ impl AudioWorker {
                 }
                 if active == 0 { continue; }
                 if active > 1 { for sample in &mut mixed { *sample /= active as f32; } }
-                let decimated_rate = (effective_rate / decimation as u32).max(1);
-                let output = resample_linear(&mixed, decimated_rate, audio.sample_rate());
+                let output = resampler.process(&mixed, effective_rate, audio.sample_rate());
                 audio.push(&output, 1.0);
             }
         });

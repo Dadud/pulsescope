@@ -123,6 +123,90 @@ pub fn resample_linear(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<
     }).collect()
 }
 
+/// Stateful band-limited sample-rate conversion for continuous receiver audio.
+///
+/// The former block-local linear interpolation reset its phase every 20 ms and
+/// did not reject content above the output Nyquist limit. This windowed-sinc
+/// converter retains both phase and filter history across blocks.
+#[derive(Debug)]
+pub struct SincResampler {
+    buffer: Vec<f32>,
+    position: f64,
+    input_rate: u32,
+    output_rate: u32,
+    half_taps: usize,
+}
+
+impl Default for SincResampler {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            position: 0.0,
+            input_rate: 0,
+            output_rate: 0,
+            half_taps: 16,
+        }
+    }
+}
+
+impl SincResampler {
+    pub fn process(&mut self, input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
+        if input.is_empty() || input_rate == 0 || output_rate == 0 {
+            return Vec::new();
+        }
+        if self.input_rate != input_rate || self.output_rate != output_rate {
+            self.buffer = vec![0.0; self.half_taps];
+            self.position = self.half_taps as f64;
+            self.input_rate = input_rate;
+            self.output_rate = output_rate;
+        }
+        self.buffer.extend_from_slice(input);
+
+        let step = input_rate as f64 / output_rate as f64;
+        let cutoff = 0.45 * (output_rate as f64 / input_rate as f64).min(1.0);
+        let taps = self.half_taps * 2;
+        let mut output = Vec::with_capacity(
+            ((input.len() as u64 * output_rate as u64) / input_rate as u64) as usize + 2,
+        );
+
+        while self.position + (self.half_taps as f64) < self.buffer.len() as f64 {
+            let center = self.position.floor() as isize;
+            let mut sample = 0.0_f64;
+            let mut weight = 0.0_f64;
+            for tap in 0..taps {
+                let index = center + tap as isize - self.half_taps as isize + 1;
+                let distance = index as f64 - self.position;
+                let sinc_arg = 2.0 * cutoff * distance;
+                let sinc = if sinc_arg.abs() < 1.0e-12 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * sinc_arg).sin()
+                        / (std::f64::consts::PI * sinc_arg)
+                };
+                let window = 0.5
+                    - 0.5
+                        * (std::f64::consts::TAU * tap as f64 / (taps - 1) as f64).cos();
+                let coefficient = 2.0 * cutoff * sinc * window;
+                sample += self.buffer[index as usize] as f64 * coefficient;
+                weight += coefficient;
+            }
+            output.push(if weight.abs() > 1.0e-12 {
+                (sample / weight) as f32
+            } else {
+                0.0
+            });
+            self.position += step;
+        }
+
+        let discard = (self.position.floor() as usize).saturating_sub(self.half_taps);
+        if discard > 0 {
+            self.buffer.drain(..discard);
+            self.position -= discard as f64;
+        }
+        output
+    }
+}
+
 pub fn low_pass_real(input: &[f32], cutoff_hz: f32, sample_rate_hz: u32, state: &mut f32) -> Vec<f32> {
     if input.is_empty() || sample_rate_hz == 0 { return Vec::new(); }
     let cutoff = cutoff_hz.max(1.0).min(sample_rate_hz as f32 * 0.45);
@@ -815,6 +899,37 @@ mod tests {
         let mut p = None;
         let pcm = demodulate(Mode::Am, &iq, &mut p);
         assert!(pcm.iter().all(|v| v.abs() <= 1.0));
+    }
+    #[test]
+    fn sinc_resampler_is_continuous_across_blocks() {
+        let input_rate = 500_000;
+        let output_rate = 48_000;
+        let input: Vec<f32> = (0..10_000)
+            .map(|index| (TAU * 1_000.0 * index as f32 / input_rate as f32).sin())
+            .collect();
+        let mut resampler = SincResampler::default();
+        let mut output = Vec::new();
+        for block in input.chunks(1_337) {
+            output.extend(resampler.process(block, input_rate, output_rate));
+        }
+        assert!((output.len() as isize - 960).abs() <= 2, "unexpected output length: {}", output.len());
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn sinc_resampler_rejects_above_nyquist_energy() {
+        let input_rate = 96_000;
+        let output_rate = 48_000;
+        let input: Vec<f32> = (0..9_600)
+            .map(|index| (TAU * 36_000.0 * index as f32 / input_rate as f32).sin())
+            .collect();
+        let mut resampler = SincResampler::default();
+        let output = resampler.process(&input, input_rate, output_rate);
+        let steady = &output[64.min(output.len())..];
+        let rms = (steady.iter().map(|sample| sample * sample).sum::<f32>()
+            / steady.len().max(1) as f32)
+            .sqrt();
+        assert!(rms < 0.08, "aliased energy was not rejected: {rms}");
     }
 
     #[test]
