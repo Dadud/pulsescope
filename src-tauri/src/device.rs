@@ -50,6 +50,10 @@ pub struct DeviceStatus {
     pub driver: String,
     pub label: String,
     pub sample_rate: u32,
+    /// Analog RF bandwidth actually requested from the device. This is not
+    /// interchangeable with sample rate (for example, an RSP1B may stream at
+    /// 10 MSPS while using its 8 MHz frontend filter).
+    pub bandwidth_hz: u32,
     pub center_freq_hz: u64,
     pub ppm_correction: f32,
     pub gain: String,
@@ -889,6 +893,7 @@ impl DeviceLayer {
                 driver: "mock".into(),
                 label: "Mock Source (Test Tones)".into(),
                 sample_rate: 10_000_000,
+                bandwidth_hz: 10_000_000,
                 center_freq_hz: 100_000_000,
                 ppm_correction: 0.0,
                 gain: "auto".into(),
@@ -965,6 +970,7 @@ impl DeviceLayer {
                 status.connected = true;
                 status.lifecycle = DeviceLifecycle::Streaming;
                 status.sample_rate = rate;
+                status.bandwidth_hz = rate;
                 status.center_freq_hz = freq;
                 status.driver = key
                     .split(',')
@@ -1063,6 +1069,7 @@ impl DeviceLayer {
         if let Some(hardware) = self.hardware.lock().as_mut() {
             hardware.set_bandwidth(bandwidth)?;
         }
+        self.state.lock().bandwidth_hz = bandwidth;
         Ok(())
     }
 
@@ -1084,8 +1091,10 @@ impl DeviceLayer {
             let mut capabilities = hardware.capabilities();
             capabilities.contract_version = 1;
             capabilities.connected = status.connected;
-            capabilities.total_bandwidth_hz = status.sample_rate;
-            capabilities.usable_bandwidth_hz = (status.sample_rate as f64 * 0.9) as u32;
+            capabilities.total_bandwidth_hz = status.bandwidth_hz;
+            capabilities.usable_bandwidth_hz = status
+                .bandwidth_hz
+                .min((status.sample_rate as f64 * 0.9) as u32);
             if capabilities.supported_sample_rates_hz.is_empty() {
                 capabilities
                     .supported_sample_rates_hz
@@ -1116,8 +1125,10 @@ impl DeviceLayer {
             }],
             sample_formats: vec!["CF32".into()],
             stream_mtu: 16_384,
-            total_bandwidth_hz: status.sample_rate,
-            usable_bandwidth_hz: (status.sample_rate as f64 * 0.9) as u32,
+            total_bandwidth_hz: status.bandwidth_hz,
+            usable_bandwidth_hz: status
+                .bandwidth_hz
+                .min((status.sample_rate as f64 * 0.9) as u32),
             tuner_count: 1,
             ..Default::default()
         }

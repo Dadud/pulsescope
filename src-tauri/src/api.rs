@@ -953,7 +953,11 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     if let Err(e) = s.0.device.set_sample_contract(requested_rate) {
         return Json(json!({"ok": false, "error": format!("failed to set sampled spectrum: {e}")}));
     }
-    let initial_center = crate::scanner::initial_scan_center(&range, requested_rate);
+    let status = s.0.device.status();
+    let usable_span = status
+        .bandwidth_hz
+        .min((status.sample_rate as f64 * 0.9) as u32);
+    let initial_center = crate::scanner::initial_scan_center(&range, usable_span);
     if let Err(e) = s.0.device.set_frequency(initial_center) {
         return Json(json!({"ok": false, "error": format!("failed to tune device: {e}")}));
     }

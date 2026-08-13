@@ -78,6 +78,12 @@ pub struct VfoState {
     pub squelch_open: bool,
     pub strength_db: f32,
     pub audio_level_db: f32,
+    /// True while the scanner is holding this VFO on a detected signal (or
+    /// the operator has manually parked it).
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub last_hit_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,10 +105,10 @@ pub enum ScannerCommand {
     Shutdown,
 }
 
-pub fn initial_scan_center(range: &ScanRange, sample_rate: u32) -> u64 {
+pub fn initial_scan_center(range: &ScanRange, usable_span_hz: u32) -> u64 {
     range
         .start_hz
-        .saturating_add((sample_rate as u64 * 45) / 100)
+        .saturating_add(usable_span_hz as u64 / 2)
         .min(range.end_hz)
 }
 
@@ -117,7 +123,7 @@ mod scan_window_tests {
             end_hz: 108_000_000,
             ..Default::default()
         };
-        assert_eq!(initial_scan_center(&range, 2_000_000), 88_900_000);
+        assert_eq!(initial_scan_center(&range, 1_800_000), 88_900_000);
     }
 
     #[test]
@@ -353,6 +359,8 @@ async fn scanner_loop(
     let mut smoothed_noise_floor: Option<f32> = None;
     let mut native_adsb = AdsbDecoder::new(device.status().sample_rate);
     let mut next_sweep_at = Instant::now();
+    let mut signal_hold_started: Option<Instant> = None;
+    let mut signal_hold_until: Option<Instant> = None;
 
     loop {
         // Drain commands
@@ -380,6 +388,8 @@ async fn scanner_loop(
                             squelch_open: false,
                             strength_db: -120.0,
                             audio_level_db: -120.0,
+                            locked: false,
+                            last_hit_ms: 0,
                         }]
                     };
                     state.lock().vfo_states = vfos.clone();
@@ -395,6 +405,8 @@ async fn scanner_loop(
                                 .map(|r| r.dwell_ms.max(750) as u64)
                                 .unwrap_or(750),
                         );
+                    signal_hold_started = None;
+                    signal_hold_until = None;
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                     tracing::info!(range = %name, "scanner started");
                 }
@@ -403,6 +415,8 @@ async fn scanner_loop(
                     state.lock().active_range = None;
                     state.lock().vfo_states.clear();
                     active_range = None;
+                    signal_hold_started = None;
+                    signal_hold_until = None;
                     let _ = events_tx.send(ScannerEvent::VfoStates(Vec::new()));
                     tracing::info!("scanner stopped");
                 }
@@ -411,6 +425,8 @@ async fn scanner_loop(
                     runtime.scan_locked = true;
                     if let Some(v) = runtime.vfo_states.iter_mut().find(|v| v.id == id) {
                         v.frequency_hz = frequency_hz;
+                        v.locked = true;
+                        v.last_hit_ms = now_ms();
                     }
                 }
                 ScannerCommand::SetVfoMode { id, mode } => {
@@ -565,6 +581,74 @@ async fn scanner_loop(
                     classification.likely_proprietary,
                     classification.is_novel,
                 );
+                // A real scanner must surface a hit through a VFO, not merely
+                // write an invisible database row. Reuse an unlocked slot or
+                // allocate another one up to the range/device limit. Slots are
+                // muted until the browser's explicit Listen gesture.
+                let max_vfos = active_range
+                    .as_ref()
+                    .map(|range| (range.max_vfos as usize).min(cfg.max_vfos))
+                    .unwrap_or(0);
+                if max_vfos > 0 {
+                    let now = now_ms();
+                    let mut runtime = state.lock();
+                    let tolerance = (channel_bw as u64).max(bandwidth_hz as u64);
+                    let existing = runtime
+                        .vfo_states
+                        .iter()
+                        .position(|vfo| vfo.frequency_hz.abs_diff(frequency_hz) <= tolerance);
+                    let reusable = runtime.vfo_states.iter().position(|vfo| !vfo.locked);
+                    let index = existing.or(reusable).or_else(|| {
+                        if runtime.vfo_states.len() < max_vfos {
+                            let id = runtime
+                                .vfo_states
+                                .iter()
+                                .map(|vfo| vfo.id)
+                                .max()
+                                .unwrap_or(0)
+                                .saturating_add(1);
+                            runtime.vfo_states.push(VfoState {
+                                id,
+                                frequency_hz,
+                                mode: mode.to_string(),
+                                muted: true,
+                                volume: 0.7,
+                                audio_agc: true,
+                                squelch_open: true,
+                                strength_db: *peak,
+                                audio_level_db: -120.0,
+                                locked: true,
+                                last_hit_ms: now,
+                            });
+                            Some(runtime.vfo_states.len() - 1)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(index) = index {
+                        let vfo = &mut runtime.vfo_states[index];
+                        vfo.frequency_hz = frequency_hz;
+                        vfo.mode = mode.to_string();
+                        vfo.strength_db = *peak;
+                        vfo.squelch_open = true;
+                        vfo.locked = true;
+                        vfo.last_hit_ms = now;
+                    }
+                }
+                if active_range.as_ref().is_some_and(|range| range.hold_ms > 0) {
+                    let now = Instant::now();
+                    let started = signal_hold_started.get_or_insert(now);
+                    let maximum = *started + Duration::from_millis(cfg.scan_hold_max_ms.max(1));
+                    signal_hold_until = Some(
+                        (now + Duration::from_millis(
+                            active_range
+                                .as_ref()
+                                .map(|range| range.hold_ms)
+                                .unwrap_or(0) as u64,
+                        ))
+                        .min(maximum),
+                    );
+                }
                 let _ = events_tx.send(ScannerEvent::SignalHit {
                     frequency_hz,
                     strength_db: *peak,
@@ -623,7 +707,9 @@ async fn scanner_loop(
             captured_ms: frame_timestamp_ms,
             center_freq_hz: status.center_freq_hz,
             sample_rate_hz: status.sample_rate,
-            usable_span_hz: (status.sample_rate as f64 * 0.9) as u32,
+            usable_span_hz: status
+                .bandwidth_hz
+                .min((status.sample_rate as f64 * 0.9) as u32),
             bins_dbfs: bins.clone(),
         });
         let _ = events_tx.send(ScannerEvent::VfoStates(state.lock().vfo_states.clone()));
@@ -633,10 +719,14 @@ async fn scanner_loop(
         });
         if let Some(range) = active_range.as_ref() {
             let status = device.status();
-            let usable = (status.sample_rate as u64 * 90) / 100;
+            let usable = (status.bandwidth_hz as u64)
+                .min((status.sample_rate as u64 * 90) / 100)
+                .max(1);
             let runtime = state.lock();
+            let holding_signal = signal_hold_until.is_some_and(|until| Instant::now() < until);
             let should_sweep = range.end_hz.saturating_sub(range.start_hz) > usable
                 && !runtime.scan_locked
+                && !holding_signal
                 && !runtime.vfo_states.iter().any(|vfo| !vfo.muted)
                 && Instant::now() >= next_sweep_at;
             drop(runtime);
@@ -648,7 +738,7 @@ async fn scanner_loop(
                     .saturating_add(half)
                     > range.end_hz
                 {
-                    initial_scan_center(range, status.sample_rate)
+                    initial_scan_center(range, usable as u32)
                 } else {
                     status.center_freq_hz.saturating_add(usable)
                 };
@@ -657,6 +747,13 @@ async fn scanner_loop(
                     audio_ring.clear();
                     audio.clear_queue();
                     smoothed_noise_floor = None;
+                    signal_hold_started = None;
+                    signal_hold_until = None;
+                    let mut runtime = state.lock();
+                    for vfo in &mut runtime.vfo_states {
+                        vfo.locked = false;
+                        vfo.squelch_open = false;
+                    }
                 }
                 next_sweep_at =
                     Instant::now() + Duration::from_millis(range.dwell_ms.max(750) as u64);

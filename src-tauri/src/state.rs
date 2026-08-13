@@ -672,6 +672,8 @@ mod recording_tests {
                 squelch_open: false,
                 strength_db: -120.0,
                 audio_level_db: -120.0,
+                locked: false,
+                last_hit_ms: 0,
             }],
             latest_spectrum_ms,
             ..Default::default()

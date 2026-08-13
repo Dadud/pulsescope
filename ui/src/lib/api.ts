@@ -50,6 +50,9 @@ export interface VfoState {
   audio_agc: boolean;
   squelch_open: boolean;
   strength_db: number;
+  audio_level_db?: number;
+  locked?: boolean;
+  last_hit_ms?: number;
 }
 
 export interface DecodedMessage {

@@ -16,6 +16,7 @@
   let scanRunning = $state(false);
   let centerFreqHz = $state(0);
   let sampleRateHz = $state(1);
+  let appliedBandwidthHz = $state(0);
   let filter = $state('');
   let messageSearch = $state('');
   let dockFilter = $state('all');
@@ -138,7 +139,8 @@
       const { status, vfos: nextVfos } = (event as CustomEvent).detail;
       deviceLabel = status.label; connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
-      sampleRateHz = Number(status.sample_rate ?? sampleRateHz); applyVfos(nextVfos);
+      sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
+      appliedBandwidthHz = Number(status.bandwidth_hz ?? appliedBandwidthHz); applyVfos(nextVfos);
     };
     const onPollError = (event: Event) => { spectrumError = (event as CustomEvent).detail; };
     window.addEventListener('pulsescope:spectrum', onSpectrum);
@@ -268,6 +270,7 @@
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
+      appliedBandwidthHz = Number(status.bandwidth_hz ?? 0);
       signalHistory = storedSignals;
       deviceCaps = capabilities;
       applyVfos(await Api.vfoStates());
@@ -285,6 +288,7 @@
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
       sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
+      appliedBandwidthHz = Number(status.bandwidth_hz ?? appliedBandwidthHz);
       applyVfos(nextVfos);
     } catch (e) { console.warn('runtime polling failed', e); }
   }
@@ -493,9 +497,10 @@
     try {
       const result = await Api.deviceSampleRate(sampleRate);
       sampleRateHz = Number(result.status?.sample_rate ?? sampleRate);
+      appliedBandwidthHz = Number(result.bandwidth_hz ?? result.status?.bandwidth_hz ?? 0);
       deviceCaps = result.capabilities ?? deviceCaps;
       clearWaterfallHistory();
-      notice = `Visible spectrum set to ${(sampleRateHz / 1e6).toFixed(0)} MSPS (${(sampleRateHz * 0.9 / 1e6).toFixed(1)} MHz usable)`;
+      notice = `Capture set to ${(sampleRateHz / 1e6).toFixed(0)} MSPS with ${(appliedBandwidthHz / 1e6).toFixed(3)} MHz RF bandwidth`;
     } catch (error) { notice = `Could not change visible spectrum: ${String(error)}`; }
   }
 
@@ -794,7 +799,7 @@
         {deviceLabel}
       </div>
       <div class="receiver-readout"><span>HARDWARE CENTER</span><strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Tuning…'}</strong><small>Moves the entire sampled RF window</small></div>
-      {#if availableSampleRates().length}<label class="span-select"><span>CAPTURE WINDOW</span><select value={sampleRateHz} onchange={setVisibleSpan} aria-label="SDR capture sample rate and usable spectrum width">{#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS · {(rate * 0.9 / 1e6).toFixed(1)} MHz usable RF</option>{/each}</select><small>RSP1B: up to 10 MSPS; usable span reserves filter edges</small></label>{/if}
+      {#if availableSampleRates().length}<label class="span-select"><span>CAPTURE WINDOW</span><select value={sampleRateHz} onchange={setVisibleSpan} aria-label="SDR capture sample rate">{#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS</option>{/each}</select><small>Applied RF bandwidth: {appliedBandwidthHz > 0 ? fmtHz(appliedBandwidthHz) : 'reading…'}. Sample rate and analog bandwidth are different.</small></label>{/if}
       <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
       <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
     </div>
@@ -824,7 +829,7 @@
     </div>
 
     <section class="signal-history card">
-      <div class="history-head"><div><h2>Signals found</h2><small>The survey moves the capture window while your listening VFO stays parked.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
+      <div class="history-head"><div><h2>Signals found</h2><small>The scanner holds each hit, assigns a VFO slot, and writes it to the signal log.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
       {#if foundSignals.length === 0}
         <div class="history-empty">No signals found in this survey yet.</div>
       {:else}
@@ -841,6 +846,7 @@
         <div class="vfo-tile card">
           <div class="vfo-freq">{fmtHz(v.frequency_hz)}</div>
           <small class="vfo-offset">Listening VFO · {v.frequency_hz >= centerFreqHz ? '+' : '−'}{fmtHz(Math.abs(v.frequency_hz - centerFreqHz))} from center</small>
+          {#if v.locked}<span class="vfo-lock">LOCKED · logged {v.last_hit_ms ? fmtTime(v.last_hit_ms) : 'now'}</span>{/if}
           <div class="vfo-controls">
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
             <select aria-label="VFO {v.id} mode" value={v.mode} onchange={(e) => setVfoMode(v.id, e)}>
@@ -1023,6 +1029,7 @@
   .vfo-tile { display: flex; flex-direction: column; gap: 4px; }
   .vfo-freq { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
   .vfo-offset { color:var(--fg-dim); font:9px var(--mono); }
+  .vfo-lock { align-self:flex-start; padding:2px 5px; border:1px solid var(--ok); border-radius:3px; color:var(--ok); background:rgb(34 197 94 / 10%); font:700 9px var(--mono); }
   .vfo-mode { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .vfo-controls { display: flex; gap: 4px; }
   .vfo-actions { display: flex; gap: 3px; flex-wrap: wrap; }
