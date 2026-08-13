@@ -4,6 +4,8 @@ Current implementation and verification status is generated from the release con
 
 Before first appliance startup, run `docker compose --profile preflight run --rm preflight`. Persistent configuration and calibration can be exported with `sh deploy/backup.sh`; `deploy/restore.sh` requires an explicit `RESTORE` confirmation and restarts only the PulseScope service.
 
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for build-once image transfer, canary cutover, rollback, and trusted-LAN guidance.
+
 **Open-source desktop and headless SDR scanner.** Wideband receiver + multi-VFO
 scanner UI that orchestrates open-source decoders (rtl_433, dsd-fme, native
 DSP, ...) through a local HTTP/WebSocket API. Runs as a Windows desktop app,
