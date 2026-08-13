@@ -8,6 +8,7 @@
   let vfos: VfoState[] = $state([]);
   let messages: DecodedMessage[] = $state([]);
   let signalHistory: any[] = $state([]);
+  let deviceCaps: any = $state(null);
   let spectrumBins: number[] = $state([]);
   let spectrumError = $state('');
   let deviceLabel = $state('—');
@@ -57,6 +58,20 @@
 
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
   const displayedCenterHz = $derived(pendingCenterHz ?? centerFreqHz);
+  const activeBank = $derived(banks.find((bank) => bank.name === activeRange));
+  const scanProgress = $derived(activeBank && activeBank.end_hz > activeBank.start_hz
+    ? Math.max(0, Math.min(100, ((centerFreqHz - activeBank.start_hz) / (activeBank.end_hz - activeBank.start_hz)) * 100))
+    : 0);
+  const foundSignals = $derived.by(() => {
+    const seen = new Set<string>();
+    return signalHistory.filter((hit) => {
+      const bandwidth = Math.max(1, Number(hit.bandwidth_hz ?? activeBank?.channel_bw_hz ?? 12_500));
+      const key = `${hit.range_name ?? ''}:${Math.round(Number(hit.frequency_hz ?? 0) / bandwidth)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 10);
+  });
 
   const filteredBanks = $derived(
     banks.filter((b) => b.enabled !== false && b.name.toLowerCase().includes(filter.toLowerCase()))
@@ -247,13 +262,14 @@
 
   async function loadInitial() {
     try {
-      const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
+      const [bankList, status, storedSignals, capabilities] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100), Api.deviceCapabilities()]);
       banks = bankList;
       deviceLabel = status.label;
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
       signalHistory = storedSignals;
+      deviceCaps = capabilities;
       applyVfos(await Api.vfoStates());
       messages = await Api.decodedMessages(100);
     } catch (e) {
@@ -463,6 +479,38 @@
     const rect = target.getBoundingClientRect();
     const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
     return Math.max(1, Math.round(centerFreqHz - sampleRateHz / 2 + fraction * sampleRateHz));
+  }
+
+  function availableSampleRates() {
+    const preferred = [2_000_000, 5_000_000, 8_000_000, 10_000_000];
+    const ranges = deviceCaps?.sample_rate_ranges_hz ?? [];
+    return preferred.filter((rate) => ranges.some((range: any) => rate >= range.minimum && rate <= range.maximum));
+  }
+
+  async function setVisibleSpan(event: Event) {
+    const sampleRate = Number((event.currentTarget as HTMLSelectElement).value);
+    if (!sampleRate || sampleRate === sampleRateHz) return;
+    try {
+      const result = await Api.deviceSampleRate(sampleRate);
+      sampleRateHz = Number(result.status?.sample_rate ?? sampleRate);
+      deviceCaps = result.capabilities ?? deviceCaps;
+      clearWaterfallHistory();
+      notice = `Visible spectrum set to ${(sampleRateHz / 1e6).toFixed(0)} MSPS (${(sampleRateHz * 0.9 / 1e6).toFixed(1)} MHz usable)`;
+    } catch (error) { notice = `Could not change visible spectrum: ${String(error)}`; }
+  }
+
+  async function tuneFoundSignal(hit: any) {
+    if (!vfos.length) return;
+    audioGesturePending = true;
+    try {
+      await browserAudio?.start();
+      await Api.vfoFrequency(vfos[0].id, Number(hit.frequency_hz));
+      await Api.vfoMute(vfos[0].id, false);
+      notice = `Listening at ${fmtHz(Number(hit.frequency_hz))}`;
+    } catch (error) {
+      browserAudio?.stop();
+      notice = `Could not listen to signal: ${String(error)}`;
+    } finally { audioGesturePending = false; }
   }
 
   function clearWaterfallHistory() {
@@ -736,6 +784,7 @@
         {deviceLabel}
       </div>
       <div class="receiver-readout"><span>CENTER</span><strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Tuning…'}</strong><small>{sampleRateHz > 0 ? `${fmtHz(sampleRateHz)} visible span` : ''}</small></div>
+      {#if availableSampleRates().length}<label class="span-select"><span>VISIBLE SPECTRUM</span><select value={sampleRateHz} onchange={setVisibleSpan} aria-label="Visible spectrum sample rate">{#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS · {(rate * 0.9 / 1e6).toFixed(1)} MHz usable</option>{/each}</select></label>{/if}
       <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
       <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
     </div>
@@ -759,16 +808,19 @@
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} bind:this={waterfallCanvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Scroll to pan the receiver center; select Move center to click or drag."></canvas>
+      {#if scanRunning && activeBank}
+        <div class="scan-progress" role="status"><span><b>Scanning {activeBank.name}</b><small>{fmtHz(activeBank.start_hz)} – {fmtHz(activeBank.end_hz)}</small></span><div class="scan-track"><i style={`width:${scanProgress}%`}></i></div><strong>{scanProgress.toFixed(0)}%</strong></div>
+      {/if}
     </div>
 
     <section class="signal-history card">
-      <div class="history-head"><h2>Persisted signal history</h2><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
-      {#if signalHistory.length === 0}
-        <div class="history-empty">No persisted signal hits</div>
+      <div class="history-head"><div><h2>Signals found</h2><small>Survey results do not move your listening VFO.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
+      {#if foundSignals.length === 0}
+        <div class="history-empty">No signals found in this survey yet.</div>
       {:else}
         <div class="history-list">
-          {#each signalHistory.slice(0, 12) as hit}
-            <div class="history-row"><span>{hit.timestamp_ms ? fmtTime(hit.timestamp_ms) : 'live'}</span><b>{fmtHz(Number(hit.frequency_hz ?? 0))}</b><span>{hit.signal_class ?? hit.family ?? 'signal'}</span><span>SNR {Number(hit.snr_db ?? 0).toFixed(1)} dB</span></div>
+          {#each foundSignals as hit}
+            <div class="history-row"><span>{hit.timestamp_ms ? fmtTime(hit.timestamp_ms) : 'live'}</span><b>{fmtHz(Number(hit.frequency_hz ?? 0))}</b><span>{hit.sub_protocol ?? hit.signal_class ?? hit.family ?? 'signal'}</span><span>SNR {Number(hit.snr_db ?? 0).toFixed(1)} dB</span><button class="mini listen-hit" onclick={() => tuneFoundSignal(hit)}>Tune & listen</button></div>
           {/each}
         </div>
       {/if}
@@ -902,6 +954,8 @@
   .receiver-readout { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); }
   .receiver-readout span, .receiver-readout small { color: var(--fg-dim); font-size: 10px; }
   .receiver-readout strong { color: var(--accent); font-size: 14px; }
+  .span-select { display:flex; flex-direction:column; gap:2px; color:var(--fg-dim); font:9px var(--mono); }
+  .span-select select { min-height:30px; padding:4px 7px; font-size:11px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 8px; }
   .dot.on { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .vfo-summary { color: var(--fg-dim); }
@@ -936,13 +990,21 @@
   .waterfall-head label, .waterfall-head select { font:10px var(--mono); color:var(--fg-dim); }
   .waterfall-head input { width:70px; vertical-align:middle; }
   .spectrum-wrap canvas.waterfall { height: 95px; image-rendering: pixelated; }
+  .scan-progress { display:grid; grid-template-columns:auto 1fr 38px; align-items:center; gap:10px; margin-top:8px; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+  .scan-progress > span { display:flex; flex-direction:column; font-size:11px; }
+  .scan-progress small { color:var(--fg-dim); font:9px var(--mono); }
+  .scan-progress > strong { color:var(--accent); font:11px var(--mono); text-align:right; }
+  .scan-track { height:6px; overflow:hidden; border-radius:4px; background:var(--line); }
+  .scan-track i { display:block; height:100%; background:var(--accent); transition:width .2s linear; }
 
   .signal-history { order: 3; max-height: 190px; overflow: hidden; }
   .history-head { display: flex; justify-content: space-between; align-items: center; }
   .history-head h2 { margin-bottom: 0; }
+  .history-head small { color:var(--fg-dim); font-size:10px; }
   .history-list { overflow-y: auto; max-height: 145px; }
-  .history-row { display: grid; grid-template-columns: 90px 110px 1fr 100px; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); color: var(--fg-dim); font: 10px var(--mono); }
+  .history-row { display: grid; grid-template-columns: 70px 100px minmax(90px,1fr) 85px auto; align-items:center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); color: var(--fg-dim); font: 10px var(--mono); }
   .history-row b { color: var(--accent); }
+  .listen-hit { white-space:nowrap; color:var(--accent); border-color:var(--accent); }
   .history-empty { color: var(--fg-dim); padding: 8px 0; font-size: 12px; }
 
   .vfo-grid { order: 2; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
@@ -1000,6 +1062,8 @@
     .setup-card { align-items:flex-start; flex-direction:column; }
     .device-strip { gap:8px; flex-wrap:wrap; padding:11px; }
     .device-strip > div:first-child { width:100%; font-size:14px; }
+    .span-select { width:100%; order:1; }
+    .span-select select { min-height:42px; width:100%; font-size:14px; }
     .vfo-summary { margin-left:auto; }
     .audio-status { width:100%; padding-top:6px; border-top:1px solid var(--line); }
     .receiver-readout { order:-1; width:100%; justify-content:space-between; }
@@ -1022,7 +1086,11 @@
     .vfo-tile { padding:12px; gap:8px; }
     .vfo-freq { font-size:22px; }
     .vfo-bar .listen { min-width:110px; min-height:44px; font-size:14px; }
-    .signal-history { display:none; }
+    .signal-history { display:block; max-height:none; order:2; }
+    .history-list { max-height:260px; }
+    .history-row { grid-template-columns:1fr auto; gap:4px 8px; padding:9px 0; }
+    .history-row > span:first-child { display:none; }
+    .history-row .listen-hit { grid-column:1 / -1; min-height:40px; }
     .log { display:none; }
   }
 
