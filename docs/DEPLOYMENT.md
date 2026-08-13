@@ -49,6 +49,7 @@ sh deploy/restore.sh /safe/path/pulsescope-backup.tar.gz
 ```
 
 Restore requires typing `RESTORE`, stops only the PulseScope service, replaces the exact PulseScope data volume, and restarts it. Back up the external proprietary-driver volume separately under the applicable vendor license.
+Both scripts discover the data volume mounted by the `pulsescope` container. For a stopped or differently named container, set `PULSESCOPE_DATA_VOLUME` to the exact existing Docker volume; the scripts refuse to create a missing target implicitly.
 
 ## Trusted LAN and remote access
 
