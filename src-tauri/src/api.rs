@@ -572,8 +572,19 @@ async fn put_settings(State(s): State<ApiState>, Json(patch): Json<Value>) -> im
 }
 
 async fn list_devices(State(s): State<ApiState>) -> impl IntoResponse {
-    let dev = crate::device::DeviceLayer::discover();
     let status = s.0.device.status();
+    let mut dev = crate::device::DeviceLayer::discover();
+    if status.connected && status.driver != "mock" {
+        let key = s.0.config.read().device.last_device_key.clone();
+        if !dev.iter().any(|device| device.key == key || device.driver == status.driver) {
+            dev.push(crate::device::DiscoveredDevice {
+                driver: status.driver.clone(),
+                label: status.label.clone(),
+                key: if key.is_empty() { format!("driver={}", status.driver) } else { key },
+                hardware_key: status.driver.clone(),
+            });
+        }
+    }
     Json(json!({"devices": dev, "active": status}))
 }
 
@@ -585,6 +596,7 @@ async fn device_connect(State(s): State<ApiState>, Json(req): Json<DevKeyReq>) -
     let mut cfg = s.0.config.write();
     cfg.device.last_device_key = req.key;
     cfg.device.last_device_label = req.label.unwrap_or_else(|| s.0.device.status().label);
+    let _ = cfg.save(&s.0.data_dir);
     Json(json!({"ok": true, "status": s.0.device.status()}))
 }
 

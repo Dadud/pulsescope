@@ -323,11 +323,14 @@ impl DeviceLayer {
     }
 
     pub fn auto_connect(&self, preferred: Option<&str>) -> anyhow::Result<()> {
+        // A vendor runtime may expose a usable device through its native
+        // driver while SoapySDRUtil is absent from PATH. Do not discard a
+        // persisted physical key merely because discovery could not list it.
+        if let Some(key) = preferred.filter(|key| !key.trim().is_empty() && *key != "driver=mock") {
+            if self.connect(key).is_ok() { return Ok(()); }
+        }
         let devices = Self::discover();
-        let candidate = preferred
-            .filter(|key| devices.iter().any(|device| device.key == *key && device.driver != "mock"))
-            .map(str::to_owned)
-            .or_else(|| devices.into_iter().find(|device| device.driver != "mock").map(|device| device.key));
+        let candidate = devices.into_iter().find(|device| device.driver != "mock").map(|device| device.key);
         self.connect(candidate.as_deref().unwrap_or("driver=mock"))
     }
 
