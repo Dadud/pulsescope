@@ -10,7 +10,10 @@ repository = "https://github.com/pulsescope/pulsescope"
 
 [lib]
 name = "pulsescope_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# PulseScope mobile clients use Capacitor and connect to the server; this Rust
+# library is consumed by the server/Tauri executable and only needs an rlib.
+# Avoiding unused staticlib/cdylib links materially reduces appliance builds.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
