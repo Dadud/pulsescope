@@ -50,14 +50,14 @@ impl AppState {
     pub fn new() -> Arc<Self> {
         let data_dir = crate::state::AppState::default_data_dir();
         let config = Config::load(&data_dir);
-        let db = Db::open(&data_dir.join("pulsescope.db"))
-            .expect("failed to open pulsescope.db");
+        let db = Db::open(&data_dir.join("pulsescope.db")).expect("failed to open pulsescope.db");
         let (events_tx, _events_rx) = broadcast::channel(1024);
         let (spectrum_tx, _spectrum_rx) = watch::channel(SpectrumFrame::default());
         let device = Arc::new(DeviceLayer::new_mock());
         // Prefer a previously selected physical SDR; otherwise the first real
         // Soapy device. Mock is a fallback for machines with no hardware.
-        let preferred = (!config.device.last_device_key.trim().is_empty()).then_some(config.device.last_device_key.as_str());
+        let preferred = (!config.device.last_device_key.trim().is_empty())
+            .then_some(config.device.last_device_key.as_str());
         if let Err(error) = device.auto_connect(preferred) {
             tracing::warn!(%error, "physical SDR auto-connect failed; using mock fallback");
         }
@@ -93,12 +93,28 @@ impl AppState {
     }
 
     fn default_monitor_range(&self) -> Option<ScanRange> {
-        let active_name = self.scanner.read().as_ref()
+        let active_name = self
+            .scanner
+            .read()
+            .as_ref()
             .and_then(|handle| handle.state.lock().active_range.clone());
         let config = self.config.read();
-        active_name.as_deref()
-            .and_then(|name| config.scan_ranges.iter().find(|range| range.name == name).cloned())
-            .or_else(|| config.scan_ranges.iter().find(|range| range.name == "FM Broadcast").cloned())
+        active_name
+            .as_deref()
+            .and_then(|name| {
+                config
+                    .scan_ranges
+                    .iter()
+                    .find(|range| range.name == name)
+                    .cloned()
+            })
+            .or_else(|| {
+                config
+                    .scan_ranges
+                    .iter()
+                    .find(|range| range.name == "FM Broadcast")
+                    .cloned()
+            })
             .or_else(|| config.scan_ranges.first().cloned())
     }
 
@@ -111,9 +127,18 @@ impl AppState {
             self.receiver_session.lock().release("scanner");
             return Err("no receiver ranges are configured".into());
         };
-        if self.device.set_sample_rate(range.sample_rate_hz).is_err()
-            || self.device.set_bandwidth(range.channel_bw_hz).is_err()
-            || self.device.set_frequency(range.start_hz).is_err() {
+        if self
+            .device
+            .set_sample_contract(range.sample_rate_hz)
+            .is_err()
+            || self
+                .device
+                .set_frequency(crate::scanner::initial_scan_center(
+                    &range,
+                    range.sample_rate_hz,
+                ))
+                .is_err()
+        {
             self.receiver_session.lock().release("scanner");
             return Err("device configuration failed".into());
         }
@@ -123,9 +148,18 @@ impl AppState {
                 handle.abort();
             }
         } else {
-            let existing = self.scanner.read().as_ref().map(|handle| handle.cmd_tx.clone());
+            let existing = self
+                .scanner
+                .read()
+                .as_ref()
+                .map(|handle| handle.cmd_tx.clone());
             if let Some(command) = existing {
-                if command.send(crate::scanner::ScannerCommand::Start { range: range.clone() }).is_ok() {
+                if command
+                    .send(crate::scanner::ScannerCommand::Start {
+                        range: range.clone(),
+                    })
+                    .is_ok()
+                {
                     return Ok(());
                 }
             }
@@ -144,10 +178,14 @@ impl AppState {
             spectrum_tx: self.spectrum.clone(),
         };
         let handle = ScannerHandle::spawn(cfg, dependencies);
-        handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range })
+        handle
+            .cmd_tx
+            .send(crate::scanner::ScannerCommand::Start { range })
             .map_err(|_| "receiver task did not accept its startup command".to_string())?;
         *self.scanner.write() = Some(handle);
-        if recovering { self.observe_receiver_recovery(); }
+        if recovering {
+            self.observe_receiver_recovery();
+        }
         Ok(())
     }
 
@@ -164,7 +202,10 @@ impl AppState {
         let app = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
-            loop { tick.tick().await; app.run_due_jobs(); }
+            loop {
+                tick.tick().await;
+                app.run_due_jobs();
+            }
         });
     }
 
@@ -172,7 +213,9 @@ impl AppState {
     /// device a few seconds after the container process starts; previously that
     /// race permanently selected the mock source until a manual reconnect.
     pub fn start_hardware_supervisor(self: &Arc<Self>) {
-        if std::env::var("PULSESCOPE_PREFER_PHYSICAL").as_deref() == Ok("0") { return; }
+        if std::env::var("PULSESCOPE_PREFER_PHYSICAL").as_deref() == Ok("0") {
+            return;
+        }
         let app = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -183,16 +226,26 @@ impl AppState {
                     let devices = tokio::task::spawn_blocking(crate::device::DeviceLayer::discover)
                         .await
                         .unwrap_or_default();
-                    let Some(candidate) = devices.into_iter().find(|device| device.driver != "mock") else { continue; };
+                    let Some(candidate) =
+                        devices.into_iter().find(|device| device.driver != "mock")
+                    else {
+                        continue;
+                    };
                     let device = app.device.clone();
                     let key = candidate.key.clone();
                     let connected = tokio::task::spawn_blocking(move || device.connect(&key)).await;
-                    if !matches!(connected, Ok(Ok(()))) { continue; }
+                    if !matches!(connected, Ok(Ok(()))) {
+                        continue;
+                    }
                     tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
                 }
 
                 let now = crate::scanner::now_ms();
-                let runtime = app.scanner.read().as_ref().map(|handle| handle.state.lock().clone());
+                let runtime = app
+                    .scanner
+                    .read()
+                    .as_ref()
+                    .map(|handle| handle.state.lock().clone());
                 if receiver_needs_recovery(runtime.as_ref(), now) {
                     app.audio.clear_queue();
                     if let Err(error) = app.ensure_receiver_flow(true) {
@@ -205,36 +258,197 @@ impl AppState {
 
     fn run_due_jobs(self: &Arc<Self>) {
         let now = crate::scanner::now_ms();
-        let Ok(jobs) = self.db.due_scheduled_jobs(now) else { return; };
+        let Ok(jobs) = self.db.due_scheduled_jobs(now) else {
+            return;
+        };
         for job in jobs {
             let id = job.id.unwrap_or_default();
             if job.kind == "recording" {
-                let payload: serde_json::Value = match serde_json::from_str(&job.payload_json) { Ok(v) => v, Err(e) => { let _=self.db.mark_scheduled_job(id,"failed",&format!("invalid payload: {e}"),false,now); continue; } };
-                let duration_ms = payload.get("duration_ms").and_then(|v|v.as_u64()).unwrap_or(60_000).clamp(1_000, 3_600_000);
-                let path = self.data_dir.join("recordings").join(format!("job-{id}-{now}.cf32"));
-                if std::fs::create_dir_all(path.parent().expect("recordings parent")).is_err() || self.recording.lock().file.is_some() { let _=self.db.mark_scheduled_job(id,"blocked","recording already active or output directory unavailable",false,now); continue; }
-                match File::create(&path) { Ok(file) => { let mut rec=self.recording.lock(); rec.file=Some(file); rec.path=Some(path); rec.started_ms=Some(now); rec.samples_written=0; rec.bytes_written=0; rec.write_error=None; }, Err(e) => { let _=self.db.mark_scheduled_job(id,"failed",&e.to_string(),false,now); continue; } }
-                let _=self.db.mark_scheduled_job(id,"running","",false,now);
-                let app=self.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(duration_ms)).await; let status=app.recording.lock().stop(); let error=status.get("write_error").and_then(|v|v.as_str()).unwrap_or(""); let _=app.db.mark_scheduled_job(id,if error.is_empty(){"completed"}else{"failed"},error,false,crate::scanner::now_ms()); });
+                let payload: serde_json::Value = match serde_json::from_str(&job.payload_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = self.db.mark_scheduled_job(
+                            id,
+                            "failed",
+                            &format!("invalid payload: {e}"),
+                            false,
+                            now,
+                        );
+                        continue;
+                    }
+                };
+                let duration_ms = payload
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(60_000)
+                    .clamp(1_000, 3_600_000);
+                let path = self
+                    .data_dir
+                    .join("recordings")
+                    .join(format!("job-{id}-{now}.cf32"));
+                if std::fs::create_dir_all(path.parent().expect("recordings parent")).is_err()
+                    || self.recording.lock().file.is_some()
+                {
+                    let _ = self.db.mark_scheduled_job(
+                        id,
+                        "blocked",
+                        "recording already active or output directory unavailable",
+                        false,
+                        now,
+                    );
+                    continue;
+                }
+                match File::create(&path) {
+                    Ok(file) => {
+                        let mut rec = self.recording.lock();
+                        rec.file = Some(file);
+                        rec.path = Some(path);
+                        rec.started_ms = Some(now);
+                        rec.samples_written = 0;
+                        rec.bytes_written = 0;
+                        rec.write_error = None;
+                    }
+                    Err(e) => {
+                        let _ =
+                            self.db
+                                .mark_scheduled_job(id, "failed", &e.to_string(), false, now);
+                        continue;
+                    }
+                }
+                let _ = self.db.mark_scheduled_job(id, "running", "", false, now);
+                let app = self.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+                    let status = app.recording.lock().stop();
+                    let error = status
+                        .get("write_error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let _ = app.db.mark_scheduled_job(
+                        id,
+                        if error.is_empty() {
+                            "completed"
+                        } else {
+                            "failed"
+                        },
+                        error,
+                        false,
+                        crate::scanner::now_ms(),
+                    );
+                });
                 continue;
             }
             if job.kind != "scan" {
-                let _ = self.db.mark_scheduled_job(id, "unsupported", "executor currently supports scan jobs only", false, now);
+                let _ = self.db.mark_scheduled_job(
+                    id,
+                    "unsupported",
+                    "executor currently supports scan jobs only",
+                    false,
+                    now,
+                );
                 continue;
             }
-            let payload: serde_json::Value = match serde_json::from_str(&job.payload_json) { Ok(v) => v, Err(e) => { let _=self.db.mark_scheduled_job(id,"failed",&format!("invalid payload: {e}"),false,now); continue; } };
-            let Some(range_name) = payload.get("range_name").and_then(|v|v.as_str()) else { let _=self.db.mark_scheduled_job(id,"failed","scan job requires payload.range_name",false,now); continue; };
-            let duration_ms = payload.get("duration_ms").and_then(|v|v.as_u64()).unwrap_or(60_000).clamp(1_000, 3_600_000);
-            let range = self.config.read().scan_ranges.iter().find(|r|r.name==range_name).cloned();
-            let Some(range) = range else { let _=self.db.mark_scheduled_job(id,"failed","unknown scan range",false,now); continue; };
-            if let Some(handle)=self.scanner.read().as_ref() { let _=handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop); }
-            self.audio.clear_queue(); self.receiver_session.lock().release("scanner");
-            let owner=format!("job:{id}");
-            if let Err(error)=self.receiver_session.lock().claim(&owner,false) { let _=self.db.mark_scheduled_job(id,"blocked",&error,true,now); continue; }
-            if self.device.set_sample_rate(range.sample_rate_hz).is_err() || self.device.set_bandwidth(range.channel_bw_hz).is_err() || self.device.set_frequency(range.start_hz).is_err() { self.receiver_session.lock().release(&owner); let _=self.db.mark_scheduled_job(id,"failed","device configuration failed",false,now); continue; }
-            if let Some(handle)=self.scanner.read().as_ref() { let _=handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range }); } else { self.receiver_session.lock().release(&owner); let _=self.db.mark_scheduled_job(id,"failed","scanner runtime unavailable",false,now); continue; }
-            let _=self.db.mark_scheduled_job(id,"running","",false,now);
-            let app=self.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(duration_ms)).await; if let Some(handle)=app.scanner.read().as_ref(){let _=handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop);} app.audio.clear_queue(); app.receiver_session.lock().release(&owner); let _=app.db.mark_scheduled_job(id,"completed","",false,crate::scanner::now_ms()); });
+            let payload: serde_json::Value = match serde_json::from_str(&job.payload_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = self.db.mark_scheduled_job(
+                        id,
+                        "failed",
+                        &format!("invalid payload: {e}"),
+                        false,
+                        now,
+                    );
+                    continue;
+                }
+            };
+            let Some(range_name) = payload.get("range_name").and_then(|v| v.as_str()) else {
+                let _ = self.db.mark_scheduled_job(
+                    id,
+                    "failed",
+                    "scan job requires payload.range_name",
+                    false,
+                    now,
+                );
+                continue;
+            };
+            let duration_ms = payload
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60_000)
+                .clamp(1_000, 3_600_000);
+            let range = self
+                .config
+                .read()
+                .scan_ranges
+                .iter()
+                .find(|r| r.name == range_name)
+                .cloned();
+            let Some(range) = range else {
+                let _ = self
+                    .db
+                    .mark_scheduled_job(id, "failed", "unknown scan range", false, now);
+                continue;
+            };
+            if let Some(handle) = self.scanner.read().as_ref() {
+                let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop);
+            }
+            self.audio.clear_queue();
+            self.receiver_session.lock().release("scanner");
+            let owner = format!("job:{id}");
+            if let Err(error) = self.receiver_session.lock().claim(&owner, false) {
+                let _ = self.db.mark_scheduled_job(id, "blocked", &error, true, now);
+                continue;
+            }
+            if self
+                .device
+                .set_sample_contract(range.sample_rate_hz)
+                .is_err()
+                || self
+                    .device
+                    .set_frequency(crate::scanner::initial_scan_center(
+                        &range,
+                        range.sample_rate_hz,
+                    ))
+                    .is_err()
+            {
+                self.receiver_session.lock().release(&owner);
+                let _ = self.db.mark_scheduled_job(
+                    id,
+                    "failed",
+                    "device configuration failed",
+                    false,
+                    now,
+                );
+                continue;
+            }
+            if let Some(handle) = self.scanner.read().as_ref() {
+                let _ = handle
+                    .cmd_tx
+                    .send(crate::scanner::ScannerCommand::Start { range });
+            } else {
+                self.receiver_session.lock().release(&owner);
+                let _ = self.db.mark_scheduled_job(
+                    id,
+                    "failed",
+                    "scanner runtime unavailable",
+                    false,
+                    now,
+                );
+                continue;
+            }
+            let _ = self.db.mark_scheduled_job(id, "running", "", false, now);
+            let app = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+                if let Some(handle) = app.scanner.read().as_ref() {
+                    let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop);
+                }
+                app.audio.clear_queue();
+                app.receiver_session.lock().release(&owner);
+                let _ =
+                    app.db
+                        .mark_scheduled_job(id, "completed", "", false, crate::scanner::now_ms());
+            });
         }
     }
 
@@ -260,14 +474,23 @@ pub struct ReceiverSession {
 impl ReceiverSession {
     pub fn claim(&mut self, owner: &str, force: bool) -> Result<(), String> {
         if let Some(current) = &self.owner {
-            if current != owner && !force { return Err(format!("receiver is held by {current}")); }
-            if current != owner { self.takeovers = self.takeovers.saturating_add(1); }
+            if current != owner && !force {
+                return Err(format!("receiver is held by {current}"));
+            }
+            if current != owner {
+                self.takeovers = self.takeovers.saturating_add(1);
+            }
         }
         self.owner = Some(owner.to_owned());
         self.acquired_ms = Some(crate::scanner::now_ms());
         Ok(())
     }
-    pub fn release(&mut self, owner: &str) { if self.owner.as_deref() == Some(owner) { self.owner = None; self.acquired_ms = None; } }
+    pub fn release(&mut self, owner: &str) {
+        if self.owner.as_deref() == Some(owner) {
+            self.owner = None;
+            self.acquired_ms = None;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -318,7 +541,9 @@ impl RecordingState {
     }
 
     pub fn write_iq(&mut self, samples: &[rustfft::num_complex::Complex<f32>]) {
-        if self.file.is_none() || self.write_error.is_some() { return; }
+        if self.file.is_none() || self.write_error.is_some() {
+            return;
+        }
         let mut bytes = Vec::with_capacity(samples.len() * 8);
         for sample in samples {
             bytes.extend_from_slice(&sample.re.to_le_bytes());
@@ -359,9 +584,16 @@ pub struct SpectrumFrame {
     pub bins_dbfs: Vec<f32>,
 }
 
-fn receiver_needs_recovery(runtime: Option<&crate::scanner::ScannerRuntimeState>, now_ms: i64) -> bool {
-    let Some(runtime) = runtime else { return true; };
-    if !runtime.running || runtime.vfo_states.is_empty() { return true; }
+fn receiver_needs_recovery(
+    runtime: Option<&crate::scanner::ScannerRuntimeState>,
+    now_ms: i64,
+) -> bool {
+    let Some(runtime) = runtime else {
+        return true;
+    };
+    if !runtime.running || runtime.vfo_states.is_empty() {
+        return true;
+    }
     if runtime.latest_spectrum_ms <= 0 {
         return runtime.started_ms > 0 && now_ms.saturating_sub(runtime.started_ms) > 5_000;
     }
@@ -401,10 +633,12 @@ mod recording_tests {
     use rustfft::num_complex::Complex;
     use std::fs::{self, File};
 
-
     #[test]
     fn iq_recording_writes_cf32_bytes_and_counts_exactly() {
-        let path = std::env::temp_dir().join(format!("pulsescope-recording-test-{}.cf32", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-recording-test-{}.cf32",
+            std::process::id()
+        ));
         let mut state = RecordingState {
             file: Some(File::create(&path).unwrap()),
             path: Some(path.clone()),
@@ -447,8 +681,17 @@ mod recording_tests {
     #[test]
     fn receiver_supervisor_recovers_missing_stopped_and_stale_flows() {
         assert!(receiver_needs_recovery(None, 10_000));
-        assert!(receiver_needs_recovery(Some(&ScannerRuntimeState::default()), 10_000));
-        assert!(receiver_needs_recovery(Some(&running_receiver(2_000)), 10_000));
-        assert!(!receiver_needs_recovery(Some(&running_receiver(9_000)), 10_000));
+        assert!(receiver_needs_recovery(
+            Some(&ScannerRuntimeState::default()),
+            10_000
+        ));
+        assert!(receiver_needs_recovery(
+            Some(&running_receiver(2_000)),
+            10_000
+        ));
+        assert!(!receiver_needs_recovery(
+            Some(&running_receiver(9_000)),
+            10_000
+        ));
     }
 }

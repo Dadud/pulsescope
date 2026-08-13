@@ -28,7 +28,9 @@ use crate::state::AppState;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 
@@ -38,7 +40,8 @@ async fn main() {
     setup_sdr_runtime();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let server_mode = args.iter().any(|a| a == "--server" || a == "--api") || std::env::var("PULSESCOPE_API_ONLY").is_ok();
+    let server_mode = args.iter().any(|a| a == "--server" || a == "--api")
+        || std::env::var("PULSESCOPE_API_ONLY").is_ok();
     // A LAN/headless server must not open physical speakers merely because a
     // remote browser starts a scan. Desktop mode retains local audio; server
     // audio is opt-in for explicit lab use.
@@ -52,7 +55,10 @@ async fn main() {
     // Both desktop and LAN open onto a visible, muted monitor. Server mode
     // still hard-disables CPAL output above, so this cannot start speaker noise.
     app_state.start_default_monitor();
-    let port: u16 = std::env::var("PULSESCOPE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8765);
+    let port: u16 = std::env::var("PULSESCOPE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8765);
     let bind: String = std::env::var("PULSESCOPE_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
 
     let auth_token = std::env::var("PULSESCOPE_AUTH_TOKEN").ok();
@@ -64,7 +70,8 @@ async fn main() {
     if server_mode {
         let cfg = ServeConfig {
             addr: SocketAddr::from((
-                bind.parse::<std::net::IpAddr>().unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
+                bind.parse::<std::net::IpAddr>()
+                    .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
                 port,
             )),
             ui_dir,
@@ -161,7 +168,11 @@ fn bundled_sdr_root() -> Option<PathBuf> {
 /// Called at startup before any SDR operations.
 fn setup_sdr_runtime() {
     if let Some(root) = bundled_sdr_root() {
-        let bin = if root.join("bin").exists() { root.join("bin") } else { root.clone() };
+        let bin = if root.join("bin").exists() {
+            root.join("bin")
+        } else {
+            root.clone()
+        };
 
         // Point SoapySDR at the bundled root
         if std::env::var("SOAPY_SDR_ROOT").is_err() {
@@ -172,14 +183,19 @@ fn setup_sdr_runtime() {
         // Explicitly register bundled Soapy modules. This matters on Windows:
         // the core DLL can load while the module directory remains invisible.
         let modules = root.join("lib/SoapySDR/modules0.8");
-        if modules.exists() { std::env::set_var("SOAPY_SDR_MODULE_PATH", &modules); }
+        if modules.exists() {
+            std::env::set_var("SOAPY_SDR_MODULE_PATH", &modules);
+        }
 
         // SDRplay API is an external prerequisite for RSP1B/RSP2. Keep the
         // bundled runtime self-contained for other hardware, but add the
         // installed API directory when present so sdrPlaySupport.dll loads.
         let sdrplay_api = std::path::PathBuf::from(r"C:\Program Files\SDRplay\API\x64");
         let mut extra_path = bin.display().to_string();
-        if sdrplay_api.exists() { extra_path.push(';'); extra_path.push_str(&sdrplay_api.display().to_string()); }
+        if sdrplay_api.exists() {
+            extra_path.push(';');
+            extra_path.push_str(&sdrplay_api.display().to_string());
+        }
 
         // Prepend runtime DLL paths to PATH.
         if let Ok(path) = std::env::var("PATH") {
@@ -200,17 +216,24 @@ fn setup_sdr_runtime() {
 /// Load PEM certificate chain and private key from environment variables when
 /// both are present. Returns `None` if either is missing (run-time TLS is opt-in).
 fn load_tls_from_env() -> Option<crate::api::TlsConfig> {
-    let cert = std::env::var("PULSESCOPE_TLS_CERT").ok()
+    let cert = std::env::var("PULSESCOPE_TLS_CERT")
+        .ok()
         .map(std::path::PathBuf::from)
         .and_then(|p| std::fs::read(&p).ok());
-    let key = std::env::var("PULSESCOPE_TLS_KEY").ok()
+    let key = std::env::var("PULSESCOPE_TLS_KEY")
+        .ok()
         .map(std::path::PathBuf::from)
         .and_then(|p| std::fs::read(&p).ok());
     match (cert, key) {
-        (Some(certificate_chain_pem), Some(private_key_pem)) => Some(crate::api::TlsConfig { certificate_chain_pem, private_key_pem }),
+        (Some(certificate_chain_pem), Some(private_key_pem)) => Some(crate::api::TlsConfig {
+            certificate_chain_pem,
+            private_key_pem,
+        }),
         (None, None) => None,
         _ => {
-            tracing::warn!("both PULSESCOPE_TLS_CERT and PULSESCOPE_TLS_KEY must be set; TLS disabled");
+            tracing::warn!(
+                "both PULSESCOPE_TLS_CERT and PULSESCOPE_TLS_KEY must be set; TLS disabled"
+            );
             None
         }
     }
@@ -221,8 +244,8 @@ fn load_tls_from_env() -> Option<crate::api::TlsConfig> {
 // Kept under a cfg so server builds can drop the Tauri dependency if desired.
 #[cfg(feature = "desktop")]
 mod tauri {
-    use std::sync::Arc;
     use super::AppState;
+    use std::sync::Arc;
     use tauri::Manager;
 
     pub fn run(state: Arc<AppState>) {
@@ -231,7 +254,12 @@ mod tauri {
             .setup(|app| {
                 let state = app.state::<Arc<AppState>>().inner().clone();
                 let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8765));
-                let cfg = crate::api::ServeConfig { addr, ui_dir: None, auth_token: None, tls: None };
+                let cfg = crate::api::ServeConfig {
+                    addr,
+                    ui_dir: None,
+                    auth_token: None,
+                    tls: None,
+                };
                 tokio::spawn(async move {
                     if let Err(e) = crate::api::serve(cfg, state).await {
                         tracing::error!(error = %e, "Tauri API server error");
@@ -247,8 +275,8 @@ mod tauri {
 
 #[cfg(not(feature = "desktop"))]
 mod tauri {
-    use std::sync::Arc;
     use super::AppState;
+    use std::sync::Arc;
     pub fn run(_state: Arc<AppState>) {
         tracing::info!("desktop feature disabled: Tauri shell unavailable");
     }

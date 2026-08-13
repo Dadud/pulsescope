@@ -219,7 +219,11 @@ pub struct AudioConfig {
 }
 impl Default for AudioConfig {
     fn default() -> Self {
-        Self { sample_rate: 48_000, buffer_ms: 50, master_volume: 0.7 }
+        Self {
+            sample_rate: 48_000,
+            buffer_ms: 50,
+            master_volume: 0.7,
+        }
     }
 }
 
@@ -378,10 +382,16 @@ impl Default for DigitalDecoderConfig {
             enabled: false,
             multimon_path: "multimon-ng".into(),
             enabled_protocols: vec![
-                "POCSAG512".into(), "POCSAG1200".into(), "POCSAG2400".into(),
-                "FLEX".into(), "DTMF".into(), "EAS".into(),
-                "AFSK1200".into(), "AFSK2400".into(),
-                "FSK9600".into(), "MORSE_CW".into(),
+                "POCSAG512".into(),
+                "POCSAG1200".into(),
+                "POCSAG2400".into(),
+                "FLEX".into(),
+                "DTMF".into(),
+                "EAS".into(),
+                "AFSK1200".into(),
+                "AFSK2400".into(),
+                "FSK9600".into(),
+                "MORSE_CW".into(),
             ],
             auto_detect: true,
             auto_detect_threshold: 0.5,
@@ -431,9 +441,19 @@ pub struct HdRadioConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct StdcConfig { pub enabled: bool, pub path: String, pub uw_tolerance: u32 }
+pub struct StdcConfig {
+    pub enabled: bool,
+    pub path: String,
+    pub uw_tolerance: u32,
+}
 impl Default for StdcConfig {
-    fn default() -> Self { Self { enabled: false, path: "sdr-stdc-helper".into(), uw_tolerance: 4 } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "sdr-stdc-helper".into(),
+            uw_tolerance: 4,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -549,14 +569,30 @@ pub struct ReceiverLocationConfig {
     pub altitude_m: f64,
 }
 impl Default for ReceiverLocationConfig {
-    fn default() -> Self { Self { latitude_deg: 0.0, longitude_deg: 0.0, altitude_m: 0.0 } }
+    fn default() -> Self {
+        Self {
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            altitude_m: 0.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AprsConfig { pub enabled: bool, pub path: String, pub frequency_hz: u64 }
+pub struct AprsConfig {
+    pub enabled: bool,
+    pub path: String,
+    pub frequency_hz: u64,
+}
 impl Default for AprsConfig {
-    fn default() -> Self { Self { enabled: false, path: "direwolf".into(), frequency_hz: 144_390_000 } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "direwolf".into(),
+            frequency_hz: 144_390_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -578,16 +614,38 @@ impl Default for AcarsdecConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct DsdConfig { pub enabled: bool, pub mode: String, pub dsdneo_path: String }
+pub struct DsdConfig {
+    pub enabled: bool,
+    pub mode: String,
+    pub dsdneo_path: String,
+}
 impl Default for DsdConfig {
-    fn default() -> Self { Self { enabled: false, mode: "auto".into(), dsdneo_path: "dsd-neo".into() } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "auto".into(),
+            dsdneo_path: "dsd-neo".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RadiosondeConfig { pub enabled: bool, pub path: String, pub sonde_type: String, pub frequency_hz: u64 }
+pub struct RadiosondeConfig {
+    pub enabled: bool,
+    pub path: String,
+    pub sonde_type: String,
+    pub frequency_hz: u64,
+}
 impl Default for RadiosondeConfig {
-    fn default() -> Self { Self { enabled: false, path: "rs41mod".into(), sonde_type: "rs41".into(), frequency_hz: 402_500_000 } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "rs41mod".into(),
+            sonde_type: "rs41".into(),
+            frequency_hz: 402_500_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -634,9 +692,17 @@ pub struct RadioReferenceConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AircraftLookupConfig { pub enabled: bool, pub cache_ttl_days: u32 }
+pub struct AircraftLookupConfig {
+    pub enabled: bool,
+    pub cache_ttl_days: u32,
+}
 impl Default for AircraftLookupConfig {
-    fn default() -> Self { Self { enabled: true, cache_ttl_days: 7 } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_ttl_days: 7,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -651,9 +717,19 @@ pub struct TrunkingConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Dump978Config { pub enabled: bool, pub path: String, pub extra_args: Vec<String> }
+pub struct Dump978Config {
+    pub enabled: bool,
+    pub path: String,
+    pub extra_args: Vec<String>,
+}
 impl Default for Dump978Config {
-    fn default() -> Self { Self { enabled: false, path: "dump978".into(), extra_args: Vec::new() } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "dump978".into(),
+            extra_args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -706,7 +782,7 @@ pub struct ScanRange {
     pub name: String,
     pub start_hz: u64,
     pub end_hz: u64,
-    pub mode: String,         // am | nfm | wfm | lsb | usb
+    pub mode: String, // am | nfm | wfm | lsb | usb
     pub channel_bw_hz: u32,
     pub max_vfos: u32,
     pub enabled: bool,
@@ -740,91 +816,725 @@ impl Default for ScanRange {
 pub fn default_scan_ranges() -> Vec<ScanRange> {
     use AutoSquelchMode::*;
     vec![
-        range("AM Broadcast",        540_000,        1_700_000, "am",  9_000, 2, 1_500_000, Adaptive),
-        range("160m Amateur",        1_800_000,      2_000_000, "lsb", 2_700, 3,   250_000, Off),
-        range("80m Amateur",         3_500_000,      4_000_000, "lsb", 2_700, 3,   768_000, Off),
-        range("60m Amateur",         5_330_000,      5_406_000, "usb", 2_700, 3,   250_000, Off),
-        range("SW 49m",              5_900_000,      6_200_000, "am",  6_000, 2,   500_000, Adaptive),
-        range("40m Amateur",         7_000_000,      7_300_000, "lsb", 2_700, 3,   500_000, Off),
-        range("SW 41m",              7_200_000,      7_450_000, "am",  6_000, 2,   500_000, Adaptive),
-        range("SW 31m",              9_400_000,      9_900_000, "am",  6_000, 2,   768_000, Adaptive),
-        range("30m Amateur",        10_100_000,     10_150_000, "usb", 2_700, 3,   250_000, Off),
-        range("SW 25m",             11_600_000,     12_100_000, "am",  6_000, 2,   768_000, Adaptive),
-        range("SW 22m",             13_570_000,     13_870_000, "am",  6_000, 2,   500_000, Adaptive),
-        range("20m Amateur",        14_000_000,     14_350_000, "usb", 2_700, 3,   500_000, Off),
-        range("SW 19m",             15_100_000,     15_800_000, "am",  6_000, 2,   960_000, Adaptive),
-        range("SW 16m",             17_480_000,     17_900_000, "am",  6_000, 2,   500_000, Adaptive),
-        range("17m Amateur",        18_068_000,     18_168_000, "usb", 2_700, 3,   250_000, Off),
-        range("15m Amateur",        21_000_000,     21_450_000, "usb", 2_700, 3,   500_000, Off),
-        range("SW 13m",             21_450_000,     21_850_000, "am",  6_000, 2,   500_000, Adaptive),
-        range("12m Amateur",        24_890_000,     24_990_000, "usb", 2_700, 3,   250_000, Off),
-        range("SW 11m",             25_670_000,     26_100_000, "am",  6_000, 2,   500_000, Adaptive),
-        range("CB Radio",           26_965_000,     27_405_000, "am", 10_000, 3,   500_000, Adaptive),
-        range("10m Amateur",        28_000_000,     29_700_000, "am",  6_000, 3, 2_000_000, Adaptive),
-        range("10m SSB",            28_000_000,     28_500_000, "usb", 2_700, 3,   768_000, Off),
-        range("10m FM",             29_510_000,     29_700_000, "nfm",12_500, 3,   250_000, Adaptive),
-        range("Baby Monitors",      49_830_000,     49_890_000, "nfm",12_500, 2,   250_000, Adaptive),
-        range("6m Amateur",         50_000_000,     54_000_000, "nfm",12_500, 3, 5_000_000, Adaptive),
-        range("R/C Aircraft",       72_000_000,     73_000_000, "nfm",12_500, 2, 1_200_000, Adaptive),
-        range("R/C Surface",        75_400_000,     76_000_000, "nfm",12_500, 2,   768_000, Adaptive),
-        range("FM Broadcast",       88_000_000,    108_000_000, "wfm",200_000, 2, 2_000_000, Adaptive),
-        range("Aircraft AM",       118_000_000,    137_000_000, "am",  8_500, 3, 8_000_000, Adaptive),
-        range("ATC Ground",        121_600_000,    121_900_000, "am",  8_500, 3,   500_000, Adaptive),
-        range("ACARS",             129_000_000,    132_000_000, "am",  6_500, 3, 4_000_000, Adaptive),
-        range("NOAA APT",          137_000_000,    138_000_000, "nfm",40_000, 1, 1_200_000, Adaptive),
-        range("2m Amateur",        144_000_000,    148_000_000, "nfm",12_500, 3, 5_000_000, Adaptive),
-        range("MURS",              151_820_000,    154_600_000, "nfm",12_500, 3, 4_000_000, Adaptive),
-        range("VHF Business",      151_000_000,    154_000_000, "nfm",12_500, 3, 4_000_000, Adaptive),
-        range("Marine VHF",        156_000_000,    162_000_000, "nfm",25_000, 3, 7_000_000, Adaptive),
-        range("AIS",               161_975_000,    162_025_000, "nfm",25_000, 1,   250_000, Adaptive),
-        range("Railroad AAR",      160_215_000,    161_565_000, "nfm",12_500, 3, 1_500_000, Adaptive),
-        range("NOAA Weather",      162_400_000,    162_550_000, "nfm",25_000, 1,   250_000, Adaptive),
-        range("Federal Gov",       162_000_000,    174_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("220 Amateur",       222_000_000,    225_000_000, "nfm",12_500, 3, 4_000_000, Adaptive),
-        range("Military Air",      225_000_000,    400_000_000, "am",  8_500, 3, 8_000_000, Adaptive),
-        range("Radiosonde",        400_000_000,    406_000_000, "nfm",10_000, 3, 7_000_000, Adaptive),
-        range("70cm Amateur",      420_000_000,    450_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("ISM 433",           433_050_000,    434_790_000, "nfm",25_000, 3, 2_000_000, Adaptive),
-        range("UHF Business",      450_000_000,    470_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("Public Safety UHF", 453_000_000,    458_000_000, "nfm",12_500, 3, 6_000_000, Adaptive),
-        range("UHF Pagers",        454_000_000,    461_000_000, "nfm",25_000, 3, 8_000_000, Adaptive),
-        range("FRS/GMRS",          462_550_000,    467_725_000, "nfm",12_500, 3, 6_000_000, Adaptive),
-        range("UHF T-Band",        470_000_000,    512_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("Wireless Mics (TV)",470_000_000,    608_000_000, "nfm",200_000, 3, 8_000_000, Adaptive),
-        range("Wireless Mics (Duplex Gap)", 614_000_000, 616_000_000, "nfm", 200_000, 3, 2_400_000, Adaptive),
-        range("Wireless Mics (Guard Band)", 657_000_000, 663_000_000, "nfm", 200_000, 3, 7_000_000, Adaptive),
-        range("700 PS Mobile",     769_000_000,    775_000_000, "nfm",12_500, 3, 7_000_000, Adaptive),
-        range("700 PS Base",       799_000_000,    805_000_000, "nfm",12_500, 3, 7_000_000, Adaptive),
-        range("800 Trunked",       851_000_000,    869_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("33cm Amateur",      902_000_000,    928_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("ISM 915",           902_000_000,    928_000_000, "nfm",25_000, 3, 8_000_000, Adaptive),
-        range("Pagers",            929_000_000,    932_000_000, "nfm",25_000, 3, 4_000_000, Adaptive),
-        range("ADS-B UAT",         978_000_000,    978_200_000, "am",200_000, 1, 2_400_000, Adaptive),
-        range("ADS-B 1090",      1_090_000_000,  1_090_200_000, "am",1_000_000, 1, 2_400_000, Adaptive),
-        range("23cm Amateur",    1_240_000_000,  1_300_000_000, "nfm",12_500, 3, 8_000_000, Adaptive),
-        range("Inmarsat STD-C / AERO (DL)", 1_525_000_000, 1_559_000_000, "nfm", 12_000, 1, 2_400_000, Adaptive),
-        range("GPS L1 / Galileo E1", 1_574_000_000, 1_577_000_000, "nfm", 2_046_000, 1, 2_400_000, Adaptive),
-        range("GLONASS L1",        1_598_000_000, 1_606_000_000, "nfm", 8_000_000, 1, 2_400_000, Adaptive),
-        range("Iridium",           1_616_000_000, 1_626_500_000, "nfm", 31_500, 1, 5_000_000, Adaptive),
-        range("Inmarsat AERO (UL)",1_626_500_000, 1_660_500_000, "nfm", 12_000, 1, 2_400_000, Adaptive),
-        range("GOES HRIT / LRIT",  1_691_000_000, 1_695_000_000, "nfm", 1_500_000, 1, 5_000_000, Adaptive),
-        range("13cm Amateur (2300)",2_300_000_000, 2_310_000_000, "nfm", 12_500, 3, 8_000_000, Adaptive),
-        range("13cm Amateur (2390)",2_390_000_000, 2_450_000_000, "nfm", 12_500, 3, 8_000_000, Adaptive),
-        range("ISM 2.4 GHz",       2_400_000_000, 2_483_500_000, "nfm", 25_000, 3, 8_000_000, Adaptive),
-        range("CBRS 3.5 GHz",      3_550_000_000, 3_700_000_000, "nfm", 12_500, 3, 8_000_000, Adaptive),
-        range("4.9 GHz Public Safety", 4_940_000_000, 4_990_000_000, "nfm", 12_500, 3, 8_000_000, Adaptive),
-        range("5cm Amateur",       5_650_000_000, 5_925_000_000, "nfm", 12_500, 3, 8_000_000, Adaptive),
-        range("ISM 5.8 GHz",       5_725_000_000, 5_850_000_000, "nfm", 25_000, 3, 8_000_000, Adaptive),
-        range("US Cellular 850 Uplink",   824_000_000,   849_000_000, "nfm", 12_500, 0, 8_000_000, Off),
-        range("US Cellular 850 Downlink", 869_000_000,   894_000_000, "nfm", 12_500, 0, 8_000_000, Off),
-        range("US PCS 1900 Uplink",     1_850_000_000, 1_910_000_000, "nfm", 12_500, 0, 8_000_000, Off),
-        range("US PCS 1900 Downlink",   1_930_000_000, 1_990_000_000, "nfm", 12_500, 0, 8_000_000, Off),
+        range(
+            "AM Broadcast",
+            540_000,
+            1_700_000,
+            "am",
+            9_000,
+            2,
+            1_500_000,
+            Adaptive,
+        ),
+        range(
+            "160m Amateur",
+            1_800_000,
+            2_000_000,
+            "lsb",
+            2_700,
+            3,
+            250_000,
+            Off,
+        ),
+        range(
+            "80m Amateur",
+            3_500_000,
+            4_000_000,
+            "lsb",
+            2_700,
+            3,
+            768_000,
+            Off,
+        ),
+        range(
+            "60m Amateur",
+            5_330_000,
+            5_406_000,
+            "usb",
+            2_700,
+            3,
+            250_000,
+            Off,
+        ),
+        range(
+            "SW 49m", 5_900_000, 6_200_000, "am", 6_000, 2, 500_000, Adaptive,
+        ),
+        range(
+            "40m Amateur",
+            7_000_000,
+            7_300_000,
+            "lsb",
+            2_700,
+            3,
+            500_000,
+            Off,
+        ),
+        range(
+            "SW 41m", 7_200_000, 7_450_000, "am", 6_000, 2, 500_000, Adaptive,
+        ),
+        range(
+            "SW 31m", 9_400_000, 9_900_000, "am", 6_000, 2, 768_000, Adaptive,
+        ),
+        range(
+            "30m Amateur",
+            10_100_000,
+            10_150_000,
+            "usb",
+            2_700,
+            3,
+            250_000,
+            Off,
+        ),
+        range(
+            "SW 25m", 11_600_000, 12_100_000, "am", 6_000, 2, 768_000, Adaptive,
+        ),
+        range(
+            "SW 22m", 13_570_000, 13_870_000, "am", 6_000, 2, 500_000, Adaptive,
+        ),
+        range(
+            "20m Amateur",
+            14_000_000,
+            14_350_000,
+            "usb",
+            2_700,
+            3,
+            500_000,
+            Off,
+        ),
+        range(
+            "SW 19m", 15_100_000, 15_800_000, "am", 6_000, 2, 960_000, Adaptive,
+        ),
+        range(
+            "SW 16m", 17_480_000, 17_900_000, "am", 6_000, 2, 500_000, Adaptive,
+        ),
+        range(
+            "17m Amateur",
+            18_068_000,
+            18_168_000,
+            "usb",
+            2_700,
+            3,
+            250_000,
+            Off,
+        ),
+        range(
+            "15m Amateur",
+            21_000_000,
+            21_450_000,
+            "usb",
+            2_700,
+            3,
+            500_000,
+            Off,
+        ),
+        range(
+            "SW 13m", 21_450_000, 21_850_000, "am", 6_000, 2, 500_000, Adaptive,
+        ),
+        range(
+            "12m Amateur",
+            24_890_000,
+            24_990_000,
+            "usb",
+            2_700,
+            3,
+            250_000,
+            Off,
+        ),
+        range(
+            "SW 11m", 25_670_000, 26_100_000, "am", 6_000, 2, 500_000, Adaptive,
+        ),
+        range(
+            "CB Radio", 26_965_000, 27_405_000, "am", 10_000, 3, 500_000, Adaptive,
+        ),
+        range(
+            "10m Amateur",
+            28_000_000,
+            29_700_000,
+            "am",
+            6_000,
+            3,
+            2_000_000,
+            Adaptive,
+        ),
+        range(
+            "10m SSB", 28_000_000, 28_500_000, "usb", 2_700, 3, 768_000, Off,
+        ),
+        range(
+            "10m FM", 29_510_000, 29_700_000, "nfm", 12_500, 3, 250_000, Adaptive,
+        ),
+        range(
+            "Baby Monitors",
+            49_830_000,
+            49_890_000,
+            "nfm",
+            12_500,
+            2,
+            250_000,
+            Adaptive,
+        ),
+        range(
+            "6m Amateur",
+            50_000_000,
+            54_000_000,
+            "nfm",
+            12_500,
+            3,
+            5_000_000,
+            Adaptive,
+        ),
+        range(
+            "R/C Aircraft",
+            72_000_000,
+            73_000_000,
+            "nfm",
+            12_500,
+            2,
+            1_200_000,
+            Adaptive,
+        ),
+        range(
+            "R/C Surface",
+            75_400_000,
+            76_000_000,
+            "nfm",
+            12_500,
+            2,
+            768_000,
+            Adaptive,
+        ),
+        range(
+            "FM Broadcast",
+            88_000_000,
+            108_000_000,
+            "wfm",
+            200_000,
+            2,
+            2_000_000,
+            Adaptive,
+        ),
+        range(
+            "Aircraft AM",
+            118_000_000,
+            137_000_000,
+            "am",
+            8_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "ATC Ground",
+            121_600_000,
+            121_900_000,
+            "am",
+            8_500,
+            3,
+            500_000,
+            Adaptive,
+        ),
+        range(
+            "ACARS",
+            129_000_000,
+            132_000_000,
+            "am",
+            6_500,
+            3,
+            4_000_000,
+            Adaptive,
+        ),
+        range(
+            "NOAA APT",
+            137_000_000,
+            138_000_000,
+            "nfm",
+            40_000,
+            1,
+            1_200_000,
+            Adaptive,
+        ),
+        range(
+            "2m Amateur",
+            144_000_000,
+            148_000_000,
+            "nfm",
+            12_500,
+            3,
+            5_000_000,
+            Adaptive,
+        ),
+        range(
+            "MURS",
+            151_820_000,
+            154_600_000,
+            "nfm",
+            12_500,
+            3,
+            4_000_000,
+            Adaptive,
+        ),
+        range(
+            "VHF Business",
+            151_000_000,
+            154_000_000,
+            "nfm",
+            12_500,
+            3,
+            4_000_000,
+            Adaptive,
+        ),
+        range(
+            "Marine VHF",
+            156_000_000,
+            162_000_000,
+            "nfm",
+            25_000,
+            3,
+            7_000_000,
+            Adaptive,
+        ),
+        range(
+            "AIS",
+            161_975_000,
+            162_025_000,
+            "nfm",
+            25_000,
+            1,
+            250_000,
+            Adaptive,
+        ),
+        range(
+            "Railroad AAR",
+            160_215_000,
+            161_565_000,
+            "nfm",
+            12_500,
+            3,
+            1_500_000,
+            Adaptive,
+        ),
+        range(
+            "NOAA Weather",
+            162_400_000,
+            162_550_000,
+            "nfm",
+            25_000,
+            1,
+            250_000,
+            Adaptive,
+        ),
+        range(
+            "Federal Gov",
+            162_000_000,
+            174_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "220 Amateur",
+            222_000_000,
+            225_000_000,
+            "nfm",
+            12_500,
+            3,
+            4_000_000,
+            Adaptive,
+        ),
+        range(
+            "Military Air",
+            225_000_000,
+            400_000_000,
+            "am",
+            8_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "Radiosonde",
+            400_000_000,
+            406_000_000,
+            "nfm",
+            10_000,
+            3,
+            7_000_000,
+            Adaptive,
+        ),
+        range(
+            "70cm Amateur",
+            420_000_000,
+            450_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "ISM 433",
+            433_050_000,
+            434_790_000,
+            "nfm",
+            25_000,
+            3,
+            2_000_000,
+            Adaptive,
+        ),
+        range(
+            "UHF Business",
+            450_000_000,
+            470_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "Public Safety UHF",
+            453_000_000,
+            458_000_000,
+            "nfm",
+            12_500,
+            3,
+            6_000_000,
+            Adaptive,
+        ),
+        range(
+            "UHF Pagers",
+            454_000_000,
+            461_000_000,
+            "nfm",
+            25_000,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "FRS/GMRS",
+            462_550_000,
+            467_725_000,
+            "nfm",
+            12_500,
+            3,
+            6_000_000,
+            Adaptive,
+        ),
+        range(
+            "UHF T-Band",
+            470_000_000,
+            512_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "Wireless Mics (TV)",
+            470_000_000,
+            608_000_000,
+            "nfm",
+            200_000,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "Wireless Mics (Duplex Gap)",
+            614_000_000,
+            616_000_000,
+            "nfm",
+            200_000,
+            3,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "Wireless Mics (Guard Band)",
+            657_000_000,
+            663_000_000,
+            "nfm",
+            200_000,
+            3,
+            7_000_000,
+            Adaptive,
+        ),
+        range(
+            "700 PS Mobile",
+            769_000_000,
+            775_000_000,
+            "nfm",
+            12_500,
+            3,
+            7_000_000,
+            Adaptive,
+        ),
+        range(
+            "700 PS Base",
+            799_000_000,
+            805_000_000,
+            "nfm",
+            12_500,
+            3,
+            7_000_000,
+            Adaptive,
+        ),
+        range(
+            "800 Trunked",
+            851_000_000,
+            869_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "33cm Amateur",
+            902_000_000,
+            928_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "ISM 915",
+            902_000_000,
+            928_000_000,
+            "nfm",
+            25_000,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "Pagers",
+            929_000_000,
+            932_000_000,
+            "nfm",
+            25_000,
+            3,
+            4_000_000,
+            Adaptive,
+        ),
+        range(
+            "ADS-B UAT",
+            978_000_000,
+            978_200_000,
+            "am",
+            200_000,
+            1,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "ADS-B 1090",
+            1_090_000_000,
+            1_090_200_000,
+            "am",
+            1_000_000,
+            1,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "23cm Amateur",
+            1_240_000_000,
+            1_300_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "Inmarsat STD-C / AERO (DL)",
+            1_525_000_000,
+            1_559_000_000,
+            "nfm",
+            12_000,
+            1,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "GPS L1 / Galileo E1",
+            1_574_000_000,
+            1_577_000_000,
+            "nfm",
+            2_046_000,
+            1,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "GLONASS L1",
+            1_598_000_000,
+            1_606_000_000,
+            "nfm",
+            8_000_000,
+            1,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "Iridium",
+            1_616_000_000,
+            1_626_500_000,
+            "nfm",
+            31_500,
+            1,
+            5_000_000,
+            Adaptive,
+        ),
+        range(
+            "Inmarsat AERO (UL)",
+            1_626_500_000,
+            1_660_500_000,
+            "nfm",
+            12_000,
+            1,
+            2_400_000,
+            Adaptive,
+        ),
+        range(
+            "GOES HRIT / LRIT",
+            1_691_000_000,
+            1_695_000_000,
+            "nfm",
+            1_500_000,
+            1,
+            5_000_000,
+            Adaptive,
+        ),
+        range(
+            "13cm Amateur (2300)",
+            2_300_000_000,
+            2_310_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "13cm Amateur (2390)",
+            2_390_000_000,
+            2_450_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "ISM 2.4 GHz",
+            2_400_000_000,
+            2_483_500_000,
+            "nfm",
+            25_000,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "CBRS 3.5 GHz",
+            3_550_000_000,
+            3_700_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "4.9 GHz Public Safety",
+            4_940_000_000,
+            4_990_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "5cm Amateur",
+            5_650_000_000,
+            5_925_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "ISM 5.8 GHz",
+            5_725_000_000,
+            5_850_000_000,
+            "nfm",
+            25_000,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "US Cellular 850 Uplink",
+            824_000_000,
+            849_000_000,
+            "nfm",
+            12_500,
+            0,
+            8_000_000,
+            Off,
+        ),
+        range(
+            "US Cellular 850 Downlink",
+            869_000_000,
+            894_000_000,
+            "nfm",
+            12_500,
+            0,
+            8_000_000,
+            Off,
+        ),
+        range(
+            "US PCS 1900 Uplink",
+            1_850_000_000,
+            1_910_000_000,
+            "nfm",
+            12_500,
+            0,
+            8_000_000,
+            Off,
+        ),
+        range(
+            "US PCS 1900 Downlink",
+            1_930_000_000,
+            1_990_000_000,
+            "nfm",
+            12_500,
+            0,
+            8_000_000,
+            Off,
+        ),
     ]
 }
 
 #[allow(clippy::too_many_arguments)] // Compact constructor for the static built-in band table.
 fn range(
-    name: &str, start: u64, end: u64, mode: &str, bw: u32, vfos: u32, sr: u32, asq: AutoSquelchMode,
+    name: &str,
+    start: u64,
+    end: u64,
+    mode: &str,
+    bw: u32,
+    vfos: u32,
+    sr: u32,
+    asq: AutoSquelchMode,
 ) -> ScanRange {
     ScanRange {
         name: name.into(),

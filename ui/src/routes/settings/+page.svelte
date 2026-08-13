@@ -11,6 +11,8 @@
   let deviceError = $state('');
   let caps = $state<any>(null);
   let expertMode = $state(false);
+  let controlNotice = $state('');
+  let sampleRateBusy = $state(false);
 
   async function refreshCaps() { try { caps = await Api.deviceCapabilities(); } catch (e) { deviceError = String(e); } }
   async function discoverDevices() {
@@ -27,7 +29,33 @@
     expertMode = !expertMode;
     localStorage.setItem('pulsescope.expert-mode', expertMode ? '1' : '0');
   }
-  async function control(name: string, value: string | number | boolean) { try { const r = await Api.deviceControl(name, value); caps = r.capabilities; } catch (e) { deviceError = String(e); } }
+  function sampleRateChoices() {
+    const preferred = [2_000_000, 5_000_000, 8_000_000, 10_000_000];
+    const ranges = caps?.sample_rate_ranges_hz ?? [];
+    return preferred.filter((rate) => ranges.some((range: any) => rate >= range.minimum && rate <= range.maximum));
+  }
+  function gainStageLabel(stage: any) {
+    if (status?.driver === 'sdrplay' && (stage.name === 'IFGR' || stage.name === 'RFGR')) return `${stage.name} gain reduction`;
+    return `${stage.name} gain`;
+  }
+  async function control(name: string, value: string | number | boolean) {
+    deviceError = ''; controlNotice = 'Applying…';
+    try {
+      const r = await Api.deviceControl(name, value); caps = r.capabilities;
+      controlNotice = `Applied and verified at ${new Date().toLocaleTimeString()}`;
+    } catch (e) { deviceError = String(e); controlNotice = ''; }
+  }
+  async function setSampleRate(event: Event) {
+    const sampleRate = Number((event.currentTarget as HTMLSelectElement).value);
+    if (!sampleRate || sampleRateBusy) return;
+    sampleRateBusy = true; deviceError = ''; controlNotice = 'Reconfiguring sampled spectrum…';
+    try {
+      const result = await Api.deviceSampleRate(sampleRate);
+      status = result.status; caps = result.capabilities;
+      controlNotice = `${(sampleRate / 1e6).toFixed(0)} MSPS selected · ${(Number(result.bandwidth_hz) / 1e6).toFixed(3)} MHz analog bandwidth`;
+    } catch (e) { deviceError = String(e); controlNotice = ''; }
+    finally { sampleRateBusy = false; }
+  }
 
   onMount(async () => {
     expertMode = localStorage.getItem('pulsescope.expert-mode') === '1';
@@ -104,7 +132,11 @@
       <div class="row"><span>Total spectrum</span><code>{(Number(caps.total_bandwidth_hz ?? 0) / 1e6).toFixed(3)} MHz</code></div>
       <div class="row"><span>Usable spectrum</span><code>{(Number(caps.usable_bandwidth_hz ?? 0) / 1e6).toFixed(3)} MHz</code></div>
       <div class="row"><span>RX tuners</span><code>{caps.tuner_count ?? 1}</code></div>
-      {#if caps.agc_supported}<label class="row"><span>RF AGC</span><input type="checkbox" checked={caps.agc_enabled} onchange={(e) => control('agc', e.currentTarget.checked)} /></label>{/if}
+      {#if sampleRateChoices().length}
+        <label class="row"><span><b>Visible spectrum</b><small> Higher rates use more USB bandwidth and CPU.</small></span><select disabled={sampleRateBusy} value={status?.sample_rate} onchange={setSampleRate}>{#each sampleRateChoices() as rate}<option value={rate}>{(rate / 1e6).toFixed(0)} MSPS · about {(rate * 0.9 / 1e6).toFixed(1)} MHz usable</option>{/each}</select></label>
+      {/if}
+      {#if caps.agc_supported}<label class="row"><span><b>RF AGC</b><small> Automatic RF level; manual reductions are ignored while enabled.</small></span><input type="checkbox" checked={caps.agc_enabled} onchange={(e) => control('agc', e.currentTarget.checked)} /></label>{/if}
+      {#if controlNotice}<p class="control-notice" role="status">{controlNotice}</p>{/if}
       {#if caps.antennas.length > 1}<label class="row"><span>Antenna</span><select value={caps.antenna} onchange={(e) => control('antenna', e.currentTarget.value)}>{#each caps.antennas as antenna}<option value={antenna}>{antenna}</option>{/each}</select></label>{/if}
       {#if expertMode}
         <h3>Expert RF controls</h3>
@@ -112,7 +144,7 @@
         {#if caps.iq_balance_auto_supported}<label class="row"><span>IQ balance auto</span><input type="checkbox" checked={caps.iq_balance_auto} onchange={(e) => control('iq_balance_auto', e.currentTarget.checked)} /></label>{/if}
         {#if caps.frequency_correction_supported}<label class="row"><span>Frequency correction (PPM)</span><input type="number" step="0.1" value={caps.frequency_correction_ppm} onchange={(e) => control('frequency_correction_ppm', e.currentTarget.value)} /></label>{/if}
         {#each caps.gain_stages as stage}
-          <label class="row"><span>{stage.name} gain ({stage.value_db.toFixed(1)} dB)</span><input type="range" min={stage.min_db} max={stage.max_db} step={stage.step_db || 1} value={stage.value_db} onchange={(e) => control(`gain:${stage.name}`, e.currentTarget.value)} /></label>
+          <label class="row"><span>{gainStageLabel(stage)} ({stage.value_db.toFixed(1)} dB){#if status?.driver === 'sdrplay'}<small> Lower reduction = more RF gain.</small>{/if}</span><input disabled={caps.agc_enabled} type="range" min={stage.min_db} max={stage.max_db} step={stage.step_db || 1} value={stage.value_db} oninput={(e) => (stage.value_db = Number(e.currentTarget.value))} onchange={(e) => control(`gain:${stage.name}`, e.currentTarget.value)} /></label>
         {/each}
         {#each caps.settings as setting}
           <label class="row"><span>{setting.name}</span>
@@ -198,7 +230,9 @@
   .card { margin-bottom: 12px; }
   .row { display: flex; align-items: center; gap: 12px; margin: 6px 0; }
   .row label, .row span { width: 140px; color: var(--fg-dim); font-size: 12px; }
+  .row span small { display:block; width:auto; margin-top:2px; color:var(--fg-dim); font-size:10px; line-height:1.3; }
   .row code { font-family: var(--mono); }
+  .control-notice { margin:8px 0; padding:7px 9px; color:var(--ok); background:rgb(34 197 94 / 9%); border:1px solid rgb(34 197 94 / 25%); border-radius:5px; font:11px var(--mono); }
   .ok { color: var(--ok); margin-left: 8px; }
   .device-error { color: var(--danger); background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); border-radius: 4px; padding: 8px; font: 12px var(--mono); white-space: pre-wrap; }
   .bank-row { display: grid; grid-template-columns: 1.5fr 110px 110px 100px auto; gap: 6px; align-items: center; margin: 7px 0; }

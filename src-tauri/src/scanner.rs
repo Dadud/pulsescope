@@ -6,12 +6,15 @@
 // runs multiple virtual channels inside one captured I/Q span — the same
 // ergonomics used across the SDR scanner category, implemented originally.
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use rustfft::{FftPlanner};
 use rustfft::num_complex::Complex;
+use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -19,12 +22,15 @@ use crate::adsb::AdsbDecoder;
 use crate::audio::AudioSink;
 use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
-use crate::demod::{dc_block, decimate_complex_average, deemphasis, demodulate, low_pass_complex, low_pass_real, mix_down, Mode, SincResampler};
-use crate::device::DeviceLayer;
 use crate::db::Db;
+use crate::demod::{
+    dc_block, decimate_complex_average, deemphasis, demodulate, low_pass_complex, low_pass_real,
+    mix_down, Mode, SincResampler,
+};
+use crate::device::DeviceLayer;
+use crate::sidecar::SidecarRegistry;
 use crate::signal_id;
 use crate::state::{RecordingState, ScannerEvent, SpectrumFrame};
-use crate::sidecar::SidecarRegistry;
 
 /// Handle shared between the API and the UI. Cloning is cheap.
 #[derive(Clone)]
@@ -93,10 +99,50 @@ pub enum ScannerCommand {
     Shutdown,
 }
 
+pub fn initial_scan_center(range: &ScanRange, sample_rate: u32) -> u64 {
+    range
+        .start_hz
+        .saturating_add((sample_rate as u64 * 45) / 100)
+        .min(range.end_hz)
+}
+
+#[cfg(test)]
+mod scan_window_tests {
+    use super::*;
+
+    #[test]
+    fn initial_center_reserves_both_window_edges() {
+        let range = ScanRange {
+            start_hz: 88_000_000,
+            end_hz: 108_000_000,
+            ..Default::default()
+        };
+        assert_eq!(initial_scan_center(&range, 2_000_000), 88_900_000);
+    }
+
+    #[test]
+    fn narrow_range_centers_at_its_upper_edge_without_overflow() {
+        let range = ScanRange {
+            start_hz: 144_000_000,
+            end_hz: 144_100_000,
+            ..Default::default()
+        };
+        assert_eq!(initial_scan_center(&range, 2_000_000), 144_100_000);
+    }
+}
+
 /// Dedicated audio consumer; keeps demodulation and CPAL feeding off the FFT loop.
-struct AudioWorker { stop: Arc<AtomicBool>, thread: Option<std::thread::JoinHandle<()>> }
+struct AudioWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 impl AudioWorker {
-    fn start(ring: IqRing, audio: Arc<AudioSink>, device: Arc<DeviceLayer>, state: Arc<Mutex<ScannerRuntimeState>>) -> Self {
+    fn start(
+        ring: IqRing,
+        audio: Arc<AudioSink>,
+        device: Arc<DeviceLayer>,
+        state: Arc<Mutex<ScannerRuntimeState>>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let thread = std::thread::spawn(move || {
@@ -106,6 +152,7 @@ impl AudioWorker {
             let mut audio_filter_states = Vec::<f32>::new();
             let mut deemphasis_states = Vec::<f32>::new();
             let mut dc_states = Vec::<f32>::new();
+            let mut agc_gains = Vec::<f32>::new();
             let mut resampler = SincResampler::default();
             while !stop_thread.load(Ordering::Acquire) {
                 // Consume approximately 20 ms per DSP block at every device
@@ -113,7 +160,10 @@ impl AudioWorker {
                 // half a second of latency at 250 kS/s.
                 let sample_rate = device.status().sample_rate.max(1);
                 let audio_iq_chunk = ((sample_rate as usize) / 50).clamp(1_024, 262_144);
-                let Some(iq) = ring.take_exact(audio_iq_chunk) else { std::thread::sleep(Duration::from_millis(1)); continue; };
+                let Some(iq) = ring.take_exact(audio_iq_chunk) else {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                };
                 let vfos = state.lock().vfo_states.clone();
                 if previous.len() != vfos.len() {
                     previous = vec![None; vfos.len()];
@@ -122,64 +172,118 @@ impl AudioWorker {
                     audio_filter_states = vec![0.0; vfos.len()];
                     deemphasis_states = vec![0.0; vfos.len()];
                     dc_states = vec![0.0; vfos.len()];
+                    agc_gains = vec![1.0; vfos.len()];
                 }
                 let predecimation = (sample_rate / 500_000).max(1) as usize;
                 let effective_rate = (sample_rate / predecimation as u32).max(1);
                 let mut mixed = Vec::<f32>::new();
                 let mut active = 0usize;
                 for (idx, vfo) in vfos.iter().enumerate() {
-                    if vfo.muted { continue; }
+                    if vfo.muted {
+                        continue;
+                    }
                     let offset = vfo.frequency_hz as f64 - device.status().center_freq_hz as f64;
                     // Translate before reducing the wide RF sample rate. Doing
                     // this in the opposite order aliases offset VFOs.
                     let baseband = mix_down(&iq, offset, sample_rate, &mut phases[idx]);
                     let mode = Mode::parse(&vfo.mode);
-                    let cutoff_hz = match mode { Mode::Wfm => 100_000.0, Mode::Nfm => 12_500.0, _ => 5_000.0 };
-                    let baseband = low_pass_complex(&baseband, cutoff_hz, sample_rate, &mut filter_states[idx]);
+                    let cutoff_hz = match mode {
+                        Mode::Wfm => 100_000.0,
+                        Mode::Nfm => 12_500.0,
+                        _ => 5_000.0,
+                    };
+                    let baseband = low_pass_complex(
+                        &baseband,
+                        cutoff_hz,
+                        sample_rate,
+                        &mut filter_states[idx],
+                    );
                     let baseband = decimate_complex_average(&baseband, predecimation);
                     let mut pcm = demodulate(mode, &baseband, &mut previous[idx]);
-                    let audio_cutoff_hz = match mode { Mode::Wfm => 15_000.0, Mode::Nfm => 5_000.0, _ => 3_400.0 };
-                    pcm = low_pass_real(&pcm, audio_cutoff_hz, effective_rate, &mut audio_filter_states[idx]);
-                    if mode == Mode::Wfm { deemphasis(&mut pcm, effective_rate, 75.0, &mut deemphasis_states[idx]); }
+                    let audio_cutoff_hz = match mode {
+                        Mode::Wfm => 15_000.0,
+                        Mode::Nfm => 5_000.0,
+                        _ => 3_400.0,
+                    };
+                    pcm = low_pass_real(
+                        &pcm,
+                        audio_cutoff_hz,
+                        effective_rate,
+                        &mut audio_filter_states[idx],
+                    );
+                    if mode == Mode::Wfm {
+                        deemphasis(&mut pcm, effective_rate, 75.0, &mut deemphasis_states[idx]);
+                    }
                     dc_block(&mut pcm, &mut dc_states[idx], 0.995);
-                    if mixed.len() < pcm.len() { mixed.resize(pcm.len(), 0.0); }
-                    let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
-                    if let Some(current) = state.lock().vfo_states.iter_mut().find(|x| x.id == vfo.id) { current.audio_level_db = 20.0 * rms.max(1e-6).log10() + 60.0; }
-                    for (dst, sample) in mixed.iter_mut().zip(pcm.iter()) { *dst += *sample * vfo.volume; }
+                    if mixed.len() < pcm.len() {
+                        mixed.resize(pcm.len(), 0.0);
+                    }
+                    let rms =
+                        (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+                    if vfo.audio_agc {
+                        let target = (0.16 / rms.max(1e-5)).clamp(0.1, 12.0);
+                        let smoothing = if target < agc_gains[idx] { 0.35 } else { 0.04 };
+                        agc_gains[idx] += (target - agc_gains[idx]) * smoothing;
+                    } else {
+                        agc_gains[idx] = 1.0;
+                    }
+                    if let Some(current) =
+                        state.lock().vfo_states.iter_mut().find(|x| x.id == vfo.id)
+                    {
+                        current.audio_level_db = 20.0 * rms.max(1e-6).log10() + 60.0;
+                    }
+                    for (dst, sample) in mixed.iter_mut().zip(pcm.iter()) {
+                        *dst += (*sample * agc_gains[idx]).clamp(-1.0, 1.0) * vfo.volume;
+                    }
                     active += 1;
                 }
-                if active == 0 { continue; }
-                if active > 1 { for sample in &mut mixed { *sample /= active as f32; } }
+                if active == 0 {
+                    continue;
+                }
+                if active > 1 {
+                    for sample in &mut mixed {
+                        *sample /= active as f32;
+                    }
+                }
                 let output = resampler.process(&mixed, effective_rate, audio.sample_rate());
                 audio.push(&output, 1.0);
             }
         });
-        Self { stop, thread: Some(thread) }
+        Self {
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 impl Drop for AudioWorker {
-    fn drop(&mut self) { self.stop.store(true, Ordering::Release); if let Some(thread) = self.thread.take() { let _ = thread.join(); } }
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
-
 
 impl ScannerHandle {
     pub fn flush_iq(&self) {
-        for ring in &self.iq_consumers { ring.clear(); }
+        for ring in &self.iq_consumers {
+            ring.clear();
+        }
     }
 
     pub fn abort(&self) {
-        if let Some(task) = self.task.lock().take() { task.abort(); }
+        if let Some(task) = self.task.lock().take() {
+            task.abort();
+        }
     }
 
-    pub fn spawn(
-        cfg: ScannerConfig,
-        dependencies: ScannerDependencies,
-    ) -> Self {
+    pub fn spawn(cfg: ScannerConfig, dependencies: ScannerDependencies) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
         // FFT is a latest-frame consumer. Two complete FFT windows absorb
         // driver burstiness without accumulating stale waterfall history.
-        let capture_ring = IqRing::new_latest("fft", cfg.fft_size.saturating_mul(5).saturating_mul(2));
+        let capture_ring =
+            IqRing::new_latest("fft", cfg.fft_size.saturating_mul(5).saturating_mul(2));
         let audio_ring = IqRing::new("audio", 2_000_000);
         let task = tokio::spawn(scanner_loop(
             cfg,
@@ -227,14 +331,28 @@ async fn scanner_loop(
     let fft = fft_planner.plan_fft_forward(cfg.fft_size);
     let mut spectrum: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); cfg.fft_size];
     let capture_size = cfg.fft_size.saturating_mul(5);
-    let _audio_worker = AudioWorker::start(audio_ring.clone(), audio.clone(), device.clone(), state.clone());
-    let _capture_worker = CaptureWorker::start(device.clone(), vec![capture_ring.clone(), audio_ring.clone()], cfg.fft_size, playback, iq_network);
+    let _audio_worker = AudioWorker::start(
+        audio_ring.clone(),
+        audio.clone(),
+        device.clone(),
+        state.clone(),
+    );
+    let _capture_worker = CaptureWorker::start(
+        device.clone(),
+        vec![capture_ring.clone(), audio_ring.clone()],
+        cfg.fft_size,
+        playback,
+        iq_network,
+    );
 
     // Simple window coefficients (Hanning) — apodize 1.0 exposes `hanning_iter`.
-    let window: Vec<f32> = apodize::hanning_iter(cfg.fft_size).map(|x| x as f32).collect();
+    let window: Vec<f32> = apodize::hanning_iter(cfg.fft_size)
+        .map(|x| x as f32)
+        .collect();
     let mut last_signal_hit = Instant::now() - Duration::from_secs(2);
     let mut smoothed_noise_floor: Option<f32> = None;
     let mut native_adsb = AdsbDecoder::new(device.status().sample_rate);
+    let mut next_sweep_at = Instant::now();
 
     loop {
         // Drain commands
@@ -247,10 +365,12 @@ async fn scanner_loop(
                     audio_ring.clear();
                     audio.clear_queue();
                     let name = range.name.clone();
-                    let vfos = if range.max_vfos == 0 || cfg.max_vfos == 0 { Vec::new() } else {
+                    let vfos = if range.max_vfos == 0 || cfg.max_vfos == 0 {
+                        Vec::new()
+                    } else {
                         vec![VfoState {
                             id: 0,
-                            frequency_hz: range.start_hz,
+                            frequency_hz: device.status().center_freq_hz,
                             mode: range.mode.clone(),
                             // Monitoring is opt-in. Scans must never turn into
                             // speaker static merely because the app launched.
@@ -265,8 +385,16 @@ async fn scanner_loop(
                     state.lock().vfo_states = vfos.clone();
                     state.lock().active_range = Some(name.clone());
                     state.lock().running = true;
+                    state.lock().scan_locked = false;
                     state.lock().started_ms = now_ms();
                     active_range = Some(range);
+                    next_sweep_at = Instant::now()
+                        + Duration::from_millis(
+                            active_range
+                                .as_ref()
+                                .map(|r| r.dwell_ms.max(750) as u64)
+                                .unwrap_or(750),
+                        );
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                     tracing::info!(range = %name, "scanner started");
                 }
@@ -279,7 +407,9 @@ async fn scanner_loop(
                     tracing::info!("scanner stopped");
                 }
                 ScannerCommand::SetVfoFrequency { id, frequency_hz } => {
-                    if let Some(v) = state.lock().vfo_states.iter_mut().find(|v| v.id == id) {
+                    let mut runtime = state.lock();
+                    runtime.scan_locked = true;
+                    if let Some(v) = runtime.vfo_states.iter_mut().find(|v| v.id == id) {
                         v.frequency_hz = frequency_hz;
                     }
                 }
@@ -308,7 +438,7 @@ async fn scanner_loop(
         }
 
         if !state.lock().running || active_range.is_none() {
-        tokio::time::sleep(poll).await;
+            tokio::time::sleep(poll).await;
             continue;
         }
 
@@ -316,17 +446,26 @@ async fn scanner_loop(
         // replace DeviceLayer::read_iq; the scanner does not care which source
         // produced the samples.
         let iq = loop {
-            if let Some(frame) = capture_ring.take_latest_exact(capture_size) { break frame; }
-            if !state.lock().running { tokio::time::sleep(Duration::from_millis(2)).await; }
-            else { tokio::time::sleep(Duration::from_millis(1)).await; }
+            if let Some(frame) = capture_ring.take_latest_exact(capture_size) {
+                break frame;
+            }
+            if !state.lock().running {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         };
         sidecars.feed_iq(&iq).await;
         recording.lock().write_iq(&iq);
 
         // Native ADS-B path: only activate on an ADS-B range, so ordinary
         // scanner traffic never pays the Mode S preamble scan cost.
-        let native_adsb_active = active_range.as_ref()
-            .map(|r| r.name.to_ascii_lowercase().contains("ads-b") || r.name.to_ascii_lowercase().contains("adsb"))
+        let native_adsb_active = active_range
+            .as_ref()
+            .map(|r| {
+                r.name.to_ascii_lowercase().contains("ads-b")
+                    || r.name.to_ascii_lowercase().contains("adsb")
+            })
             .unwrap_or(false);
         if native_adsb_active {
             if native_adsb.is_none() {
@@ -335,7 +474,9 @@ async fn scanner_loop(
             if let Some(decoder) = native_adsb.as_mut() {
                 decoder.feed_iq(&iq);
                 for message in decoder.take_messages() {
-                    let content = message.callsign.clone()
+                    let content = message
+                        .callsign
+                        .clone()
                         .or_else(|| message.altitude_ft.map(|a| format!("{a} ft")))
                         .unwrap_or_default();
                     let decoded = crate::db::DecodedMessage {
@@ -363,24 +504,39 @@ async fn scanner_loop(
         fft.process(&mut spectrum);
         let half = spectrum.len() / 2;
         let normalization = window.iter().sum::<f32>().max(1.0);
-        let bins: Vec<f32> = spectrum[half..].iter().chain(spectrum[..half].iter())
-            .map(|c| 20.0 * (c.norm() / normalization + 1e-12).log10()).collect();
+        let bins: Vec<f32> = spectrum[half..]
+            .iter()
+            .chain(spectrum[..half].iter())
+            .map(|c| 20.0 * (c.norm() / normalization + 1e-12).log10())
+            .collect();
         let range_name = state.lock().active_range.clone().unwrap_or_default();
         let mut floor_samples = bins.clone();
         floor_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let floor = floor_samples[floor_samples.len() / 2];
         let noise_floor = *smoothed_noise_floor.get_or_insert(floor);
         smoothed_noise_floor = Some(noise_floor * 0.92 + floor * 0.08);
-        if let Some((bin, peak)) = bins.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)) {
+        if let Some((bin, peak)) = bins
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
             let snr = *peak - noise_floor;
             if snr >= 12.0 && last_signal_hit.elapsed() >= Duration::from_secs(1) {
                 let status = device.status();
                 let offset = bin as f64 / bins.len() as f64 - 0.5;
-                let frequency_hz = (status.center_freq_hz as f64 + offset * status.sample_rate as f64).max(0.0) as u64;
+                let frequency_hz = (status.center_freq_hz as f64
+                    + offset * status.sample_rate as f64)
+                    .max(0.0) as u64;
                 let bandwidth_hz = (status.sample_rate / bins.len().max(1) as u32).max(1);
                 // Prefer the active range's channel BW when available (more accurate than FFT bin width)
-                let mode = active_range.as_ref().map(|r| r.mode.as_str()).unwrap_or("nfm");
-                let channel_bw = active_range.as_ref().map(|r| r.channel_bw_hz).unwrap_or(bandwidth_hz);
+                let mode = active_range
+                    .as_ref()
+                    .map(|r| r.mode.as_str())
+                    .unwrap_or("nfm");
+                let channel_bw = active_range
+                    .as_ref()
+                    .map(|r| r.channel_bw_hz)
+                    .unwrap_or(bandwidth_hz);
                 let classification = signal_id::classify(
                     frequency_hz,
                     channel_bw,
@@ -390,7 +546,9 @@ async fn scanner_loop(
                     None, // audio analysis happens on VFO identify / auto-decode path
                 );
                 let top = classification.candidates.first();
-                let decoder = top.map(|c| c.decoder.clone()).unwrap_or_else(|| "none".into());
+                let decoder = top
+                    .map(|c| c.decoder.clone())
+                    .unwrap_or_else(|| "none".into());
                 let _ = db.insert_classified_signal_event(
                     frequency_hz,
                     snr,
@@ -417,6 +575,11 @@ async fn scanner_loop(
                     confidence: classification.top_confidence,
                     decoder,
                 });
+                if let Some(vfo) = state.lock().vfo_states.first_mut() {
+                    if vfo.muted {
+                        vfo.frequency_hz = frequency_hz;
+                    }
+                }
                 last_signal_hit = Instant::now();
             }
         }
@@ -428,10 +591,34 @@ async fn scanner_loop(
             runtime.latest_spectrum = bins.clone();
             runtime.frames_processed = runtime.frames_processed.saturating_add(1);
             runtime.latest_spectrum_ms = now_ms();
-            let peak = bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             for vfo in runtime.vfo_states.iter_mut() {
-                vfo.strength_db = peak;
-                vfo.squelch_open = peak - noise_floor >= 12.0;
+                let status = device.status();
+                let normalized = (vfo.frequency_hz as f64 - status.center_freq_hz as f64)
+                    / status.sample_rate.max(1) as f64
+                    + 0.5;
+                let center_bin = (normalized * bins.len() as f64).round() as isize;
+                let channel_bw = active_range
+                    .as_ref()
+                    .map(|r| r.channel_bw_hz)
+                    .unwrap_or(12_500);
+                let radius = ((channel_bw as f64 / status.sample_rate.max(1) as f64)
+                    * bins.len() as f64
+                    / 2.0)
+                    .ceil()
+                    .max(2.0) as isize;
+                let start = (center_bin - radius).clamp(0, bins.len() as isize - 1) as usize;
+                let end = (center_bin + radius + 1).clamp(1, bins.len() as isize) as usize;
+                let local_peak = if start < end {
+                    bins[start..end]
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max)
+                } else {
+                    f32::NEG_INFINITY
+                };
+                vfo.strength_db = local_peak;
+                vfo.squelch_open = local_peak - noise_floor
+                    >= active_range.as_ref().map(|r| r.squelch_db).unwrap_or(12.0);
             }
             (runtime.frames_processed, runtime.latest_spectrum_ms)
         };
@@ -445,8 +632,47 @@ async fn scanner_loop(
             bins_dbfs: bins.clone(),
         });
         let _ = events_tx.send(ScannerEvent::VfoStates(state.lock().vfo_states.clone()));
-        let _ = events_tx.send(ScannerEvent::Spectrum { range: range_name, bins });
-        let frame_us = ((capture_size as f64 / device.status().sample_rate.max(1) as f64) * 1_000_000.0).max(500.0) as u64;
+        let _ = events_tx.send(ScannerEvent::Spectrum {
+            range: range_name,
+            bins,
+        });
+        if let Some(range) = active_range.as_ref() {
+            let status = device.status();
+            let usable = (status.sample_rate as u64 * 90) / 100;
+            let runtime = state.lock();
+            let should_sweep = range.end_hz.saturating_sub(range.start_hz) > usable
+                && !runtime.scan_locked
+                && !runtime.vfo_states.iter().any(|vfo| !vfo.muted)
+                && Instant::now() >= next_sweep_at;
+            drop(runtime);
+            if should_sweep {
+                let half = usable / 2;
+                let next = if status
+                    .center_freq_hz
+                    .saturating_add(usable)
+                    .saturating_add(half)
+                    > range.end_hz
+                {
+                    initial_scan_center(range, status.sample_rate)
+                } else {
+                    status.center_freq_hz.saturating_add(usable)
+                };
+                if device.set_frequency(next).is_ok() {
+                    capture_ring.clear();
+                    audio_ring.clear();
+                    audio.clear_queue();
+                    smoothed_noise_floor = None;
+                    if let Some(vfo) = state.lock().vfo_states.first_mut() {
+                        vfo.frequency_hz = next;
+                    }
+                }
+                next_sweep_at =
+                    Instant::now() + Duration::from_millis(range.dwell_ms.max(750) as u64);
+            }
+        }
+        let frame_us = ((capture_size as f64 / device.status().sample_rate.max(1) as f64)
+            * 1_000_000.0)
+            .max(500.0) as u64;
         tokio::time::sleep(Duration::from_micros(frame_us)).await;
     }
 }
@@ -472,20 +698,41 @@ mod hardware_tests {
     fn live_rsp1b_scanner_fft_has_dynamic_range() {
         let _hardware_guard = crate::device::LIVE_HARDWARE_LOCK.lock().unwrap();
         let device = DeviceLayer::new_mock();
-        let key = DeviceLayer::discover().into_iter().find(|d| d.driver == "sdrplay").expect("RSP1B missing from discovery").key;
+        let key = DeviceLayer::discover()
+            .into_iter()
+            .find(|d| d.driver == "sdrplay")
+            .expect("RSP1B missing from discovery")
+            .key;
         device.connect(&key).expect("connect RSP1B");
         device.set_sample_rate(2_000_000).expect("set rate");
         device.set_frequency(162_550_000).expect("tune");
-        let iq=device.read_iq(4096).expect("read live RSP1B IQ"); assert_eq!(iq.len(),4096,"short IQ frame");
-        let mut planner=FftPlanner::<f32>::new(); let fft=planner.plan_fft_forward(4096);
-        let mut out=iq.clone();
-        let window: Vec<f32>=apodize::hanning_iter(4096).map(|x|x as f32).collect();
-        for (sample,w) in out.iter_mut().zip(window.iter()) {*sample*=*w;}
+        let iq = device.read_iq(4096).expect("read live RSP1B IQ");
+        assert_eq!(iq.len(), 4096, "short IQ frame");
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(4096);
+        let mut out = iq.clone();
+        let window: Vec<f32> = apodize::hanning_iter(4096).map(|x| x as f32).collect();
+        for (sample, w) in out.iter_mut().zip(window.iter()) {
+            *sample *= *w;
+        }
         fft.process(&mut out);
-        let half=out.len()/2; let bins: Vec<f32>=out[half..].iter().chain(out[..half].iter()).map(|c|10.0*(c.norm_sqr()+1e-20).log10()).collect();
-        let min=bins.iter().copied().fold(f32::INFINITY,f32::min); let max=bins.iter().copied().fold(f32::NEG_INFINITY,f32::max);
-        assert!(max-min>6.0,"flat/non-live scanner spectrum: min={min} max={max}");
-        eprintln!("live RSP1B scanner FFT bins={} min_db={min:.2} max_db={max:.2} span_db={:.2}",bins.len(),max-min);
+        let half = out.len() / 2;
+        let bins: Vec<f32> = out[half..]
+            .iter()
+            .chain(out[..half].iter())
+            .map(|c| 10.0 * (c.norm_sqr() + 1e-20).log10())
+            .collect();
+        let min = bins.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max - min > 6.0,
+            "flat/non-live scanner spectrum: min={min} max={max}"
+        );
+        eprintln!(
+            "live RSP1B scanner FFT bins={} min_db={min:.2} max_db={max:.2} span_db={:.2}",
+            bins.len(),
+            max - min
+        );
         device.disconnect().expect("disconnect RSP1B");
     }
 }

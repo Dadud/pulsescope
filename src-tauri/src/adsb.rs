@@ -457,7 +457,10 @@ mod tests {
         let mut dec = AdsbDecoder::new(2_000_000).unwrap();
         dec.feed_magnitude(&mags);
         let msgs = dec.take_messages();
-        assert!(!msgs.is_empty(), "preamble+PPM path should recover the frame");
+        assert!(
+            !msgs.is_empty(),
+            "preamble+PPM path should recover the frame"
+        );
         assert_eq!(msgs[0].icao, "ABCDEF");
         assert_eq!(msgs[0].df, 17);
     }

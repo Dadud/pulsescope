@@ -302,23 +302,34 @@ pub struct IqDecoder {
 
 impl IqDecoder {
     pub fn new(sample_rate_hz: f64) -> Result<Self, &'static str> {
-        Ok(Self { discriminator: DiscriminatorDecoder::new(sample_rate_hz)?, previous: None })
+        Ok(Self {
+            discriminator: DiscriminatorDecoder::new(sample_rate_hz)?,
+            previous: None,
+        })
     }
 
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) -> Vec<Result<AisMessage, AisDecodeError>> {
         let mut out = Vec::new();
         for &(i, q) in samples {
-            if !i.is_finite() || !q.is_finite() { self.previous = None; continue; }
+            if !i.is_finite() || !q.is_finite() {
+                self.previous = None;
+                continue;
+            }
             if let Some((pi, pq)) = self.previous {
                 let discriminator = (q * pi - i * pq).atan2(i * pi + q * pq);
-                if let Some(result) = self.discriminator.push_sample(discriminator) { out.push(result); }
+                if let Some(result) = self.discriminator.push_sample(discriminator) {
+                    out.push(result);
+                }
             }
             self.previous = Some((i, q));
         }
         out
     }
 
-    pub fn reset(&mut self) { self.previous = None; self.discriminator.reset(); }
+    pub fn reset(&mut self) {
+        self.previous = None;
+        self.discriminator.reset();
+    }
 }
 
 /// Minimal fixed-clock slicer for zero-centred discriminator samples.
