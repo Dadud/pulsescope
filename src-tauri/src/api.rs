@@ -549,16 +549,39 @@ async fn system_health_v2(State(s): State<ApiState>) -> impl IntoResponse {
 
 async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
     let mut decoders = vec![
-        json!({"id":"adsb","name":"ADS-B / Mode S","status":"available","input":"iq","integration":"live","verification":"fixture"}),
-        json!({"id":"ais","name":"AIS","status":"available","input":"discriminator","integration":"on_demand","verification":"fixture"}),
-        json!({"id":"aprs","name":"APRS / AX.25","status":"available","input":"audio","integration":"on_demand","verification":"fixture"}),
-        json!({"id":"pocsag","name":"POCSAG","status":"available","input":"audio","integration":"on_demand","verification":"fixture"}),
-        json!({"id":"rds","name":"Broadcast RDS","status":"available","input":"wfm_multiplex","integration":"on_demand","verification":"fixture"}),
+        decoder_development_entry("adsb", "ADS-B / Mode S", "iq", "live"),
+        decoder_development_entry("ais", "AIS", "discriminator", "on_demand"),
+        decoder_development_entry("aprs", "APRS / AX.25", "audio", "on_demand"),
+        decoder_development_entry("pocsag", "POCSAG", "audio", "on_demand"),
+        decoder_development_entry("rds", "Broadcast RDS", "wfm_multiplex", "on_demand"),
     ];
     for decoder in s.0.sidecars.statuses().into_iter().filter(|decoder| decoder.running) {
-        decoders.push(json!({"id":decoder.name,"name":decoder.name,"status":"running","input":"managed_sidecar","integration":"live","verification":"health_check","input_samples":decoder.input_samples}));
+        decoders.push(json!({
+            "id": decoder.name,
+            "name": decoder.name,
+            "status": "installed",
+            "available": false,
+            "input": "managed_sidecar",
+            "integration": "live",
+            "verification": "process_health_only",
+            "missing_gate": "recorded IQ end-to-end fixture",
+            "input_samples": decoder.input_samples,
+        }));
     }
     Json(json!({"contract_version":2,"decoders":decoders}))
+}
+
+fn decoder_development_entry(id: &str, name: &str, input: &str, integration: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "status": "development",
+        "available": false,
+        "input": input,
+        "integration": integration,
+        "verification": "unit_fixture",
+        "missing_gate": "recorded IQ end-to-end fixture",
+    })
 }
 
 async fn get_settings(State(s): State<ApiState>) -> impl IntoResponse {
@@ -1094,7 +1117,7 @@ async fn goes_satellite(State(s): State<ApiState>) -> impl IntoResponse { let c=
 async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); if let Some(x)=v.get("satellite").and_then(|x|x.as_str()){c.goes_lrit.satellite=x.to_string();} if let Some(x)=v.get("output_image_dir").and_then(|x|x.as_str()){c.goes_lrit.output_image_dir=x.to_string();} if let Some(x)=v.get("sample_rate_hz").and_then(|x|x.as_u64()){c.goes_lrit.sample_rate_hz=x as u32;} let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
 
 async fn hd_radio_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.hd_radio.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.hd_radio.enabled,"available":false,"reason":"HD Radio decoder sidecar not configured"})) }
-async fn hd_radio_check(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ok":true,"available":c.hd_radio.enabled,"program":c.hd_radio.program,"stations":c.hd_radio.stations})) }
+async fn hd_radio_check(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ok":true,"available":false,"configured":c.hd_radio.enabled,"program":c.hd_radio.program,"stations":c.hd_radio.stations,"reason":"HD Radio decoder sidecar not configured"})) }
 async fn hd_radio_messages() -> impl IntoResponse { Json(json!([])) }
 async fn hd_radio_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.hd_radio.enabled,"auto_on_fm_lock":c.hd_radio.auto_on_fm_lock,"program":c.hd_radio.program,"stations":c.hd_radio.stations})) }
 async fn hd_radio_aas(Path(_filename): Path<String>) -> impl IntoResponse { Json(json!({})) }
@@ -1607,7 +1630,17 @@ async fn iq_rec_start(State(s): State<ApiState>, req: Option<Json<RecordingReq>>
 async fn iq_rec_stop(State(s): State<ApiState>) -> impl IntoResponse { rec_iq_stop(State(s)).await }
 async fn iq_rec_status(State(s): State<ApiState>) -> impl IntoResponse { Json(s.0.recording.lock().status()) }
 
-async fn transcription_start(State(s): State<ApiState>) -> impl IntoResponse { let mut c=s.0.config.write(); c.transcription.enabled=true; let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"running":true,"engine":c.transcription.engine,"model":c.transcription.model})) }
+async fn transcription_start(State(s): State<ApiState>) -> impl IntoResponse {
+    let c = s.0.config.read();
+    (StatusCode::NOT_IMPLEMENTED, Json(json!({
+        "ok": false,
+        "available": false,
+        "running": false,
+        "engine": c.transcription.engine,
+        "model": c.transcription.model,
+        "error": "transcription transport is not implemented",
+    })))
+}
 async fn transcription_stop(State(s): State<ApiState>) -> impl IntoResponse { let mut c=s.0.config.write(); c.transcription.enabled=false; let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"running":false})) }
 async fn transcription_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"running":c.transcription.enabled,"enabled":c.transcription.enabled,"engine":c.transcription.engine,"model":c.transcription.model})) }
 async fn transcription_list() -> impl IntoResponse { Json(json!([])) }
@@ -1910,7 +1943,7 @@ fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
 
 #[cfg(test)]
 mod readiness_tests {
-    use super::readiness_reasons;
+    use super::{decoder_development_entry, readiness_reasons};
 
     #[test]
     fn real_device_with_fresh_samples_is_ready() {
@@ -1940,6 +1973,15 @@ mod readiness_tests {
             readiness_reasons(true, "rtlsdr", 42, 1_000, 10_000, false),
             vec!["sample_flow_stale"]
         );
+    }
+
+    #[test]
+    fn unit_fixture_decoder_is_not_advertised_as_available() {
+        let decoder = decoder_development_entry("adsb", "ADS-B", "iq", "live");
+        assert_eq!(decoder["status"], "development");
+        assert_eq!(decoder["available"], false);
+        assert_eq!(decoder["verification"], "unit_fixture");
+        assert!(decoder["missing_gate"].as_str().is_some());
     }
 }
 
