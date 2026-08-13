@@ -35,6 +35,8 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET | `/api/v2/decoders/catalog` | Truthful beta/installed decoder catalog and missing verification gate |
 | GET | `/api/v2/decoder-jobs` | Isolated decoder-process state |
 | GET | `/api/v2/recordings` | Active recording and persisted files |
+| GET | `/api/v2/media/capabilities` | Truthful media transports and acceptance status |
+| POST | `/api/v2/media/sessions` | WebRTC negotiation (HTTP 501 with PCM fallback until the Opus gate passes) |
 
 ### Binary spectrum stream v3
 

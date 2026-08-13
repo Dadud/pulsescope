@@ -37,6 +37,9 @@
   let waterfallImage: ImageData | null = null;
   let waterfallWorker: Worker | null = null;
   let waterfallRenderer = $state('canvas2d');
+  let renderFps = $state(0);
+  let renderFrames = 0;
+  let renderWindowStarted = performance.now();
   let drawPending = false;
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
@@ -304,6 +307,13 @@
       drawPending = false;
       drawSpectrum();
       drawWaterfall();
+      renderFrames += 1;
+      const renderedAt = performance.now();
+      if (renderedAt - renderWindowStarted >= 1_000) {
+        renderFps = Math.round(renderFrames * 1_000 / (renderedAt - renderWindowStarted));
+        renderFrames = 0;
+        renderWindowStarted = renderedAt;
+      }
     });
   }
 
@@ -810,7 +820,7 @@
 
     <div class="spectrum-wrap card" class:stale={spectrumStale}>
       <div class="spectrum-heading">
-        <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · frame ${lastSpectrumSequence}${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
+        <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · ${Math.max(0, nowMs - lastSpectrumAt)} ms old · ${renderFps} FPS · latest-only queue${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
         <div class="spectrum-tools" role="group" aria-label="Spectrum interaction">
           <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Pick listening frequency</button>
           <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Move capture window</button>

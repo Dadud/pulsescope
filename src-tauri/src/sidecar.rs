@@ -154,6 +154,29 @@ impl SidecarRegistry {
         Ok(())
     }
 
+    /// Launch only after a signed manifest and its executable digest have
+    /// passed verification. UI/API callers never provide this path or argv;
+    /// both are covered by the administrator-installed manifest signature.
+    pub async fn spawn_manifest_decoder(
+        &self,
+        manifest: &crate::decoder_manifest::SignedDecoderManifest,
+        decoder_root: &std::path::Path,
+        trusted_key: &ed25519_dalek::VerifyingKey,
+        db: Db,
+        events_tx: broadcast::Sender<ScannerEvent>,
+    ) -> anyhow::Result<()> {
+        manifest.verify_signature(trusted_key)?;
+        manifest.verify_executable(decoder_root)?;
+        self.spawn_decoder(
+            &manifest.payload.id,
+            decoder_root.join(&manifest.payload.executable),
+            manifest.payload.arguments.clone(),
+            db,
+            events_tx,
+        )
+        .await
+    }
+
     pub async fn feed_iq(&self, samples: &[rustfft::num_complex::Complex<f32>]) {
         use tokio::io::AsyncWriteExt;
         let handles: Vec<_> = self

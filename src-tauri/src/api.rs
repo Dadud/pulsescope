@@ -77,6 +77,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/v2/decoders/catalog", get(decoder_catalog_v2))
         .route("/v2/decoder-jobs", get(decoder_jobs_v2))
         .route("/v2/recordings", get(recordings_v2))
+        .route("/v2/media/capabilities", get(media_capabilities_v2))
+        .route("/v2/media/sessions", post(media_session_v2))
         .route("/settings", get(get_settings).put(put_settings))
         // ── device ───────────────────────────────────────────────────────
         .route("/devices", get(list_devices))
@@ -895,6 +897,29 @@ async fn recordings_v2(State(s): State<ApiState>) -> impl IntoResponse {
         .collect::<Vec<_>>();
     Json(
         json!({"contract_version":2,"active":s.0.recording.lock().status(),"recordings":recordings}),
+    )
+}
+
+async fn media_capabilities_v2() -> impl IntoResponse {
+    Json(json!({
+        "contract_version": 2,
+        "preferred": "pcm-websocket",
+        "transports": [
+            {"id":"pcm-websocket","available":true,"path":"/audio/stream","frame_ms":20,"sample_rate_hz":48000,"channels":[1,2],"status":"fixture_verified"},
+            {"id":"webrtc-opus","available":false,"status":"planned","missing_gate":"Opus/WebRTC negotiation, loss recovery, and two-hour LAN acceptance run"}
+        ]
+    }))
+}
+
+async fn media_session_v2() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "ok": false,
+            "error": "WebRTC media sessions are not available in this build",
+            "fallback": {"transport":"pcm-websocket","path":"/audio/stream"},
+            "missing_gate": "Opus/WebRTC negotiation, loss recovery, and two-hour LAN acceptance run"
+        })),
     )
 }
 
