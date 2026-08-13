@@ -227,24 +227,39 @@ impl AppState {
         let app = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
+            let mut next_hardware_probe = tokio::time::Instant::now();
+            let mut hardware_probe_backoff = Duration::from_secs(2);
             loop {
                 tick.tick().await;
                 let status = app.device.status();
                 if status.driver == "mock" {
+                    let now = tokio::time::Instant::now();
+                    if now < next_hardware_probe {
+                        continue;
+                    }
                     let devices = tokio::task::spawn_blocking(crate::device::DeviceLayer::discover)
                         .await
                         .unwrap_or_default();
                     let Some(candidate) =
                         devices.into_iter().find(|device| device.driver != "mock")
                     else {
+                        next_hardware_probe = now + hardware_probe_backoff;
+                        hardware_probe_backoff = hardware_probe_backoff
+                            .saturating_mul(2)
+                            .min(Duration::from_secs(30));
                         continue;
                     };
                     let device = app.device.clone();
                     let key = candidate.key.clone();
                     let connected = tokio::task::spawn_blocking(move || device.connect(&key)).await;
                     if !matches!(connected, Ok(Ok(()))) {
+                        next_hardware_probe = now + hardware_probe_backoff;
+                        hardware_probe_backoff = hardware_probe_backoff
+                            .saturating_mul(2)
+                            .min(Duration::from_secs(30));
                         continue;
                     }
+                    hardware_probe_backoff = Duration::from_secs(2);
                     tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
                 }
 

@@ -33,11 +33,12 @@ docker run -d --name pulsescope-canary --restart=no \
   -e PULSESCOPE_BIND=0.0.0.0 -e PULSESCOPE_PORT=8765 \
   -e PULSESCOPE_DATA_DIR=/var/lib/pulsescope -e PULSESCOPE_UI_DIR=/app/ui \
   -e PULSESCOPE_AUDIO_OUTPUT=0 \
+  -e PULSESCOPE_PREFER_PHYSICAL=0 -e PULSESCOPE_ALLOW_MOCK_READY=1 \
   -v pulsescope-canary-data:/var/lib/pulsescope \
   pulsescope:VERSION
 ```
 
-Synthetic/browser validation can run concurrently. A physical SDR has one owner, so live-RF acceptance requires a controlled handoff: stop production, attach the same restricted USB/driver mounts to the canary, run the hardware gates, stop canary, and immediately restart production if any gate fails. Do not point a canary at the production data volume.
+Synthetic/browser validation can run concurrently. Explicitly disabling physical selection prevents the synthetic canary from repeatedly probing or contending for an SDR owned by production. A physical SDR has one owner, so live-RF acceptance requires a controlled handoff: stop production, attach the same restricted USB/driver mounts to the canary, remove `PULSESCOPE_PREFER_PHYSICAL=0`, run the hardware gates, stop canary, and immediately restart production if any gate fails. Do not point a canary at the production data volume.
 
 Cut over port 8080 only after `/api/health/ready` reports advancing physical samples, `/api/v2/system/health` reports fresh FFT flow, browser tuning/audio tests pass, and the required soak finishes. Preserve the previous image tag and never reuse it for a new build.
 
