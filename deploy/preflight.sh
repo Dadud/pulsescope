@@ -20,9 +20,17 @@ if [ "$receive_buffer" -ge 4194304 ]; then pass "socket receive buffer max is $r
 if command -v SoapySDRUtil >/dev/null 2>&1; then
   pass 'SoapySDRUtil is installed'
   printf '\nDetected SDRs:\n'
-  SoapySDRUtil --find 2>&1 || warn 'Soapy discovery returned no usable receiver'
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 SoapySDRUtil --find 2>&1 || warn 'Soapy discovery returned no usable receiver within 20 seconds (stop other SDR applications and retry)'
+  else
+    SoapySDRUtil --find 2>&1 || warn 'Soapy discovery returned no usable receiver'
+  fi
   printf '\nInstalled modules:\n'
-  SoapySDRUtil --info 2>&1 || true
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 SoapySDRUtil --info 2>&1 || warn 'Soapy module inventory did not finish within 10 seconds'
+  else
+    SoapySDRUtil --info 2>&1 || true
+  fi
 else
   fail 'SoapySDRUtil is missing'
 fi
