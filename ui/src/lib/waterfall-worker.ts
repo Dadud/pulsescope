@@ -5,6 +5,7 @@ type RenderMessage = {
   palette?: 'classic' | 'mono';
   width?: number;
   height?: number;
+  clear?: boolean;
 };
 
 let target: OffscreenCanvas | null = null;
@@ -25,6 +26,12 @@ self.onmessage = (event: MessageEvent<RenderMessage>) => {
     context = target.getContext('2d');
     pixels = new Uint8ClampedArray(width * height * 4);
     image = context?.createImageData(width, height) ?? null;
+    return;
+  }
+  if (message.clear && context && pixels && image) {
+    pixels.fill(0);
+    image.data.set(pixels);
+    context.putImageData(image, 0, 0);
     return;
   }
   if (!context || !pixels || !image || !message.bins?.length) return;

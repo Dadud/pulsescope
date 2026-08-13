@@ -278,6 +278,7 @@ export const Api = {
   deviceConnect: (key: string, label?: string) => postJson('/device/connect', { key, label }),
   deviceDisconnect: () => postJson('/device/disconnect'),
   deviceStatus: () => getJson('/device/status'),
+  deviceFrequency: (frequency_hz: number) => postJson('/device/frequency', { frequency_hz }),
   deviceCapabilities: () => getJson('/device/capabilities'),
   deviceControl: (control: string, value: string | number | boolean) => postJson('/device/control', { control, value: String(value) }),
   decodedMessages: (limit = 100) => getJson<DecodedMessage[]>(`/decoded_messages?limit=${limit}`),

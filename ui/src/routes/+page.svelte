@@ -45,8 +45,18 @@
   let livePollBusy = false;
   let livePollTick = 0;
   let livePolling = false;
+  let spectrumTool: 'vfo' | 'center' = $state('vfo');
+  let pendingCenterHz: number | null = $state(null);
+  let centerTuneTimer: ReturnType<typeof setTimeout> | null = null;
+  let centerTuneBusy = $state(false);
+  let panPointerId: number | null = null;
+  let panStartX = 0;
+  let panStartCenterHz = 0;
+  let panDragged = false;
+  let suppressSurfaceClick = false;
 
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
+  const displayedCenterHz = $derived(pendingCenterHz ?? centerFreqHz);
 
   const filteredBanks = $derived(
     banks.filter((b) => b.enabled !== false && b.name.toLowerCase().includes(filter.toLowerCase()))
@@ -138,6 +148,8 @@
       livePolling = false;
       if (livePollTimer) window.clearTimeout(livePollTimer);
       livePollTimer = null;
+      if (centerTuneTimer) window.clearTimeout(centerTuneTimer);
+      centerTuneTimer = null;
       if (spectrumReconnectTimer) window.clearTimeout(spectrumReconnectTimer);
       spectrumReconnectTimer = null;
       if (eventReconnectTimer) window.clearTimeout(eventReconnectTimer);
@@ -447,12 +459,118 @@
     await Api.scanStop();
   }
 
-  async function tuneFromSpectrum(event: MouseEvent) {
-    const target = event.currentTarget as HTMLCanvasElement;
-    if (!vfos.length || sampleRateHz <= 0) return;
+  function frequencyAtSurface(target: HTMLCanvasElement, clientX: number): number {
     const rect = target.getBoundingClientRect();
-    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    const frequencyHz = Math.round(centerFreqHz - sampleRateHz / 2 + fraction * sampleRateHz);
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    return Math.max(1, Math.round(centerFreqHz - sampleRateHz / 2 + fraction * sampleRateHz));
+  }
+
+  function clearWaterfallHistory() {
+    waterfallPixels = null;
+    waterfallImage = null;
+    if (waterfallWorker) waterfallWorker.postMessage({ clear: true });
+  }
+
+  async function applyCenterFrequency(frequencyHz: number) {
+    if (!connected || !Number.isFinite(frequencyHz) || frequencyHz <= 0) return;
+    if (centerTuneBusy) {
+      pendingCenterHz = Math.round(frequencyHz);
+      return;
+    }
+    const requestedHz = Math.round(frequencyHz);
+    centerTuneBusy = true;
+    pendingCenterHz = requestedHz;
+    try {
+      if (scanRunning) await stopScan();
+      await Api.deviceFrequency(requestedHz);
+      centerFreqHz = requestedHz;
+      clearWaterfallHistory();
+      notice = `Receiver centered on ${fmtHz(requestedHz)}`;
+      window.setTimeout(() => { if (notice.startsWith('Receiver centered')) notice = ''; }, 1800);
+    } catch (error) {
+      notice = `Could not change center frequency: ${String(error)}`;
+    } finally {
+      centerTuneBusy = false;
+      const queuedHz = pendingCenterHz;
+      if (queuedHz !== null && queuedHz !== requestedHz) scheduleCenterFrequency(queuedHz, 0);
+      else pendingCenterHz = null;
+    }
+  }
+
+  function scheduleCenterFrequency(frequencyHz: number, delayMs = 180) {
+    pendingCenterHz = Math.max(1, Math.round(frequencyHz));
+    if (centerTuneTimer) window.clearTimeout(centerTuneTimer);
+    centerTuneTimer = window.setTimeout(() => {
+      centerTuneTimer = null;
+      const requested = pendingCenterHz;
+      if (requested !== null) void applyCenterFrequency(requested);
+    }, delayMs);
+  }
+
+  function panCenter(fractionOfSpan: number) {
+    if (sampleRateHz <= 0) return;
+    scheduleCenterFrequency(displayedCenterHz + sampleRateHz * fractionOfSpan, 80);
+  }
+
+  function centerOnVfo() {
+    const frequencyHz = vfos[0]?.frequency_hz;
+    if (frequencyHz) scheduleCenterFrequency(frequencyHz, 0);
+  }
+
+  function setCenterFromInput(event: Event) {
+    const mhz = Number((event.currentTarget as HTMLInputElement).value);
+    if (Number.isFinite(mhz) && mhz > 0) scheduleCenterFrequency(mhz * 1e6, 0);
+  }
+
+  function panSurfaceWheel(event: WheelEvent) {
+    if (!connected || sampleRateHz <= 0) return;
+    event.preventDefault();
+    const direction = Math.sign(Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY);
+    const step = event.shiftKey ? 0.01 : 0.08;
+    if (direction) scheduleCenterFrequency(displayedCenterHz + direction * sampleRateHz * step);
+  }
+
+  function beginSurfacePan(event: PointerEvent) {
+    if (spectrumTool !== 'center' || !connected) return;
+    const target = event.currentTarget as HTMLCanvasElement;
+    panPointerId = event.pointerId;
+    panStartX = event.clientX;
+    panStartCenterHz = displayedCenterHz;
+    panDragged = false;
+    target.setPointerCapture(event.pointerId);
+  }
+
+  function moveSurfacePan(event: PointerEvent) {
+    if (panPointerId !== event.pointerId || sampleRateHz <= 0) return;
+    const target = event.currentTarget as HTMLCanvasElement;
+    const distance = event.clientX - panStartX;
+    if (Math.abs(distance) > 4) panDragged = true;
+    pendingCenterHz = Math.max(1, Math.round(panStartCenterHz - distance / Math.max(1, target.clientWidth) * sampleRateHz));
+  }
+
+  function endSurfacePan(event: PointerEvent) {
+    if (panPointerId !== event.pointerId) return;
+    const target = event.currentTarget as HTMLCanvasElement;
+    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    panPointerId = null;
+    if (panDragged) {
+      suppressSurfaceClick = true;
+      const requested = pendingCenterHz;
+      if (requested !== null) scheduleCenterFrequency(requested, 0);
+      window.setTimeout(() => (suppressSurfaceClick = false), 0);
+    }
+  }
+
+  async function tuneFromSpectrum(event: MouseEvent) {
+    if (suppressSurfaceClick) return;
+    const target = event.currentTarget as HTMLCanvasElement;
+    if (sampleRateHz <= 0) return;
+    const frequencyHz = frequencyAtSurface(target, event.clientX);
+    if (spectrumTool === 'center') {
+      scheduleCenterFrequency(frequencyHz, 0);
+      return;
+    }
+    if (!vfos.length) return;
     await Api.vfoFrequency(vfos[0].id, frequencyHz);
     notice = `VFO ${vfos[0].id} tuned to ${fmtHz(frequencyHz)}`;
     window.setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 1800);
@@ -464,6 +582,10 @@
     event.preventDefault();
     const step = event.shiftKey ? 10_000 : 1_000;
     const direction = event.key === 'ArrowRight' ? 1 : -1;
+    if (spectrumTool === 'center') {
+      scheduleCenterFrequency(displayedCenterHz + direction * step, 0);
+      return;
+    }
     const frequencyHz = Math.max(1, Math.round(vfos[0].frequency_hz + direction * step));
     await Api.vfoFrequency(vfos[0].id, frequencyHz);
     notice = `VFO ${vfos[0].id} tuned to ${fmtHz(frequencyHz)}`;
@@ -614,17 +736,30 @@
         <span class="dot" class:on={connected}></span>
         {deviceLabel}
       </div>
-      <div class="receiver-readout"><span>RECEIVER</span><strong>{centerFreqHz > 0 ? fmtHz(centerFreqHz) : 'Tuning…'}</strong><small>{sampleRateHz > 0 ? `${fmtHz(sampleRateHz)} span` : ''}</small></div>
+      <div class="receiver-readout"><span>CENTER</span><strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Tuning…'}</strong><small>{sampleRateHz > 0 ? `${fmtHz(sampleRateHz)} visible span` : ''}</small></div>
       <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
       <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
     </div>
 
     <div class="spectrum-wrap card" class:stale={spectrumStale}>
-      <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · frame ${lastSpectrumSequence}${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
-      <canvas bind:this={canvas} onclick={tuneFromSpectrum} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={vfos[0]?.frequency_hz ?? centerFreqHz} aria-label="Spectrum tuner. Use left and right arrows to tune VFO 0; hold Shift for 10 kHz steps." title="Click to tune VFO 0"></canvas>
+      <div class="spectrum-heading">
+        <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · frame ${lastSpectrumSequence}${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
+        <div class="spectrum-tools" role="group" aria-label="Spectrum interaction">
+          <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Tune VFO</button>
+          <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Move center</button>
+        </div>
+      </div>
+      <div class="center-controls">
+        <button onclick={() => panCenter(-0.25)} aria-label="Move center left by one quarter of the visible span">← ¼ span</button>
+        <label><span>Center frequency</span><span class="frequency-entry"><input type="number" min="0.001" step="0.001" value={(displayedCenterHz / 1e6).toFixed(6)} onchange={setCenterFromInput} aria-label="Center frequency in megahertz" /><b>MHz</b></span></label>
+        <button onclick={centerOnVfo} disabled={!vfos.length} title="Put VFO 0 in the middle of the visible spectrum">Center on VFO</button>
+        <button onclick={() => panCenter(0.25)} aria-label="Move center right by one quarter of the visible span">¼ span →</button>
+      </div>
+      <p class="interaction-help">{spectrumTool === 'vfo' ? 'Click a signal to tune VFO 0. Scroll to move across the band.' : 'Click to make that frequency the new center, or drag the spectrum and waterfall left or right.'}</p>
+      <canvas class:center-mode={spectrumTool === 'center'} bind:this={canvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)} aria-label={spectrumTool === 'center' ? 'Spectrum center control. Click or drag to change center frequency; use arrow keys for fine adjustment.' : 'Spectrum tuner. Click to tune VFO 0; scroll to pan center frequency; use arrow keys to fine tune.'} title={spectrumTool === 'center' ? 'Click or drag to move the receiver center' : 'Click to tune VFO 0; scroll to pan'}></canvas>
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
-      <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
+      <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} bind:this={waterfallCanvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Scroll to pan the receiver center; select Move center to click or drag."></canvas>
     </div>
 
     <section class="signal-history card">
@@ -778,6 +913,23 @@
   .spectrum-wrap.stale canvas { opacity: 0.45; }
   .stale-overlay { position:absolute; inset:36px 12px 112px; display:grid; place-items:center; color:var(--warn); background:rgb(7 12 18 / 55%); font:700 12px var(--mono); text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
   .spectrum-wrap canvas { display: block; width: 100%; height: 95px; background: var(--bg); border-radius: 4px; }
+  .spectrum-wrap canvas { cursor:crosshair; }
+  .spectrum-wrap canvas.center-mode { cursor:grab; touch-action:none; }
+  .spectrum-wrap canvas.center-mode:active { cursor:grabbing; }
+  .spectrum-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .spectrum-heading h2 { margin:0; }
+  .spectrum-tools { display:flex; gap:3px; padding:2px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+  .spectrum-tools button { min-height:28px; padding:4px 9px; border:0; font-size:11px; }
+  .spectrum-tools button.active { color:#03120f; background:var(--accent); }
+  .center-controls { display:grid; grid-template-columns:auto minmax(220px, 1fr) auto auto; align-items:end; gap:6px; margin:8px 0 2px; }
+  .center-controls > button { min-height:36px; white-space:nowrap; }
+  .center-controls label { display:flex; flex-direction:column; gap:3px; color:var(--fg-dim); font:10px var(--mono); text-transform:uppercase; letter-spacing:.05em; }
+  .frequency-entry { display:flex; align-items:center; overflow:hidden; border:1px solid var(--line-strong); border-radius:6px; background:var(--bg); }
+  .frequency-entry:focus-within { border-color:var(--accent); box-shadow:0 0 0 2px rgb(45 212 191 / 15%); }
+  .frequency-entry input { width:100%; min-height:34px; padding:6px 9px; color:var(--accent); background:transparent; border:0; font:600 15px var(--mono); }
+  .frequency-entry input:focus { outline:0; }
+  .frequency-entry b { padding:0 9px; color:var(--fg-dim); font:11px var(--mono); }
+  .interaction-help { margin:4px 0 7px; color:var(--fg-dim); font-size:11px; }
   .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
   .waterfall-title { margin-top: 6px !important; }
   .waterfall-head { display:flex; align-items:center; gap:8px; }
@@ -854,6 +1006,15 @@
     .receiver-readout { order:-1; width:100%; justify-content:space-between; }
     .spectrum-wrap { min-height:0; }
     .spectrum-wrap h2 { display:flex; flex-wrap:wrap; gap:5px; align-items:baseline; }
+    .spectrum-heading { align-items:flex-start; }
+    .spectrum-heading h2 { flex:1; }
+    .spectrum-tools button { min-height:40px; padding:7px 10px; }
+    .center-controls { grid-template-columns:1fr 1fr; }
+    .center-controls label { grid-column:1 / -1; grid-row:1; }
+    .center-controls > button { min-height:44px; }
+    .center-controls > button:nth-of-type(2) { grid-column:1 / -1; grid-row:3; }
+    .frequency-entry input { min-height:42px; font-size:18px; }
+    .interaction-help { font-size:12px; line-height:1.4; }
     .spectrum-wrap canvas { height:150px; }
     .spectrum-wrap canvas.waterfall { height:120px; }
     .waterfall-head { flex-wrap:wrap; }
