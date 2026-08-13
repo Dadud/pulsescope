@@ -37,6 +37,12 @@ pub fn encode_u8_iq(samples: &[rustfft::num_complex::Complex<f32>]) -> Vec<u8> {
     bytes
 }
 
+impl Default for SidecarRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SidecarRegistry {
     pub fn new() -> Self {
         Self {
@@ -75,7 +81,7 @@ impl SidecarRegistry {
         let stderr = child.stderr.take().expect("stderr");
         let protocol = name.to_string();
 
-        let mut stdout = tokio::io::BufReader::new(stdout);
+        let stdout = tokio::io::BufReader::new(stdout);
         let events_tx_clone = events_tx.clone();
         let protocol_for_task = protocol.clone();
         tokio::spawn(async move {

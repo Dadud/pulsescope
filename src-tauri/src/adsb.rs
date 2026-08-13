@@ -251,7 +251,7 @@ pub fn decode_mode_s_bits(bits: &[bool]) -> Option<AdsbMessage> {
 }
 
 fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-    let mut out = Vec::with_capacity((bits.len() + 7) / 8);
+    let mut out = Vec::with_capacity(bits.len().div_ceil(8));
     for chunk in bits.chunks(8) {
         let mut b = 0u8;
         for (i, &bit) in chunk.iter().enumerate() {
@@ -373,13 +373,9 @@ pub fn synthesize_mode_s_magnitude(bits: &[bool], sphb: usize) -> Vec<f32> {
         let mut first = vec![0.05f32; sphb];
         let mut second = vec![0.05f32; sphb];
         if bit {
-            for s in &mut first {
-                *s = 1.0;
-            }
+            first.fill(1.0);
         } else {
-            for s in &mut second {
-                *s = 1.0;
-            }
+            second.fill(1.0);
         }
         mags.extend(first);
         mags.extend(second);

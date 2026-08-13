@@ -56,10 +56,10 @@ pub fn demodulate(mode: Mode, iq: &[Complex<f32>], previous: &mut Option<Complex
             }
         }
         Mode::Usb => {
-            for s in iq { out.push((s.re + s.im) * 0.7071); }
+            for s in iq { out.push((s.re + s.im) * std::f32::consts::FRAC_1_SQRT_2); }
         }
         Mode::Lsb => {
-            for s in iq { out.push((s.re - s.im) * 0.7071); }
+            for s in iq { out.push((s.re - s.im) * std::f32::consts::FRAC_1_SQRT_2); }
         }
         Mode::Nfm | Mode::Wfm => {
             let mut prev = previous.take().unwrap_or(iq[0]);
@@ -201,7 +201,6 @@ pub fn decode_cw(samples: &[f32], sample_rate: f32, target_tone_hz: f32) -> Opti
         envelope.push(snr >= 6.0);
     }
 
-    let block_ms = 5.0_f32;
     let mut runs: Vec<(bool, usize)> = Vec::new();
     for &on in &envelope {
         if let Some(last) = runs.last_mut() {
@@ -552,6 +551,7 @@ pub fn decode_navtex(samples: &[f32], sample_rate: f32) -> Option<String> {
 ///   2. Low-pass to isolate the 1.1875 kHz baseband
 ///   3. Clock recovery via zero crossings
 ///   4. Differential decoding
+///
 /// Returns decoded groups as a JSON-serializable struct.
 pub struct RdsResult {
     pub bits_decoded: usize,
@@ -832,8 +832,8 @@ mod tests {
         let sample_rate = 8000.0;
         let block = (sample_rate * 0.08) as usize;
         let mut samples = vec![0.0f32; block];
-        for i in 0..block {
-            samples[i] = ((TAU * 697.0 * i as f32 / sample_rate).sin() + (TAU * 1209.0 * i as f32 / sample_rate).sin()) * 0.3;
+        for (i, sample) in samples.iter_mut().enumerate() {
+            *sample = ((TAU * 697.0 * i as f32 / sample_rate).sin() + (TAU * 1209.0 * i as f32 / sample_rate).sin()) * 0.3;
         }
         let result = detect_dtmf(&samples, sample_rate).expect("should detect DTMF digit");
         assert!(result.contains('1'), "expected '1', got '{result}'");
@@ -875,7 +875,7 @@ mod tests {
         let gap_samples = dit_samples;
         let letter_gap = dit_samples * 3;
         let mut samples: Vec<f32> = Vec::new();
-        let mut key = |samples: &mut Vec<f32>, dur: usize| {
+        let key = |samples: &mut Vec<f32>, dur: usize| {
             for i in 0..dur {
                 samples.push((TAU * tone_hz * i as f32 / sample_rate).sin() * 0.5);
             }

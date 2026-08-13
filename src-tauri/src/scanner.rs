@@ -35,6 +35,19 @@ pub struct ScannerHandle {
     task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+#[derive(Clone)]
+pub struct ScannerDependencies {
+    pub device: Arc<DeviceLayer>,
+    pub db: Db,
+    pub recording: Arc<Mutex<RecordingState>>,
+    pub playback: Arc<Mutex<Option<crate::capture::PlaybackReader>>>,
+    pub audio: Arc<AudioSink>,
+    pub iq_network: IqNetworkSink,
+    pub sidecars: SidecarRegistry,
+    pub events_tx: broadcast::Sender<ScannerEvent>,
+    pub spectrum_tx: watch::Sender<SpectrumFrame>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScannerRuntimeState {
     pub active_range: Option<String>,
@@ -162,49 +175,50 @@ impl ScannerHandle {
 
     pub fn spawn(
         cfg: ScannerConfig,
-        device: Arc<DeviceLayer>,
-        db: Db,
-        recording: Arc<Mutex<RecordingState>>,
-        playback: Arc<Mutex<Option<crate::capture::PlaybackReader>>>,
-        audio: Arc<AudioSink>,
-        iq_network: IqNetworkSink,
-        sidecars: SidecarRegistry,
-        events_tx: broadcast::Sender<ScannerEvent>,
-        spectrum_tx: watch::Sender<SpectrumFrame>,
+        dependencies: ScannerDependencies,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
         let capture_ring = IqRing::new("fft", cfg.fft_size.saturating_mul(5).saturating_mul(16));
         let audio_ring = IqRing::new("audio", 2_000_000);
-        let task = tokio::spawn(scanner_loop(cfg, device, db, recording, playback, audio, iq_network, sidecars, events_tx, spectrum_tx, cmd_rx, state.clone(), capture_ring.clone(), audio_ring.clone()));
-        let handle = ScannerHandle {
+        let task = tokio::spawn(scanner_loop(
+            cfg,
+            dependencies,
+            cmd_rx,
+            state.clone(),
+            capture_ring.clone(),
+            audio_ring.clone(),
+        ));
+
+        ScannerHandle {
             cmd_tx: cmd_tx.clone(),
             state,
             iq_consumers: vec![capture_ring, audio_ring],
             task: Arc::new(Mutex::new(Some(task))),
-        };
-
-        handle
+        }
     }
 }
 
 /// Main scanner task — processes commands, runs the FFT loop, emits events.
 async fn scanner_loop(
     cfg: ScannerConfig,
-    device: Arc<DeviceLayer>,
-    db: Db,
-    recording: Arc<Mutex<RecordingState>>,
-    playback: Arc<Mutex<Option<crate::capture::PlaybackReader>>>,
-    audio: Arc<AudioSink>,
-    iq_network: IqNetworkSink,
-    sidecars: SidecarRegistry,
-    events_tx: broadcast::Sender<ScannerEvent>,
-    spectrum_tx: watch::Sender<SpectrumFrame>,
+    dependencies: ScannerDependencies,
     mut cmd_rx: mpsc::UnboundedReceiver<ScannerCommand>,
     state: Arc<Mutex<ScannerRuntimeState>>,
     capture_ring: IqRing,
     audio_ring: IqRing,
 ) {
+    let ScannerDependencies {
+        device,
+        db,
+        recording,
+        playback,
+        audio,
+        iq_network,
+        sidecars,
+        events_tx,
+        spectrum_tx,
+    } = dependencies;
     let mut active_range: Option<ScanRange> = None;
     let poll = Duration::from_micros((1_000_000.0 / cfg.update_rate_hz.max(1.0)) as u64);
 

@@ -748,7 +748,7 @@ mod tests {
 
     fn odd_parity(value: u8) -> u8 {
         let seven = value & 0x7f;
-        if seven.count_ones() % 2 == 0 {
+        if seven.count_ones().is_multiple_of(2) {
             seven | 0x80
         } else {
             seven

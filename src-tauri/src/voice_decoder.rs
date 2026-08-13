@@ -10,11 +10,6 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
-const DSD_FME_DIRS: &[&str] = {
-    // Can't do vec! in const, so use a match in the function
-    &[]
-};
-
 /// Search common locations for dsd-fme.exe
 pub fn find_dsd_fme() -> Option<PathBuf> {
     // Check env var first
@@ -86,6 +81,7 @@ pub fn write_wav_48k(path: &PathBuf, samples: &[f32]) -> std::io::Result<()> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct DsdResult {
     pub available: bool,
     pub decoder_path: Option<String>,
@@ -99,22 +95,6 @@ pub struct DsdResult {
     pub error_message: Option<String>,
 }
 
-impl Default for DsdResult {
-    fn default() -> Self {
-        Self {
-            available: false,
-            decoder_path: None,
-            mode: String::new(),
-            frames_decoded: 0,
-            calls: Vec::new(),
-            talkgroups: Vec::new(),
-            nacs: Vec::new(),
-            errors: 0,
-            raw_output: Vec::new(),
-            error_message: None,
-        }
-    }
-}
 
 /// Run dsd-fme on demodulated audio samples.
 /// `mode` can be: "auto", "p25p1", "p25p2", "dmr", "nxdn48", "nxdn96", "dstar", "ysf", "m17", "provoice"

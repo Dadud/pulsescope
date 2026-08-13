@@ -477,7 +477,7 @@ mod tests {
             let mut audio = Vec::new();
             for bit in bits {
                 let level = if bit { -0.8 } else { 0.8 }; // deliberately inverted
-                audio.extend(std::iter::repeat(level).take(samples_per_bit as usize));
+                audio.extend(std::iter::repeat_n(level, samples_per_bit as usize));
             }
             let mut decoder = PocsagDecoder::new(24_000, baud);
             let mut messages = Vec::new();

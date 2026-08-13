@@ -396,12 +396,6 @@ impl Default for DigitalDecoderConfig {
     }
 }
 
-macro_rules! string_default {
-    ($field:ident, $val:expr) => {
-        pub $field: String
-    };
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rtl433Config {
@@ -427,16 +421,12 @@ impl Default for Rtl433Config {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct HdRadioConfig {
     pub enabled: bool,
     pub auto_on_fm_lock: bool,
     pub program: u32,
     pub stations: Vec<String>,
-}
-impl Default for HdRadioConfig {
-    fn default() -> Self {
-        Self { enabled: false, auto_on_fm_lock: false, program: 0, stations: Vec::new() }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -832,6 +822,7 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)] // Compact constructor for the static built-in band table.
 fn range(
     name: &str, start: u64, end: u64, mode: &str, bw: u32, vfos: u32, sr: u32, asq: AutoSquelchMode,
 ) -> ScanRange {

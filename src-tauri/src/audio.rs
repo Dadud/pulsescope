@@ -49,6 +49,24 @@ pub struct AudioSink {
     remote_last_frame_ms: Arc<AtomicI64>,
 }
 
+#[derive(Clone)]
+struct AudioCallbackState {
+    queue: Arc<Mutex<VecDeque<f32>>>,
+    callbacks: Arc<AtomicU64>,
+    underruns: Arc<AtomicU64>,
+    peak: Arc<AtomicU32>,
+    nonzero: Arc<AtomicU64>,
+    network: Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>,
+    packets: Arc<AtomicU64>,
+    errors: Arc<AtomicU64>,
+}
+
+impl Default for AudioSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioSink {
     pub fn new() -> Self {
         let (remote_tx, _) = broadcast::channel(32);
@@ -82,18 +100,20 @@ impl AudioSink {
         *started = true;
         drop(started);
 
-        let queue = self.queue.clone();
         let running = self.running.clone();
         let sample_rate = self.sample_rate.clone();
         let error = self.error.clone();
         let output_device = self.output_device.clone();
-        let callback_frames = self.callback_frames.clone();
-        let underrun_samples = self.underrun_samples.clone();
-        let output_peak_bits = self.output_peak_bits.clone();
-        let nonzero_samples = self.nonzero_samples.clone();
-        let network = self.network.clone();
-        let network_packets = self.network_packets.clone();
-        let network_errors = self.network_errors.clone();
+        let callback = AudioCallbackState {
+            queue: self.queue.clone(),
+            callbacks: self.callback_frames.clone(),
+            underruns: self.underrun_samples.clone(),
+            peak: self.output_peak_bits.clone(),
+            nonzero: self.nonzero_samples.clone(),
+            network: self.network.clone(),
+            packets: self.network_packets.clone(),
+            errors: self.network_errors.clone(),
+        };
 
         thread::spawn(move || {
             let host = cpal::default_host();
@@ -114,17 +134,17 @@ impl AudioSink {
             let result = match config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_output_stream(
                     &config.clone().into(),
-                    move |data: &mut [f32], _| fill_f32(data, channels, &queue, &callback_frames, &underrun_samples, &output_peak_bits, &nonzero_samples, &network, &network_packets, &network_errors),
+                    move |data: &mut [f32], _| fill_f32(data, channels, &callback),
                     err_fn, None,
                 ),
                 cpal::SampleFormat::I16 => device.build_output_stream(
                     &config.clone().into(),
-                    move |data: &mut [i16], _| fill_i16(data, channels, &queue, &callback_frames, &underrun_samples, &output_peak_bits, &nonzero_samples, &network, &network_packets, &network_errors),
+                    move |data: &mut [i16], _| fill_i16(data, channels, &callback),
                     err_fn, None,
                 ),
                 cpal::SampleFormat::U16 => device.build_output_stream(
                     &config.clone().into(),
-                    move |data: &mut [u16], _| fill_u16(data, channels, &queue, &callback_frames, &underrun_samples, &output_peak_bits, &nonzero_samples, &network, &network_packets, &network_errors),
+                    move |data: &mut [u16], _| fill_u16(data, channels, &callback),
                     err_fn, None,
                 ),
                 other => {
@@ -250,23 +270,23 @@ fn next_sample(queue: &Arc<Mutex<VecDeque<f32>>>, underruns: &AtomicU64, peak: &
     observe_sample(sample, peak, nonzero);
     sample
 }
-fn fill_f32(data: &mut [f32], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>, callbacks: &AtomicU64, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64, network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
-    callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
-    for frame in data.chunks_mut(channels) { let s = next_sample(queue, underruns, peak, nonzero); for out in frame { *out = s; } }
+fn fill_f32(data: &mut [f32], channels: usize, callback: &AudioCallbackState) {
+    callback.callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
+    for frame in data.chunks_mut(channels) { let s = next_sample(&callback.queue, &callback.underruns, &callback.peak, &callback.nonzero); for out in frame { *out = s; } }
     let samples: Vec<f32> = data.chunks(channels.max(1)).map(|frame| frame[0]).collect();
-    send_network(&samples, network, packets, errors);
+    send_network(&samples, &callback.network, &callback.packets, &callback.errors);
 }
-fn fill_i16(data: &mut [i16], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>, callbacks: &AtomicU64, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64, network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
-    callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
-    for frame in data.chunks_mut(channels) { let s = next_sample(queue, underruns, peak, nonzero); let value = (s * i16::MAX as f32) as i16; for out in frame { *out = value; } }
+fn fill_i16(data: &mut [i16], channels: usize, callback: &AudioCallbackState) {
+    callback.callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
+    for frame in data.chunks_mut(channels) { let s = next_sample(&callback.queue, &callback.underruns, &callback.peak, &callback.nonzero); let value = (s * i16::MAX as f32) as i16; for out in frame { *out = value; } }
     let samples: Vec<f32> = data.chunks(channels.max(1)).map(|frame| frame[0] as f32 / i16::MAX as f32).collect();
-    send_network(&samples, network, packets, errors);
+    send_network(&samples, &callback.network, &callback.packets, &callback.errors);
 }
-fn fill_u16(data: &mut [u16], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>, callbacks: &AtomicU64, underruns: &AtomicU64, peak: &AtomicU32, nonzero: &AtomicU64, network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {
-    callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
-    for frame in data.chunks_mut(channels) { let s = next_sample(queue, underruns, peak, nonzero); let value = ((s * 0.5 + 0.5) * u16::MAX as f32) as u16; for out in frame { *out = value; } }
+fn fill_u16(data: &mut [u16], channels: usize, callback: &AudioCallbackState) {
+    callback.callbacks.fetch_add((data.len() / channels.max(1)) as u64, Ordering::Relaxed);
+    for frame in data.chunks_mut(channels) { let s = next_sample(&callback.queue, &callback.underruns, &callback.peak, &callback.nonzero); let value = ((s * 0.5 + 0.5) * u16::MAX as f32) as u16; for out in frame { *out = value; } }
     let samples: Vec<f32> = data.chunks(channels.max(1)).map(|frame| (frame[0] as f32 / u16::MAX as f32 - 0.5) * 2.0).collect();
-    send_network(&samples, network, packets, errors);
+    send_network(&samples, &callback.network, &callback.packets, &callback.errors);
 }
 
 fn send_network(samples: &[f32], network: &Arc<Mutex<Option<(UdpSocket, SocketAddr)>>>, packets: &AtomicU64, errors: &AtomicU64) {

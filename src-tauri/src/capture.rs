@@ -16,6 +16,12 @@ pub struct IqNetworkSink {
     packets: Arc<AtomicU64>,
     errors: Arc<AtomicU64>,
 }
+impl Default for IqNetworkSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IqNetworkSink {
     pub fn new() -> Self { Self { target: Arc::new(Mutex::new(None)), packets: Arc::new(AtomicU64::new(0)), errors: Arc::new(AtomicU64::new(0)) } }
     pub fn start(&self, target: SocketAddr) -> std::io::Result<()> { let socket=UdpSocket::bind("0.0.0.0:0")?; socket.set_nonblocking(true)?; *self.target.lock()=Some((socket,target)); Ok(()) }

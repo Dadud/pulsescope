@@ -1,6 +1,7 @@
 // device.rs — SDR device layer. The mock source stays available for development;
 // enabling `soapysdr` adds an owned SoapySDR RX backend for installed modules.
 use std::f32::consts::TAU;
+#[cfg(feature = "soapysdr")]
 use std::process::Command;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 pub static LIVE_HARDWARE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -182,8 +183,7 @@ mod soapy {
 ///   2. `SOAPY_SDR_ROOT` env var, with a `bin/` subdirectory appended
 ///   3. `SOAPYSDR_HOME` env var, with a `bin/` subdirectory appended
 ///   4. PothosSDR default install location on Windows
-///   5. Standard system paths on Linux/macOS:
-///        `/usr/local/bin`, `/usr/bin`, `/usr/lib/SoapySDR/bin`
+///   5. Standard Linux/macOS paths (`/usr/local/bin`, `/usr/bin`, `/usr/lib/SoapySDR/bin`)
 ///   6. Bare name `SoapySDRUtil{,.exe}` resolved via PATH lookup
 ///
 /// Only paths that actually exist on the current filesystem are returned.
@@ -234,6 +234,7 @@ fn soapy_util_exe() -> &'static str {
     if cfg!(windows) { "SoapySDRUtil.exe" } else { "SoapySDRUtil" }
 }
 
+#[cfg(feature = "soapysdr")]
 fn discover_soapy_util() -> Vec<DiscoveredDevice> {
     // Cross-platform SoapySDR discovery search list. Order:
     //   1. Explicit override via PULSESCOPE_SOAPY_UTIL
@@ -251,7 +252,7 @@ fn discover_soapy_util() -> Vec<DiscoveredDevice> {
         combined.extend_from_slice(&out.stderr);
         let text = String::from_utf8_lossy(&combined);
         let mut props=std::collections::BTreeMap::new();
-        let mut push=|p:&mut std::collections::BTreeMap<String,String>, rows:&mut Vec<DiscoveredDevice>| {
+        let push=|p:&mut std::collections::BTreeMap<String,String>, rows:&mut Vec<DiscoveredDevice>| {
             if let Some(driver)=p.get("driver").cloned() {
                 if driver!="audio" {
                     let mut kv=vec![format!("driver={driver}")];
@@ -316,6 +317,7 @@ impl DeviceLayer {
     }
 
     pub fn discover() -> Vec<DiscoveredDevice> {
+        #[allow(unused_mut)]
         let mut devices = vec![DiscoveredDevice { driver: "mock".into(), label: "Mock Source (Test Tones)".into(), key: "driver=mock".into(), hardware_key: "mock".into() }];
         #[cfg(feature="soapysdr")]
         devices.extend(discover_soapy_util());
@@ -484,6 +486,8 @@ impl DeviceLayer {
             hardware.set_control(control, value)?;
             return Ok(());
         }
+        #[cfg(not(feature = "soapysdr"))]
+        let _ = (control, value);
         Err(anyhow::anyhow!("connect a hardware SDR before changing controls"))
     }
 

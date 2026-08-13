@@ -15,7 +15,7 @@ use crate::audio::AudioSink;
 use crate::config::{Config, ScanRange};
 use crate::db::Db;
 use crate::device::DeviceLayer;
-use crate::scanner::ScannerHandle;
+use crate::scanner::{ScannerDependencies, ScannerHandle};
 use crate::sidecar::SidecarRegistry;
 
 /// Global application state. Cheap to `Arc::clone`, all interior-shared.
@@ -132,7 +132,18 @@ impl AppState {
         }
 
         let cfg = self.config.read().scanner.clone();
-        let handle = ScannerHandle::spawn(cfg, self.device.clone(), self.db.clone(), self.recording.clone(), self.playback.clone(), self.audio.clone(), self.iq_network.clone(), self.sidecars.clone(), self.events.clone(), self.spectrum.clone());
+        let dependencies = ScannerDependencies {
+            device: self.device.clone(),
+            db: self.db.clone(),
+            recording: self.recording.clone(),
+            playback: self.playback.clone(),
+            audio: self.audio.clone(),
+            iq_network: self.iq_network.clone(),
+            sidecars: self.sidecars.clone(),
+            events_tx: self.events.clone(),
+            spectrum_tx: self.spectrum.clone(),
+        };
+        let handle = ScannerHandle::spawn(cfg, dependencies);
         handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range })
             .map_err(|_| "receiver task did not accept its startup command".to_string())?;
         *self.scanner.write() = Some(handle);
@@ -389,14 +400,16 @@ mod recording_tests {
     use crate::scanner::{ScannerRuntimeState, VfoState};
     use rustfft::num_complex::Complex;
     use std::fs::{self, File};
-    use std::path::PathBuf;
+
 
     #[test]
     fn iq_recording_writes_cf32_bytes_and_counts_exactly() {
-        let path = PathBuf::from(std::env::temp_dir()).join(format!("pulsescope-recording-test-{}.cf32", std::process::id()));
-        let mut state = RecordingState::default();
-        state.file = Some(File::create(&path).unwrap());
-        state.path = Some(path.clone());
+        let path = std::env::temp_dir().join(format!("pulsescope-recording-test-{}.cf32", std::process::id()));
+        let mut state = RecordingState {
+            file: Some(File::create(&path).unwrap()),
+            path: Some(path.clone()),
+            ..Default::default()
+        };
         let samples = [Complex::new(0.25, -0.5), Complex::new(-1.0, 1.0)];
         state.write_iq(&samples);
         assert_eq!(state.samples_written, 2);

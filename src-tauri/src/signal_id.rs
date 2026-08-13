@@ -127,7 +127,7 @@ fn range_boost(range_name: &str) -> Vec<(&'static str, f32)> {
 fn bandwidth_hints(bw_hz: u32, mode: &str) -> Vec<(&'static str, f32, &'static str)> {
     let mut h = Vec::new();
     let m = mode.to_ascii_lowercase();
-    if bw_hz >= 150_000 && bw_hz <= 250_000 {
+    if (150_000..=250_000).contains(&bw_hz) {
         h.push(("fm_broadcast", 0.15, "≈200 kHz FM channel"));
     }
     if bw_hz >= 800_000 {
@@ -263,11 +263,10 @@ fn tone_energy(samples: &[f32], sample_rate: f32, freq: f32) -> f32 {
     let k = (0.5 + (samples.len() as f32 * freq / sample_rate)) as usize;
     let w = std::f32::consts::TAU * k as f32 / samples.len() as f32;
     let coeff = 2.0 * w.cos();
-    let mut s0 = 0.0f32;
     let mut s1 = 0.0f32;
     let mut s2 = 0.0f32;
     for &x in samples {
-        s0 = x + coeff * s1 - s2;
+        let s0 = x + coeff * s1 - s2;
         s2 = s1;
         s1 = s0;
     }

@@ -737,7 +737,18 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         return Json(json!({"ok": true}));
     }
     let cfg = s.0.config.read().scanner.clone();
-    let handle = crate::scanner::ScannerHandle::spawn(cfg, s.0.device.clone(), s.0.db.clone(), s.0.recording.clone(), s.0.playback.clone(), s.0.audio.clone(), s.0.iq_network.clone(), s.0.sidecars.clone(), s.0.events.clone(), s.0.spectrum.clone());
+    let dependencies = crate::scanner::ScannerDependencies {
+        device: s.0.device.clone(),
+        db: s.0.db.clone(),
+        recording: s.0.recording.clone(),
+        playback: s.0.playback.clone(),
+        audio: s.0.audio.clone(),
+        iq_network: s.0.iq_network.clone(),
+        sidecars: s.0.sidecars.clone(),
+        events_tx: s.0.events.clone(),
+        spectrum_tx: s.0.spectrum.clone(),
+    };
+    let handle = crate::scanner::ScannerHandle::spawn(cfg, dependencies);
     *s.0.scanner.write() = Some(handle);
     if let Some(handle) = s.0.scanner.read().as_ref() { let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start { range }); }
     start_configured_sidecars(&s).await;
@@ -1114,7 +1125,20 @@ async fn goes_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl In
 async fn goes_check() -> impl IntoResponse { Json(json!({"ok": true, "available": false, "reason":"satdump sidecar not configured"})) }
 async fn goes_status(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"enabled":c.goes_lrit.enabled,"satellite":c.goes_lrit.satellite,"path":c.goes_lrit.satdump_path,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
 async fn goes_satellite(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
-async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); if let Some(x)=v.get("satellite").and_then(|x|x.as_str()){c.goes_lrit.satellite=x.to_string();} if let Some(x)=v.get("output_image_dir").and_then(|x|x.as_str()){c.goes_lrit.output_image_dir=x.to_string();} if let Some(x)=v.get("sample_rate_hz").and_then(|x|x.as_u64()){c.goes_lrit.sample_rate_hz=x as u32;} let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz})) }
+async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
+    let mut c = s.0.config.write();
+    if let Some(x) = v.get("satellite").and_then(|x| x.as_str()) {
+        c.goes_lrit.satellite = x.to_string();
+    }
+    if let Some(x) = v.get("output_image_dir").and_then(|x| x.as_str()) {
+        c.goes_lrit.output_image_dir = x.to_string();
+    }
+    if let Some(x) = v.get("sample_rate_hz").and_then(|x| x.as_u64()) {
+        c.goes_lrit.sample_rate_hz = x as u32;
+    }
+    let _ = c.save(&s.0.data_dir);
+    Json(json!({"ok":true,"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz}))
+}
 
 async fn hd_radio_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let mut c=s.0.config.write(); c.hd_radio.enabled=v.get("enabled").and_then(|x|x.as_bool()).unwrap_or(true); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"enabled":c.hd_radio.enabled,"available":false,"reason":"HD Radio decoder sidecar not configured"})) }
 async fn hd_radio_check(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ok":true,"available":false,"configured":c.hd_radio.enabled,"program":c.hd_radio.program,"stations":c.hd_radio.stations,"reason":"HD Radio decoder sidecar not configured"})) }
@@ -1387,12 +1411,12 @@ async fn scan_aprs(State(s): State<ApiState>) -> Json<Value> {
     match s.0.device.read_iq(count) {
         Ok(iq) if iq.len() > 4096 => {
             use crate::demod::{demodulate, Mode};
-            use crate::aprs::{AprsDecoder, parse_ax25_bits};
+            use crate::aprs::AprsDecoder;
             let mut previous = None;
             let audio = demodulate(Mode::Nfm, &iq, &mut previous);
             let audio_rate = sample_rate as f32;
             let mut decoder = AprsDecoder::new(audio_rate);
-            let mut frames_found = 0;
+            let _frames_found = 0;
             for &sample in &audio {
                 decoder.feed(sample);
             }
@@ -1544,7 +1568,7 @@ async fn spectrum_ws_pump(socket: WebSocket, tx: tokio::sync::watch::Sender<Spec
             changed = frames.changed() => {
                 if changed.is_err() { break; }
                 let packet = encode_spectrum_frame(&frames.borrow_and_update().clone());
-                if sender.send(Message::Binary(packet.into())).await.is_err() { break; }
+                if sender.send(Message::Binary(packet)).await.is_err() { break; }
             }
             incoming = receiver.next() => {
                 match incoming {
@@ -1734,7 +1758,34 @@ async fn device_hackrf_amp(State(s): State<ApiState>, Json(v): Json<Value>) -> i
 async fn channel_banks_delete(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let name=v.get("name").or_else(||v.get("bank_name")).and_then(|x|x.as_str()).unwrap_or(""); if name.is_empty(){return Json(json!({"ok":false,"error":"name is required"}));} let mut c=s.0.config.write(); let before=c.scan_ranges.len(); c.scan_ranges.retain(|r|r.name!=name); let removed=before!=c.scan_ranges.len(); if removed {let _=c.save(&s.0.data_dir);} Json(json!({"ok":removed,"name":name,"error":if removed {Value::Null}else{json!("bank not found")}})) }
 async fn channel_banks_create(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { match serde_json::from_value::<crate::config::ScanRange>(v) { Ok(range) if !range.name.trim().is_empty() => { let mut c=s.0.config.write(); c.scan_ranges.retain(|r|r.name!=range.name); c.scan_ranges.push(range.clone()); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"bank":range})) }, Ok(_) => Json(json!({"ok":false,"error":"bank name is required"})), Err(e)=>Json(json!({"ok":false,"error":e.to_string()})) } }
 async fn channel_bank_scan_config(State(s): State<ApiState>) -> impl IntoResponse { let c=s.0.config.read(); Json(json!({"ranges":c.scan_ranges.len(),"enabled":c.scan_ranges.iter().filter(|r|r.enabled).count()})) }
-async fn channel_bank_scan_config_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let name=v.get("bank_name").or_else(||v.get("name")).and_then(|x|x.as_str()).unwrap_or(""); if name.is_empty(){return Json(json!({"ok":false,"error":"bank_name is required"}));} let mut c=s.0.config.write(); let Some(r)=c.scan_ranges.iter_mut().find(|r|r.name==name) else {return Json(json!({"ok":false,"error":"bank not found"}));}; if let Some(x)=v.get("enabled").and_then(|x|x.as_bool()){r.enabled=x;} if let Some(x)=v.get("dwell_ms").and_then(|x|x.as_u64()){r.dwell_ms=x as u32;} if let Some(x)=v.get("hold_ms").and_then(|x|x.as_u64()){r.hold_ms=x as u32;} if let Some(x)=v.get("max_vfos").and_then(|x|x.as_u64()){r.max_vfos=x as u32;} if let Some(x)=v.get("squelch_db").and_then(|x|x.as_f64()){r.squelch_db=x as f32;} let out=r.clone(); let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"bank":out})) }
+async fn channel_bank_scan_config_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
+    let name = v.get("bank_name").or_else(|| v.get("name")).and_then(|x| x.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return Json(json!({"ok":false,"error":"bank_name is required"}));
+    }
+    let mut c = s.0.config.write();
+    let Some(r) = c.scan_ranges.iter_mut().find(|r| r.name == name) else {
+        return Json(json!({"ok":false,"error":"bank not found"}));
+    };
+    if let Some(x) = v.get("enabled").and_then(|x| x.as_bool()) {
+        r.enabled = x;
+    }
+    if let Some(x) = v.get("dwell_ms").and_then(|x| x.as_u64()) {
+        r.dwell_ms = x as u32;
+    }
+    if let Some(x) = v.get("hold_ms").and_then(|x| x.as_u64()) {
+        r.hold_ms = x as u32;
+    }
+    if let Some(x) = v.get("max_vfos").and_then(|x| x.as_u64()) {
+        r.max_vfos = x as u32;
+    }
+    if let Some(x) = v.get("squelch_db").and_then(|x| x.as_f64()) {
+        r.squelch_db = x as f32;
+    }
+    let out = r.clone();
+    let _ = c.save(&s.0.data_dir);
+    Json(json!({"ok":true,"bank":out}))
+}
 async fn channel_import(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse { let rows=if v.is_array(){v}else{json!([v])}; let mut added=0; let mut c=s.0.config.write(); for item in rows.as_array().cloned().unwrap_or_default(){ if let Ok(r)=serde_json::from_value::<crate::config::ScanRange>(item){ c.scan_ranges.retain(|x|x.name!=r.name); c.scan_ranges.push(r); added+=1; } } let _=c.save(&s.0.data_dir); Json(json!({"ok":true,"added":added,"total":c.scan_ranges.len()})) }
 async fn scanner_max_vfos(State(s): State<ApiState>) -> impl IntoResponse {
     let cfg = s.0.config.read();
@@ -1895,7 +1946,7 @@ async fn debug_vdl2_stderr(State(s): State<ApiState>) -> impl IntoResponse { Jso
 
 async fn event_stream(State(s): State<ApiState>) -> impl IntoResponse {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    use futures_util::stream::Stream;
+
     let rx = s.0.events.subscribe();
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
         match rx.recv().await {

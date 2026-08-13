@@ -28,7 +28,6 @@ pub struct AprsDecoder {
     mark_phase: f32,
     space_phase: f32,
     bit_phase: f32,           // 0..1
-    last_bit: bool,          // last NRZ-I bit (false = mark, true = space, or vice versa)
     prev: bool,
     bit_count: usize,
     // Accumulator: shift register of recovered bits, MSB first.
@@ -45,7 +44,6 @@ impl AprsDecoder {
             mark_phase: 0.0,
             space_phase: 0.0,
             bit_phase: 0.0,
-            last_bit: false,
             prev: false,
             bit_count: 0,
             shift: 0,
@@ -153,14 +151,14 @@ pub fn parse_ax25_bits(bits: &[u8]) -> Vec<AprsFrame> {
     while i < bits.len() {
         if i + 7 >= bits.len() { break; }
         // Look for opening flag
-        if &bits[i..i+8] == &[0,1,1,1,1,1,1,0] {
+        if bits[i..i+8] == [0,1,1,1,1,1,1,0] {
             i += 8;
             // Collect until next flag
             let mut payload: Vec<u8> = Vec::new();
             let mut cur = 0u8;
             let mut count = 0;
             while i + 7 < bits.len() {
-                if &bits[i..i+8] == &[0,1,1,1,1,1,1,0] {
+                if bits[i..i+8] == [0,1,1,1,1,1,1,0] {
                     i += 8;
                     break;
                 }
@@ -238,7 +236,7 @@ fn parse_ax25_frame(payload: &[u8]) -> Option<AprsFrame> {
 fn ax25_call(bytes: &[u8]) -> String {
     let mut s = String::new();
     for (i, &b) in bytes.iter().take(6).enumerate() {
-        let c = (b >> 1) as u8 as char;
+        let c = (b >> 1) as char;
         if c == ' ' || c == '\0' { continue; }
         s.push(c);
         let _ = i; // unused after this iteration
@@ -257,14 +255,13 @@ mod tests {
     use std::f32::consts::TAU;
 
     fn goertzel(samples: &[f32], freq: f32, sample_rate: f32) -> f32 {
-        let mut s0 = 0.0_f32;
         let mut s1 = 0.0_f32;
         let mut s2 = 0.0_f32;
         let k = freq * samples.len() as f32 / sample_rate;
         let omega = TAU * k / samples.len() as f32;
         let coeff = 2.0 * omega.cos();
         for &x in samples {
-            s0 = x + coeff * s1 - s2;
+            let s0 = x + coeff * s1 - s2;
             s2 = s1;
             s1 = s0;
         }
@@ -358,7 +355,7 @@ mod tests {
         let samples: Vec<f32> = (0..n).map(|i| {
             let t = i as f32 / sample_rate;
             let bit_index = (t * BAUD) as usize;
-            let bit = (bit_index % 2) == 0; // 0,1,0,1,...
+            let bit = bit_index.is_multiple_of(2); // 0,1,0,1,...
             let freq = if bit { SPACE_HZ } else { MARK_HZ };
             (TAU * freq * t).sin() * 0.5
         }).collect();
