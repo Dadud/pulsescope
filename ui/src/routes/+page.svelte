@@ -33,6 +33,7 @@
   let nowMs = $state(Date.now());
   let waterfallPixels: Uint8ClampedArray | null = null;
   let waterfallImage: ImageData | null = null;
+  let waterfallWorker: Worker | null = null;
   let drawPending = false;
   let waterfallGain = $state(1);
   let waterfallPalette = $state('classic');
@@ -139,6 +140,7 @@
       eventReconnectTimer = null;
       spectrumWs?.close(); spectrumWs = null;
       ws?.close(); ws = null;
+      waterfallWorker?.terminate(); waterfallWorker = null;
       browserAudio?.stop(); browserAudio = null;
     };
   }));
@@ -377,6 +379,15 @@
   function drawWaterfall() {
     if (!waterfallCanvas || spectrumBins.length === 0) return;
     ensureCanvasBacking(waterfallCanvas, 900, 180);
+    if (typeof Worker !== 'undefined' && typeof waterfallCanvas.transferControlToOffscreen === 'function') {
+      if (!waterfallWorker) {
+        const offscreen = waterfallCanvas.transferControlToOffscreen();
+        waterfallWorker = new Worker(new URL('../lib/waterfall-worker.ts', import.meta.url), { type: 'module' });
+        waterfallWorker.postMessage({ canvas: offscreen, width: 900, height: 180 }, [offscreen]);
+      }
+      waterfallWorker.postMessage({ bins: spectrumBins, gain: waterfallGain, palette: waterfallPalette });
+      return;
+    }
     const ctx = waterfallCanvas.getContext('2d');
     if (!ctx) return;
     const w = waterfallCanvas.width;
