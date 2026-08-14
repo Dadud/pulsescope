@@ -6,9 +6,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
