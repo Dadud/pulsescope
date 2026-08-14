@@ -136,7 +136,9 @@
     browserAudio = new BrowserAudio((state) => { audioState = state; });
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
-    listenerSessionId = localStorage.getItem('pulsescope.listener.id') || crypto.randomUUID();
+    listenerSessionId = localStorage.getItem('pulsescope.listener.id')
+      || globalThis.crypto?.randomUUID?.()
+      || `listener-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     localStorage.setItem('pulsescope.listener.id', listenerSessionId);
     const onSpectrum = (event: Event) => {
       const spectrum = (event as CustomEvent).detail;
@@ -159,8 +161,11 @@
     window.addEventListener('pulsescope:runtime', onRuntime);
     window.addEventListener('pulsescope:poll-error', onPollError);
     livePolling = true;
-    connectSpectrum();
     scheduleLivePoll(0);
+    // A WebSocket is an acceleration path, not a prerequisite for the
+    // receiver. HTTP polling must remain alive when a mobile browser, captive
+    // portal, or privacy setting rejects a socket during page startup.
+    connectSpectrum();
     const onVisibility = () => {
       if (document.visibilityState === 'visible') scheduleLivePoll(0);
     };
@@ -244,13 +249,19 @@
 
   function connectSpectrum() {
     if (!livePolling || spectrumWs?.readyState === WebSocket.OPEN || spectrumWs?.readyState === WebSocket.CONNECTING) return;
-    spectrumWs = openSpectrum(
-      (frame) => applyStreamSpectrum(frame),
-      (state) => {
-        spectrumConnection = state;
-        if ((state === 'closed' || state === 'error') && livePolling) reconnectSpectrum(1_000);
-      },
-    );
+    try {
+      spectrumWs = openSpectrum(
+        (frame) => applyStreamSpectrum(frame),
+        (state) => {
+          spectrumConnection = state;
+          if ((state === 'closed' || state === 'error') && livePolling) reconnectSpectrum(1_000);
+        },
+      );
+    } catch (error) {
+      spectrumConnection = 'error';
+      spectrumError = `Spectrum socket unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      reconnectSpectrum(1_000);
+    }
   }
 
   function reconnectSpectrum(delayMs: number) {
@@ -275,23 +286,32 @@
   }
 
   async function loadInitial() {
+    // Device status is the minimum viable receiver UI. Load it independently
+    // so a nonessential history/bookmark request cannot leave the entire page
+    // looking offline on a working radio.
     try {
-      const [bankList, status, storedSignals, capabilities, savedBookmarks] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100), Api.deviceCapabilities(), Api.bookmarksV2().catch(() => ({ bookmarks: [] }))]);
-      banks = bankList;
+      const status = await Api.deviceStatus();
       deviceLabel = status.label;
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
       appliedBandwidthHz = Number(status.bandwidth_hz ?? 0);
-      signalHistory = storedSignals;
-      deviceCaps = capabilities;
-      bookmarks = savedBookmarks.bookmarks;
-      applyVfos(await Api.vfoStates());
-      messages = await Api.decodedMessages(100);
-      await syncListenerView();
     } catch (e) {
-      console.warn('init failed', e);
-      notice = `init failed: ${e}`;
+      console.warn('device status failed', e);
+      notice = `Receiver status unavailable: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    const [banksResult, signalsResult, capabilitiesResult, bookmarksResult, vfosResult, messagesResult, listenerResult] = await Promise.allSettled([
+      Api.banks(), Api.signalEvents(100), Api.deviceCapabilities(), Api.bookmarksV2(),
+      Api.vfoStates(), Api.decodedMessages(100), syncListenerView(),
+    ]);
+    if (banksResult.status === 'fulfilled') banks = banksResult.value;
+    if (signalsResult.status === 'fulfilled') signalHistory = signalsResult.value;
+    if (capabilitiesResult.status === 'fulfilled') deviceCaps = capabilitiesResult.value;
+    if (bookmarksResult.status === 'fulfilled') bookmarks = bookmarksResult.value.bookmarks;
+    if (vfosResult.status === 'fulfilled') applyVfos(vfosResult.value);
+    if (messagesResult.status === 'fulfilled') messages = messagesResult.value;
+    if (listenerResult.status === 'rejected') {
+      console.warn('listener session initialization failed', listenerResult.reason);
     }
   }
 
