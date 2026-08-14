@@ -95,8 +95,8 @@
     <button class:active={expertMode} aria-pressed={expertMode} onclick={toggleExpert}>{expertMode ? 'Exit Expert mode' : 'Expert mode'}</button>
   </header>
 
-  <section class="card">
-    <h2>Device</h2>
+  <section class="card section-card">
+    <header class="section-header"><div><h2>Device</h2><p class="section-lead">Connect your SDR. PulseScope applies safe RF defaults automatically.</p></div></header>
     {#if status}
       <div class="status-summary">
         <span class:ok={status.connected}>{status.connected ? '● SDR online' : '○ SDR offline'}</span>
@@ -127,8 +127,13 @@
   </section>
 
   {#if caps?.connected}
-    <section class="card">
-      <h2>Receiver frontend</h2>
+  <section class="card section-card">
+    <header class="section-header">
+      <div>
+        <h2>Receiver frontend</h2>
+        <p class="section-lead">RF gain, antenna, and driver-specific options. The same controls also appear on the Receiver while scanning.</p>
+      </div>
+    </header>
       <div class="row"><span>Capability contract</span><code>v{caps.contract_version}</code></div>
       <div class="row"><span>Stream MTU</span><code>{Number(caps.stream_mtu ?? 0).toLocaleString()} samples</code></div>
       <div class="row"><span>Total spectrum</span><code>{(Number(caps.total_bandwidth_hz ?? 0) / 1e6).toFixed(3)} MHz</code></div>

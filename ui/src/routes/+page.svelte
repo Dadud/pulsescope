@@ -115,8 +115,28 @@
     }).slice(0, 10);
   });
 
+  let noiseFloorDb = $state(-120);
+  let voiceNoiseReject = $state(true);
+  let showAllBands = $state(false);
+  let scanWorkspaceOpen = $state(true);
+
+  const VOICE_STARTER_BANDS = [
+    'FM Broadcast',
+    'NOAA Weather',
+    '2m Amateur',
+    'Aircraft AM',
+    'Marine VHF',
+    '70cm Amateur',
+  ];
+
   const filteredBanks = $derived(
-    banks.filter((b) => b.enabled !== false && b.name.toLowerCase().includes(filter.toLowerCase()))
+    banks.filter((b) => b.name.toLowerCase().includes(filter.toLowerCase())),
+  );
+
+  const featuredVoiceBanks = $derived(
+    VOICE_STARTER_BANDS
+      .map((name) => banks.find((bank) => bank.name === name))
+      .filter((bank): bank is ScanRange => Boolean(bank)),
   );
 
   const groupedBanks = $derived(
@@ -145,22 +165,6 @@
   const commonRfSettings = $derived((deviceCaps?.settings ?? []).filter((setting: any) => isCommonRfSetting(setting)));
   const expertRfSettings = $derived((deviceCaps?.settings ?? []).filter((setting: any) => !isCommonRfSetting(setting)));
 
-  const quickModes = [
-    { label: 'FM Radio', match: 'FM Broadcast' },
-    { label: 'Weather', match: 'NOAA Weather' },
-    { label: 'Airband', match: 'Aircraft AM' },
-    { label: '2m Amateur', match: '2m Amateur' },
-    { label: 'ADS-B 1090', match: 'ADS-B' },
-    { label: 'AIS 162', match: 'AIS' },
-    { label: 'ACARS 130', match: 'ACARS' },
-    { label: 'APRS 144', match: 'APRS' },
-    { label: 'FT8 20m', match: 'FT8 20m' },
-    { label: 'SSTV 20m', match: 'SSTV 20m' },
-    { label: '433 Sensors', match: 'ISM 433' },
-    { label: '915 Sensors', match: 'ISM 915' },
-    { label: 'Pagers', match: 'Pagers' }
-  ];
-
   function applyVfos(nextVfos: VfoState[]) {
     vfos = nextVfos;
     const audible = nextVfos.find((vfo) => !vfo.muted) ?? nextVfos[0];
@@ -183,7 +187,8 @@
     browserAudio = new BrowserAudio((state) => { audioState = state; });
     displayConfig = loadSpectrumDisplayConfig();
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
-    rfPanelOpen = localStorage.getItem('pulsescope.ui.rf-panel') !== '0';
+    voiceNoiseReject = localStorage.getItem('pulsescope.voice-noise-reject') !== '0';
+    scanWorkspaceOpen = localStorage.getItem('pulsescope.ui.scan-workspace') !== '0';
     spectrumSmoother.setAlpha(displayConfig.smoothing);
     banksCollapsed = localStorage.getItem('pulsescope.ui.banksCollapsed') === '1';
     logExpanded = localStorage.getItem('pulsescope.ui.logExpanded') === '1';
@@ -415,6 +420,7 @@
         spectrumError = '';
         lastSpectrumSequence = Number(spectrum.frame_sequence ?? lastSpectrumSequence);
         lastSpectrumAt = Date.now();
+        noiseFloorDb = Number(spectrum?.noise_floor_db ?? noiseFloorDb);
         applySpectrum(spectrum.bins);
       }
     } catch (e) {
@@ -528,7 +534,7 @@
     node.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  function openBandsSection() {
+  function openBookmarksSection() {
     banksCollapsed = false;
     localStorage.setItem('pulsescope.ui.banksCollapsed', '0');
     scrollToSection('band-presets');
@@ -725,9 +731,60 @@
     scanRunning = true;
     await Api.scanStart(name);
   }
+
+  async function startVoiceScan(bank: ScanRange) {
+    if (activeRange === bank.name && scanRunning) {
+      await stopScan();
+      return;
+    }
+    if (voiceNoiseReject && bank.squelch_db < 16) {
+      try {
+        const result = await Api.updateChannelBank(bank.name, { squelch_db: 18 });
+        const updated = result.bank ?? { ...bank, squelch_db: 18 };
+        const index = banks.findIndex((item) => item.name === bank.name);
+        if (index >= 0) banks[index] = { ...banks[index], ...updated };
+      } catch (e) {
+        notice = `Could not raise squelch: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    await startScan(bank.name);
+    notice = `Scanning ${bank.name} · squelch ${banks.find((b) => b.name === bank.name)?.squelch_db?.toFixed(0) ?? '—'} dB above noise`;
+    window.setTimeout(() => { if (notice.startsWith('Scanning ')) notice = ''; }, 2500);
+  }
+
+  async function setScanSquelch(event: Event) {
+    if (!activeBank) return;
+    const value = Number((event.currentTarget as HTMLInputElement).value);
+    if (!Number.isFinite(value)) return;
+    const index = banks.findIndex((bank) => bank.name === activeBank.name);
+    if (index >= 0) banks[index].squelch_db = value;
+    try {
+      const result = await Api.updateChannelBank(activeBank.name, { squelch_db: value });
+      if (result.bank && index >= 0) banks[index] = result.bank;
+    } catch (e) {
+      notice = String(e);
+    }
+  }
+
+  function toggleVoiceNoiseReject(event: Event) {
+    voiceNoiseReject = (event.currentTarget as HTMLInputElement).checked;
+    localStorage.setItem('pulsescope.voice-noise-reject', voiceNoiseReject ? '1' : '0');
+  }
+
+  function toggleScanWorkspace() {
+    scanWorkspaceOpen = !scanWorkspaceOpen;
+    localStorage.setItem('pulsescope.ui.scan-workspace', scanWorkspaceOpen ? '1' : '0');
+  }
+
+  function openScanSection() {
+    scanWorkspaceOpen = true;
+    localStorage.setItem('pulsescope.ui.scan-workspace', '1');
+    scrollToSection('scan-workspace');
+  }
+
   async function startQuickMode(match: string) {
     const range = banks.find((b) => b.name.toLowerCase().includes(match.toLowerCase()));
-    if (range) await startScan(range.name);
+    if (range) await startVoiceScan(range);
   }
 
   async function stopScan() {
@@ -1068,56 +1125,23 @@
 </script>
 
 <div class="scanner-layout" class:compact={isCompactLayout} class:banks-collapsed={banksCollapsed} class:log-expanded={logExpanded}>
-  <!-- Scan-range sidebar -->
-  <aside id="band-presets" class="banks" class:collapsed={banksCollapsed}>
+  <!-- Bookmarks sidebar -->
+  <aside id="band-presets" class="banks bookmarks-aside" class:collapsed={banksCollapsed}>
     <div class="banks-rail">
       <button
         class="panel-toggle banks-toggle"
         type="button"
         aria-expanded={!banksCollapsed}
-        aria-label={banksCollapsed ? 'Show band presets' : 'Hide band presets'}
-        title={banksCollapsed ? 'Show band presets (B)' : 'Hide band presets (B)'}
+        aria-label={banksCollapsed ? 'Show bookmarks' : 'Hide bookmarks'}
         onclick={toggleBanksCollapsed}
       >
-        {banksCollapsed ? '▸' : '▾'} Bands
+        {banksCollapsed ? '▸' : '▾'} Saved
       </button>
     </div>
     {#if !banksCollapsed}
-    <div class="banks-header">
-      <h2>Band presets</h2>
-      <p class="banks-help">Select a band to tune the hardware window and start surveying.</p>
-      <input bind:value={filter} placeholder="Filter bands…" aria-label="Filter band presets" />
-    </div>
-    <div class="bank-groups">
-      {#each groupedBanks as entry (entry.group)}
-        <section class="bank-group">
-          <h3>{entry.group}</h3>
-          <ul>
-            {#each entry.banks as b (b.name)}
-              <li>
-                <button
-                  class="range-row"
-                  class:active={activeRange === b.name}
-                  onclick={() => (activeRange === b.name ? stopScan() : startScan(b.name))}
-                >
-                  <span class="range-name">{b.name}</span>
-                  <span class="range-meta">
-                    {fmtHz(b.start_hz)}–{fmtHz(b.end_hz)} · {b.mode.toUpperCase()}
-                  </span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </section>
-      {:else}
-        <div class="empty-banks">No supported scan ranges match this filter.</div>
-      {/each}
-    </div>
-    {#if scanRunning}
-      <button class="primary stop" onclick={stopScan}>■ Stop survey</button>
-    {/if}
-    <section class="bookmark-section">
-      <h3>Bookmarks</h3>
+    <section class="bookmark-section bookmark-primary">
+      <h2>Saved frequencies</h2>
+      <p class="banks-help">Quick return to stations you marked while listening.</p>
       <div class="bookmark-add"><input bind:value={bookmarkLabel} placeholder="Name current VFO" aria-label="Bookmark name" onkeydown={(event) => { if (event.key === 'Enter') void saveCurrentBookmark(); }} /><button onclick={saveCurrentBookmark} disabled={!bookmarkLabel.trim() || !vfos.length}>Save</button></div>
       <ul class="bookmark-list">
         {#each bookmarks as bookmark (bookmark.id)}
@@ -1131,30 +1155,105 @@
   <!-- Main: spectrum + VFO tiles -->
   <section class="center">
     {#if notice}<div class="ui-notice" role="status">{notice}</div>{/if}
-    <div class="command-strip card">
-      <div class="quick-modes">
-        <span class="strip-label">Quick bands</span>
-        {#each quickModes as mode}
-          <button class="quick" onclick={() => startQuickMode(mode.match)}>{mode.label}</button>
-        {/each}
-      </div>
+
+    <section id="scan-workspace" class="scan-workspace card section-card" class:collapsed={!scanWorkspaceOpen}>
+      <header class="section-header">
+        <div>
+          <h2>Voice scan</h2>
+          <p class="section-lead">Pick a band to survey for voice. Squelch ignores steady RF noise; audio gate mutes hiss while you listen.</p>
+        </div>
+        <button type="button" class="mini section-toggle" onclick={toggleScanWorkspace} aria-expanded={scanWorkspaceOpen}>
+          {scanWorkspaceOpen ? 'Collapse' : 'Expand'}
+        </button>
+      </header>
+      {#if scanWorkspaceOpen}
+        <div class="starter-bands" role="list" aria-label="Popular voice bands">
+          {#each featuredVoiceBanks as bank (bank.name)}
+            <button
+              type="button"
+              class="band-chip"
+              class:active={activeRange === bank.name && scanRunning}
+              onclick={() => startVoiceScan(bank)}
+            >
+              <strong>{bank.name}</strong>
+              <small>{fmtHz(bank.start_hz)}–{fmtHz(bank.end_hz)} · {bank.mode.toUpperCase()}</small>
+            </button>
+          {:else}
+            <p class="empty-banks">Band list still loading…</p>
+          {/each}
+        </div>
+        <div class="scan-toolbar">
+          <label class="toggle-field voice-reject">
+            <input type="checkbox" checked={voiceNoiseReject} onchange={toggleVoiceNoiseReject} />
+            <span>Reject RF noise <small>Raises squelch and gates on voice audio while listening</small></span>
+          </label>
+          {#if scanRunning && activeBank}
+            <div class="scan-live-controls">
+              <label class="squelch-field">
+                <span>Squelch <b>{activeBank.squelch_db.toFixed(0)} dB</b> above noise</span>
+                <input
+                  type="range"
+                  min="6"
+                  max="30"
+                  step="1"
+                  value={activeBank.squelch_db}
+                  aria-label="Scan squelch in dB above noise floor"
+                  oninput={setScanSquelch}
+                  onchange={setScanSquelch}
+                />
+              </label>
+              <span class="noise-readout">Noise floor {noiseFloorDb.toFixed(0)} dBFS</span>
+              <button type="button" class="primary stop" onclick={stopScan}>■ Stop scan</button>
+            </div>
+          {:else}
+            <div class="scan-search">
+              <input bind:value={filter} placeholder="Search all bands…" aria-label="Search band presets" />
+              <button type="button" class:primary={showAllBands} onclick={() => (showAllBands = !showAllBands)}>
+                {showAllBands ? 'Hide band list' : 'Browse all bands'}
+              </button>
+            </div>
+          {/if}
+        </div>
+        {#if showAllBands && !scanRunning}
+          <div class="all-bands-panel">
+            {#each groupedBanks as entry (entry.group)}
+              <section class="bank-group">
+                <h3>{entry.group}</h3>
+                <div class="starter-bands compact">
+                  {#each entry.banks as bank (bank.name)}
+                    <button type="button" class="band-chip" onclick={() => startVoiceScan(bank)}>
+                      <strong>{bank.name}</strong>
+                      <small>{fmtHz(bank.start_hz)}–{fmtHz(bank.end_hz)}</small>
+                    </button>
+                  {/each}
+                </div>
+              </section>
+            {:else}
+              <p class="empty-banks">No bands match “{filter}”.</p>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+    </section>
+
+    <div class="status-strip card">
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● Radio {connected ? 'online' : 'offline'}</span>
         <span class="status-pill" class:on={spectrumLive}>● Spectrum {spectrumStatusLabel}</span>
-        <span class="status-pill" class:on={scanRunning}>● Survey {scanRunning ? 'running' : 'idle'}</span>
+        <span class="status-pill" class:on={scanRunning}>● Scan {scanRunning ? activeRange ?? 'running' : 'idle'}</span>
         <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
-        <button class="layout-toggle" type="button" aria-pressed={logExpanded} onclick={toggleLogExpanded}>
-          {logExpanded ? 'Hide events' : 'Show events'}
-        </button>
-        <button class="layout-toggle" type="button" aria-pressed={showShortcuts} onclick={() => (showShortcuts = !showShortcuts)} title="Keyboard shortcuts">
-          Shortcuts
-        </button>
+        {#if !isCompactLayout}
+          <button class="layout-toggle" type="button" aria-pressed={logExpanded} onclick={toggleLogExpanded}>
+            {logExpanded ? 'Hide events' : 'Show events'}
+          </button>
+          <button class="layout-toggle" type="button" aria-pressed={showShortcuts} onclick={() => (showShortcuts = !showShortcuts)}>Shortcuts</button>
+        {/if}
         <a href="#/settings" class="settings-link">Device setup</a>
       </div>
     </div>
     {#if isCompactLayout}
       <nav class="mobile-workspace-bar card" aria-label="Workspace sections">
-        <button type="button" class:active={!banksCollapsed} onclick={openBandsSection}>Bands</button>
+        <button type="button" class:active={scanWorkspaceOpen} onclick={openScanSection}>Scan</button>
         <button type="button" class:active={rfPanelOpen} onclick={openRfSection} disabled={!connected}>RF</button>
         <button type="button" class:active={logExpanded} onclick={openEventsSection}>Events</button>
         <button type="button" class:active={showShortcuts} onclick={() => (showShortcuts = !showShortcuts)}>Help</button>
@@ -1180,7 +1279,7 @@
           <li><kbd>Space</kbd> Listen or mute the active VFO</li>
           <li><kbd>←</kbd> <kbd>→</kbd> Fine-tune when the spectrum is focused</li>
           <li><kbd>Shift</kbd> + arrows — 10 kHz steps on the spectrum</li>
-          <li><kbd>B</kbd> Show or hide band presets</li>
+          <li><kbd>B</kbd> Show or hide saved frequencies</li>
           <li><kbd>?</kbd> Toggle this help panel</li>
         </ul>
       </section>
@@ -1201,7 +1300,7 @@
       <section class="getting-started card" role="status">
         <div>
           <strong>Ready to listen</strong>
-          <p>Pick a <b>Quick band</b> or a preset on the left, then press <b>▶ Listen</b> on a VFO. Click the spectrum to tune, scroll to pan the hardware window.</p>
+          <p>Pick a <b>voice band</b> above, then press <b>▶ Listen</b> when a VFO shows <b>VOICE</b>. Raise squelch if noise keeps channels open.</p>
         </div>
         <div class="getting-started-actions">
           {#if vfos.length && allVfosMuted}
@@ -1453,8 +1552,9 @@
           </div>
           <div class="vfo-mode">{v.mode.toUpperCase()} · VFO {v.id}</div>
           <div class="vfo-signal-head">
-            <span class="signal-dot" class:on={v.strength_db > -80}></span>
-            <span>SNR {v.strength_db.toFixed(1)} dB</span>
+            <span class="signal-dot" class:on={v.squelch_open}></span>
+            <span class="squelch-badge" class:open={v.squelch_open}>{v.squelch_open ? 'VOICE' : 'quiet'}</span>
+            <span>SNR {(v.snr_db ?? v.strength_db - (v.noise_floor_db ?? noiseFloorDb)).toFixed(0)} dB</span>
           </div>
           <svg class="mini-spectrum" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Live spectrum for VFO {v.id}">
             <polyline points={miniTrace(v.frequency_hz)} fill="none" stroke="var(--accent)" stroke-width="1.2" vector-effect="non-scaling-stroke" />
@@ -1525,7 +1625,7 @@
     overflow: hidden;
   }
   .scanner-layout.banks-collapsed { grid-template-columns: 52px 1fr; }
-  #band-presets, #rf-controls, #spectrum-display, #events-log { scroll-margin-top: 64px; }
+  #band-presets, #rf-controls, #spectrum-display, #events-log, #scan-workspace { scroll-margin-top: 64px; }
   .banks {
     display: flex; flex-direction: column; gap: 8px;
     overflow: hidden;
@@ -1646,6 +1746,69 @@
   .setup-card p { margin:3px 0 0; color:var(--fg-dim); font-size:12px; }
   .setup-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .setup-actions a { display:inline-flex; align-items:center; min-height:30px; padding:6px 12px; border-radius:6px; text-decoration:none; }
+  .scan-workspace { border-color: rgba(45, 212, 191, 0.22); background: linear-gradient(180deg, rgba(45, 212, 191, 0.07), var(--bg-elev)); }
+  .scan-workspace.collapsed .starter-bands,
+  .scan-workspace.collapsed .scan-toolbar,
+  .scan-workspace.collapsed .all-bands-panel { display: none; }
+  .starter-bands {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .starter-bands.compact { gap: 6px; }
+  .band-chip {
+    display: grid;
+    gap: 2px;
+    min-width: 132px;
+    padding: 10px 12px;
+    text-align: left;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .band-chip strong { font-size: 13px; color: var(--fg); }
+  .band-chip small { color: var(--fg-dim); font: 10px var(--mono); }
+  .band-chip:hover { border-color: var(--accent-2); }
+  .band-chip.active { border-color: var(--accent); background: rgba(45, 212, 191, 0.12); }
+  .scan-toolbar { display: grid; gap: 10px; }
+  .toggle-field {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+  .toggle-field input { margin-top: 2px; }
+  .toggle-field small { display: block; color: var(--fg-dim); font-size: 10px; }
+  .scan-live-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 10px 14px;
+  }
+  .squelch-field {
+    display: grid;
+    gap: 4px;
+    flex: 1 1 220px;
+    min-width: 200px;
+    font-size: 11px;
+    color: var(--fg-dim);
+  }
+  .squelch-field b { color: var(--accent); font: 11px var(--mono); }
+  .noise-readout { font: 11px var(--mono); color: var(--fg-dim); padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+  .scan-search { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+  .all-bands-panel { margin-top: 10px; max-height: 280px; overflow: auto; border-top: 1px solid var(--line); padding-top: 10px; }
+  .status-strip { padding: 8px 10px; }
+  .bookmarks-aside .bookmark-primary h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .squelch-badge {
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--line-strong);
+    font: 700 9px var(--mono);
+    text-transform: uppercase;
+  }
+  .squelch-badge.open { color: var(--ok); border-color: var(--ok); background: rgb(34 197 94 / 12%); }
   .command-strip { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; background: var(--bg-elev-2); border: 1px solid var(--line); }
   .quick-modes, .runtime-status { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
   .strip-label { color: var(--fg-dim); text-transform: uppercase; font: 10px var(--mono); margin-right: 4px; }
@@ -1801,10 +1964,13 @@
     .range-row { min-height:52px; padding:9px 10px; }
     .range-name { font-size:14px; }
     .center { order:1; overflow:visible; padding:0; gap:8px; }
-    .command-strip { position:sticky; top:0; z-index:10; align-items:stretch; flex-direction:column; gap:8px; padding:10px; box-shadow:0 4px 14px rgba(0,0,0,.28); }
-    .quick-modes { overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none; }
-    .quick-modes .strip-label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
-    .quick { flex:0 0 auto; min-height:40px; padding:8px 12px; }
+    #band-presets, #rf-controls, #spectrum-display, #events-log, #scan-workspace { scroll-margin-top: 128px; }
+    .band-chip { min-width: 0; flex: 1 1 calc(50% - 8px); min-height: 52px; }
+    .starter-bands { flex-wrap: wrap; }
+    .scan-live-controls { flex-direction: column; align-items: stretch; }
+    .scan-search { grid-template-columns: 1fr; }
+    .status-strip { position: sticky; top: 0; z-index: 9; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+    .scan-workspace { order: -2; }
     .runtime-status {
       display: flex;
       flex-wrap: nowrap;

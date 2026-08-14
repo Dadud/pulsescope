@@ -723,6 +723,8 @@ mod recording_tests {
                 audio_level_db: -120.0,
                 locked: false,
                 last_hit_ms: 0,
+                snr_db: 0.0,
+                noise_floor_db: -120.0,
             }],
             latest_spectrum_ms,
             ..Default::default()

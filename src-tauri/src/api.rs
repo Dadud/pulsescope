@@ -2111,6 +2111,7 @@ async fn spectrum(State(s): State<ApiState>) -> impl IntoResponse {
         "running": runtime.running,
         "frame_sequence": runtime.frames_processed,
         "frame_timestamp_ms": runtime.latest_spectrum_ms,
+        "noise_floor_db": runtime.noise_floor_db,
     }))
 }
 
@@ -3963,6 +3964,18 @@ async fn channel_bank_scan_config_put(
     }
     let out = r.clone();
     let _ = c.save(&s.0.data_dir);
+    if v.get("squelch_db").is_some() {
+        if let Some(scanner) = s.0.scanner.read().as_ref() {
+            let active = scanner.state.lock().active_range.clone();
+            if active.as_deref() == Some(name) {
+                let _ = scanner
+                    .cmd_tx
+                    .send(crate::scanner::ScannerCommand::SetRangeSquelch {
+                        squelch_db: out.squelch_db,
+                    });
+            }
+        }
+    }
     Json(json!({"ok":true,"bank":out}))
 }
 async fn channel_import(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {

@@ -51,6 +51,8 @@ export interface VfoState {
   squelch_open: boolean;
   strength_db: number;
   audio_level_db?: number;
+  snr_db?: number;
+  noise_floor_db?: number;
   locked?: boolean;
   last_hit_ms?: number;
 }
@@ -293,7 +295,7 @@ export function openAudio(
 // remain small and the backend contract has a single source of truth.
 export const Api = {
   health: () => getJson('/health'),
-  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean; frame_sequence?: number; frame_timestamp_ms?: number }>('/spectrum'),
+  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean; frame_sequence?: number; frame_timestamp_ms?: number; noise_floor_db?: number }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),
   createBank: (body: any) => postJson('/channels/banks/create', body),
   deleteBank: (name: string) => postJson('/channels/banks/delete', { name }),

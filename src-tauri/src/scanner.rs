@@ -67,6 +67,9 @@ pub struct ScannerRuntimeState {
     /// Backend capture timestamp for the currently retained FFT frame.
     pub latest_spectrum_ms: i64,
     pub scan_locked: bool,
+    /// Smoothed median noise floor for the current FFT frame (dBFS).
+    #[serde(default)]
+    pub noise_floor_db: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +89,12 @@ pub struct VfoState {
     pub locked: bool,
     #[serde(default)]
     pub last_hit_ms: i64,
+    /// Signal above noise floor in dB (local peak minus smoothed floor).
+    #[serde(default)]
+    pub snr_db: f32,
+    /// Smoothed noise floor used for squelch decisions (dBFS).
+    #[serde(default)]
+    pub noise_floor_db: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,6 +108,7 @@ pub struct TrunkingState {
 pub enum ScannerCommand {
     Start { range: ScanRange },
     Stop,
+    SetRangeSquelch { squelch_db: f32 },
     SetVfoFrequency { id: u32, frequency_hz: u64 },
     SetVfoMode { id: u32, mode: String },
     SetVfoMute { id: u32, muted: bool },
@@ -439,6 +449,8 @@ async fn scanner_loop(
                             audio_level_db: -120.0,
                             locked: false,
                             last_hit_ms: 0,
+                            snr_db: 0.0,
+                            noise_floor_db: -120.0,
                         }]
                     };
                     state.lock().vfo_states = vfos.clone();
@@ -460,10 +472,16 @@ async fn scanner_loop(
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                     tracing::info!(range = %name, "scanner started");
                 }
+                ScannerCommand::SetRangeSquelch { squelch_db } => {
+                    if let Some(range) = active_range.as_mut() {
+                        range.squelch_db = squelch_db;
+                    }
+                }
                 ScannerCommand::Stop => {
                     state.lock().running = false;
                     state.lock().active_range = None;
                     state.lock().vfo_states.clear();
+                    state.lock().noise_floor_db = -120.0;
                     active_range = None;
                     signal_hold_started = None;
                     signal_hold_until = None;
@@ -588,7 +606,11 @@ async fn scanner_loop(
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         {
             let snr = *peak - noise_floor;
-            if snr >= 12.0 && last_signal_hit.elapsed() >= Duration::from_secs(1) {
+            let hit_squelch = active_range
+                .as_ref()
+                .map(|r| r.squelch_db)
+                .unwrap_or(cfg.squelch_db);
+            if snr >= hit_squelch && last_signal_hit.elapsed() >= Duration::from_secs(1) {
                 let status = device.status();
                 let offset = bin as f64 / bins.len() as f64 - 0.5;
                 let detected_frequency_hz = (status.center_freq_hz as f64
@@ -679,6 +701,8 @@ async fn scanner_loop(
                                 audio_level_db: -120.0,
                                 locked: true,
                                 last_hit_ms: now,
+                                snr_db: snr,
+                                noise_floor_db: noise_floor,
                             });
                             Some(runtime.vfo_states.len() - 1)
                         } else {
@@ -732,6 +756,12 @@ async fn scanner_loop(
             runtime.latest_spectrum = bins.clone();
             runtime.frames_processed = runtime.frames_processed.saturating_add(1);
             runtime.latest_spectrum_ms = now_ms();
+            runtime.noise_floor_db = noise_floor;
+            let squelch_threshold = active_range
+                .as_ref()
+                .map(|r| r.squelch_db)
+                .unwrap_or(cfg.squelch_db);
+            let squelch_close = squelch_threshold - 4.0;
             for vfo in runtime.vfo_states.iter_mut() {
                 let status = device.status();
                 let normalized = (vfo.frequency_hz as f64 - status.center_freq_hz as f64)
@@ -757,9 +787,18 @@ async fn scanner_loop(
                 } else {
                     f32::NEG_INFINITY
                 };
+                let margin = local_peak - noise_floor;
                 vfo.strength_db = local_peak;
-                vfo.squelch_open = local_peak - noise_floor
-                    >= active_range.as_ref().map(|r| r.squelch_db).unwrap_or(12.0);
+                vfo.noise_floor_db = noise_floor;
+                vfo.snr_db = margin;
+                if margin >= squelch_threshold {
+                    vfo.squelch_open = true;
+                } else if margin < squelch_close {
+                    vfo.squelch_open = false;
+                }
+                if !vfo.muted && cfg.scan_hold_on_audio && vfo.squelch_open {
+                    vfo.squelch_open = vfo.audio_level_db >= cfg.voice_audio_min_db;
+                }
             }
             (runtime.frames_processed, runtime.latest_spectrum_ms)
         };
