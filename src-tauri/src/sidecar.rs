@@ -99,7 +99,7 @@ impl SidecarRegistry {
         let stderr = child.stderr.take().expect("stderr");
         let protocol = name.to_string();
 
-        let mut stdout = tokio::io::BufReader::new(stdout);
+        let stdout = tokio::io::BufReader::new(stdout);
         let events_tx_clone = events_tx.clone();
         let protocol_for_task = protocol.clone();
         tokio::spawn(async move {

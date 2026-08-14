@@ -8,7 +8,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
     },
     time::Instant,
 };
@@ -30,7 +29,7 @@ pub struct OperationalError {
     pub request_id: String,
 }
 
-impl axum::response::IntoResponse for OperationalError {
+impl IntoResponse for OperationalError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!(code=self.code, request_id=%self.request_id, error=?self.context, "request failed");
         (
