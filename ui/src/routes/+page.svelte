@@ -1747,6 +1747,9 @@
     .interaction-help { font-size:12px; line-height:1.4; }
     .spectrum-wrap canvas { height:120px; }
     .spectrum-wrap canvas.waterfall { height:max(300px, 45vh); }
+    .rf-grid { grid-template-columns: 1fr; }
+    .rf-control.wide { grid-column: auto; }
+    .display-controls { width: 100%; }
     .waterfall-head { flex-wrap:wrap; }
     .waterfall-head h2 { min-width:180px; }
     .vfo-grid { grid-template-columns:1fr; gap:10px; }
