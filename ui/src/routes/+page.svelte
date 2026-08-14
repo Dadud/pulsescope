@@ -62,6 +62,10 @@
   let suppressSurfaceClick = false;
   let listenerSessionId = '';
   let listenerSessionRevision = 0;
+  let banksCollapsed = $state(false);
+  let logExpanded = $state(false);
+  let showShortcuts = $state(false);
+  let dismissedOnboarding = $state(false);
 
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
   const spectrumLive = $derived(spectrumConnection === 'open' && !spectrumStale && spectrumBins.length > 0);
@@ -109,6 +113,15 @@
       return matchesTab && (!needle || `${m.protocol} ${m.content}`.toLowerCase().includes(needle));
     })
   );
+  const allVfosMuted = $derived(vfos.length > 0 && vfos.every((vfo) => vfo.muted));
+  const showGettingStarted = $derived(
+    connected
+      && !dismissedOnboarding
+      && !scanRunning
+      && !activeRange
+      && (spectrumBins.length === 0 || allVfosMuted),
+  );
+  const audibleVfo = $derived(vfos.find((vfo) => !vfo.muted) ?? vfos[0] ?? null);
 
   const quickModes = [
     { label: 'FM Radio', match: 'FM Broadcast' },
@@ -148,6 +161,9 @@
     browserAudio = new BrowserAudio((state) => { audioState = state; });
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
+    banksCollapsed = localStorage.getItem('pulsescope.ui.banksCollapsed') === '1';
+    logExpanded = localStorage.getItem('pulsescope.ui.logExpanded') === '1';
+    dismissedOnboarding = localStorage.getItem('pulsescope.ui.onboarding.dismissed') === '1';
     listenerSessionId = localStorage.getItem('pulsescope.listener.id')
       || globalThis.crypto?.randomUUID?.()
       || `listener-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -182,6 +198,7 @@
       if (document.visibilityState === 'visible') scheduleLivePoll(0);
     };
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('keydown', handleGlobalKeydown);
     void (async () => {
       await loadInitial();
       connectEvents();
@@ -191,6 +208,7 @@
       window.removeEventListener('pulsescope:runtime', onRuntime);
       window.removeEventListener('pulsescope:poll-error', onPollError);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('keydown', handleGlobalKeydown);
       livePolling = false;
       if (livePollTimer) window.clearTimeout(livePollTimer);
       livePollTimer = null;
@@ -819,11 +837,62 @@
   function fmtTime(ms: number): string {
     return new Date(ms).toLocaleTimeString();
   }
+
+  function toggleBanksCollapsed() {
+    banksCollapsed = !banksCollapsed;
+    localStorage.setItem('pulsescope.ui.banksCollapsed', banksCollapsed ? '1' : '0');
+  }
+
+  function toggleLogExpanded() {
+    logExpanded = !logExpanded;
+    localStorage.setItem('pulsescope.ui.logExpanded', logExpanded ? '1' : '0');
+  }
+
+  function dismissOnboarding() {
+    dismissedOnboarding = true;
+    localStorage.setItem('pulsescope.ui.onboarding.dismissed', '1');
+  }
+
+  function handleGlobalKeydown(event: KeyboardEvent) {
+    const target = event.target as HTMLElement | null;
+    const tag = target?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+    if (event.key === '?' || (event.shiftKey && event.key === '/')) {
+      event.preventDefault();
+      showShortcuts = !showShortcuts;
+      return;
+    }
+    if (event.key === 'Escape' && showShortcuts) {
+      showShortcuts = false;
+      return;
+    }
+    if (event.key === ' ' && vfos.length) {
+      event.preventDefault();
+      void toggleVfoAudio(audibleVfo!);
+      return;
+    }
+    if ((event.key === 'b' || event.key === 'B') && !event.metaKey && !event.ctrlKey) {
+      toggleBanksCollapsed();
+    }
+  }
 </script>
 
-<div class="scanner-layout">
+<div class="scanner-layout" class:banks-collapsed={banksCollapsed} class:log-expanded={logExpanded}>
   <!-- Scan-range sidebar -->
-  <aside class="banks">
+  <aside class="banks" class:collapsed={banksCollapsed}>
+    <div class="banks-rail">
+      <button
+        class="panel-toggle banks-toggle"
+        type="button"
+        aria-expanded={!banksCollapsed}
+        aria-label={banksCollapsed ? 'Show band presets' : 'Hide band presets'}
+        title={banksCollapsed ? 'Show band presets (B)' : 'Hide band presets (B)'}
+        onclick={toggleBanksCollapsed}
+      >
+        {banksCollapsed ? '▸' : '▾'} Bands
+      </button>
+    </div>
+    {#if !banksCollapsed}
     <div class="banks-header">
       <h2>Band presets</h2>
       <p class="banks-help">Select a band to tune the hardware window and start surveying.</p>
@@ -866,6 +935,7 @@
         {:else}<li class="empty-banks">No saved frequencies yet.</li>{/each}
       </ul>
     </section>
+    {/if}
   </aside>
 
   <!-- Main: spectrum + VFO tiles -->
@@ -883,9 +953,30 @@
         <span class="status-pill" class:on={spectrumLive}>● Spectrum {spectrumStatusLabel}</span>
         <span class="status-pill" class:on={scanRunning}>● Survey {scanRunning ? 'running' : 'idle'}</span>
         <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
-        <a href="#/settings" class="settings-link">Hardware setup</a>
+        <button class="layout-toggle" type="button" aria-pressed={logExpanded} onclick={toggleLogExpanded}>
+          {logExpanded ? 'Hide events' : 'Show events'}
+        </button>
+        <button class="layout-toggle" type="button" aria-pressed={showShortcuts} onclick={() => (showShortcuts = !showShortcuts)} title="Keyboard shortcuts">
+          Shortcuts
+        </button>
+        <a href="#/settings" class="settings-link">Device setup</a>
       </div>
     </div>
+    {#if showShortcuts}
+      <section class="shortcuts-card card" aria-label="Keyboard shortcuts">
+        <div class="shortcuts-head">
+          <strong>Keyboard shortcuts</strong>
+          <button type="button" class="mini" onclick={() => (showShortcuts = false)}>Close</button>
+        </div>
+        <ul>
+          <li><kbd>Space</kbd> Listen or mute the active VFO</li>
+          <li><kbd>←</kbd> <kbd>→</kbd> Fine-tune when the spectrum is focused</li>
+          <li><kbd>Shift</kbd> + arrows — 10 kHz steps on the spectrum</li>
+          <li><kbd>B</kbd> Show or hide band presets</li>
+          <li><kbd>?</kbd> Toggle this help panel</li>
+        </ul>
+      </section>
+    {/if}
     {#if !connected}
       <section class="setup-card card" role="status">
         <div>
@@ -895,6 +986,20 @@
         <div class="setup-actions">
           <a class="primary" href="#/settings">Open device setup</a>
           <button onclick={() => void pollRuntime()}>Retry detection</button>
+        </div>
+      </section>
+    {/if}
+    {#if showGettingStarted}
+      <section class="getting-started card" role="status">
+        <div>
+          <strong>Ready to listen</strong>
+          <p>Pick a <b>Quick band</b> or a preset on the left, then press <b>▶ Listen</b> on a VFO. Click the spectrum to tune, scroll to pan the hardware window.</p>
+        </div>
+        <div class="getting-started-actions">
+          {#if vfos.length && allVfosMuted}
+            <button class="primary" type="button" onclick={() => toggleVfoAudio(vfos[0])}>▶ Start listening</button>
+          {/if}
+          <button type="button" onclick={dismissOnboarding}>Dismiss</button>
         </div>
       </section>
     {/if}
@@ -1028,7 +1133,7 @@
   </section>
 
   <!-- Message log -->
-  <aside class="log card">
+  <aside class="log card" class:expanded={logExpanded}>
     <div class="dock-tabs">
       <button class="dock-tab" class:active={dockFilter === 'all'} onclick={() => (dockFilter = 'all')}>All <b>{messages.length}</b></button>
       <button class="dock-tab" class:active={dockFilter === 'trunk'} onclick={() => (dockFilter = 'trunk')}>Trunking</button>
@@ -1064,6 +1169,7 @@
     padding: 8px;
     overflow: hidden;
   }
+  .scanner-layout.banks-collapsed { grid-template-columns: 52px 1fr; }
   .banks {
     display: flex; flex-direction: column; gap: 8px;
     overflow: hidden;
@@ -1071,7 +1177,64 @@
     border: 1px solid var(--line);
     border-radius: 8px;
     padding: 8px;
+    min-width: 0;
   }
+  .banks.collapsed { padding: 6px; align-items: stretch; }
+  .banks-rail { display: flex; align-items: flex-start; }
+  .panel-toggle {
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 11px;
+    border-color: var(--line);
+    background: var(--bg);
+    color: var(--fg-dim);
+    white-space: nowrap;
+  }
+  .banks.collapsed .banks-toggle {
+    width: 100%;
+    min-height: 44px;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
+    padding: 10px 4px;
+    letter-spacing: 0.04em;
+    font: 600 10px var(--mono);
+    text-transform: uppercase;
+  }
+  .layout-toggle {
+    min-height: 28px;
+    padding: 4px 8px;
+    font-size: 11px;
+    border-color: var(--line);
+    background: var(--bg);
+    color: var(--fg-dim);
+  }
+  .layout-toggle[aria-pressed='true'] { color: var(--accent); border-color: var(--accent); }
+  .shortcuts-card { padding: 10px 12px; border-color: rgba(45, 212, 191, 0.35); background: rgba(45, 212, 191, 0.06); }
+  .shortcuts-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .shortcuts-card ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; color: var(--fg-dim); font-size: 12px; }
+  .shortcuts-card kbd {
+    display: inline-block;
+    min-width: 1.4em;
+    padding: 1px 5px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 10px var(--mono);
+    text-align: center;
+  }
+  .getting-started {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-color: rgba(45, 212, 191, 0.35);
+    background: rgba(45, 212, 191, 0.08);
+  }
+  .getting-started strong { color: var(--accent); }
+  .getting-started p { margin: 4px 0 0; color: var(--fg-dim); font-size: 12px; line-height: 1.45; max-width: 52rem; }
+  .getting-started-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .banks-header h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .banks-help { margin: 0 0 8px; color: var(--fg-dim); font-size: 11px; line-height: 1.35; }
   .bank-groups { overflow-y: auto; flex: 1; }
@@ -1205,6 +1368,7 @@
   .strength-val { font-family: var(--mono); font-size: 10px; color: var(--fg-dim); width: 48px; text-align: right; }
 
   .log { grid-column: 1 / -1; min-height: 0; padding: 0; overflow: hidden; border-radius: 4px; }
+  .scanner-layout.log-expanded .log { display: block; }
   .dock-tabs { display: flex; align-items: center; gap: 3px; padding: 4px 8px; background: var(--bg-elev-2); border-bottom: 1px solid var(--line-strong); }
   .dock-tab { border: 0; background: transparent; color: var(--fg-dim); padding: 4px 9px; font-size: 11px; border-radius: 3px; }
   .dock-tab.active { color: var(--fg); background: var(--bg-elev-2); }
@@ -1268,12 +1432,15 @@
     .history-row > span:first-child { display:none; }
     .history-row .listen-hit { grid-column:1 / -1; min-height:40px; }
     .log { display:none; }
+    .scanner-layout.log-expanded .log { display:block; order:4; min-height:220px; }
+    .getting-started { flex-direction:column; align-items:flex-start; }
   }
 
   /* Short laptop / WebView windows: live RF controls beat an empty log dock. */
   @media (max-height: 850px) {
     .scanner-layout { grid-template-rows: minmax(0, 1fr); }
     .log { display: none; }
+    .scanner-layout.log-expanded .log { display: block; grid-row: auto; min-height: 140px; }
     .spectrum-wrap { min-height: 430px; }
     .spectrum-wrap canvas { height: 110px; }
     .spectrum-wrap canvas.waterfall { height: 260px; }
