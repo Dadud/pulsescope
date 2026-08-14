@@ -258,6 +258,7 @@
     .row { align-items:stretch; flex-direction:column; gap:5px; }
     .row label, .row span { width:auto; }
     .row > input:not([type=checkbox]), .row > select, .row > button { width:100%; }
+    .row > input[type=range] { min-height: 44px; }
     .bank-row { grid-template-columns:1fr 1fr; padding:9px 0; border-bottom:1px solid var(--line); }
     .bank-row label { grid-column:1 / -1; }
   }

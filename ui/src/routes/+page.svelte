@@ -16,7 +16,6 @@
     sampleBinLinear,
     SpectrumSmoother,
     type SpectrumDisplayConfig,
-    type WaterfallPalette,
   } from '$lib/spectrum-display';
 
   let banks: ScanRange[] = $state([]);
@@ -85,6 +84,7 @@
   let logExpanded = $state(false);
   let showShortcuts = $state(false);
   let dismissedOnboarding = $state(false);
+  let isCompactLayout = $state(false);
 
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
   const spectrumLive = $derived(spectrumConnection === 'open' && !spectrumStale && spectrumBins.length > 0);
@@ -188,6 +188,10 @@
     banksCollapsed = localStorage.getItem('pulsescope.ui.banksCollapsed') === '1';
     logExpanded = localStorage.getItem('pulsescope.ui.logExpanded') === '1';
     dismissedOnboarding = localStorage.getItem('pulsescope.ui.onboarding.dismissed') === '1';
+    const compactQuery = window.matchMedia('(max-width: 760px)');
+    const updateCompact = () => { isCompactLayout = compactQuery.matches; };
+    updateCompact();
+    compactQuery.addEventListener('change', updateCompact);
     listenerSessionId = localStorage.getItem('pulsescope.listener.id')
       || globalThis.crypto?.randomUUID?.()
       || `listener-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -233,6 +237,7 @@
       window.removeEventListener('pulsescope:poll-error', onPollError);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('keydown', handleGlobalKeydown);
+      compactQuery.removeEventListener('change', updateCompact);
       livePolling = false;
       if (livePollTimer) window.clearTimeout(livePollTimer);
       livePollTimer = null;
@@ -515,6 +520,30 @@
   function toggleRfPanel() {
     rfPanelOpen = !rfPanelOpen;
     localStorage.setItem('pulsescope.ui.rf-panel', rfPanelOpen ? '1' : '0');
+  }
+
+  function scrollToSection(id: string) {
+    const node = document.getElementById(id);
+    if (!node) return;
+    node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function openBandsSection() {
+    banksCollapsed = false;
+    localStorage.setItem('pulsescope.ui.banksCollapsed', '0');
+    scrollToSection('band-presets');
+  }
+
+  function openRfSection() {
+    rfPanelOpen = true;
+    localStorage.setItem('pulsescope.ui.rf-panel', '1');
+    scrollToSection('rf-controls');
+  }
+
+  function openEventsSection() {
+    logExpanded = true;
+    localStorage.setItem('pulsescope.ui.logExpanded', '1');
+    scrollToSection('events-log');
   }
 
   async function refreshDeviceCaps() {
@@ -1038,9 +1067,9 @@
   }
 </script>
 
-<div class="scanner-layout" class:banks-collapsed={banksCollapsed} class:log-expanded={logExpanded}>
+<div class="scanner-layout" class:compact={isCompactLayout} class:banks-collapsed={banksCollapsed} class:log-expanded={logExpanded}>
   <!-- Scan-range sidebar -->
-  <aside class="banks" class:collapsed={banksCollapsed}>
+  <aside id="band-presets" class="banks" class:collapsed={banksCollapsed}>
     <div class="banks-rail">
       <button
         class="panel-toggle banks-toggle"
@@ -1123,12 +1152,30 @@
         <a href="#/settings" class="settings-link">Device setup</a>
       </div>
     </div>
+    {#if isCompactLayout}
+      <nav class="mobile-workspace-bar card" aria-label="Workspace sections">
+        <button type="button" class:active={!banksCollapsed} onclick={openBandsSection}>Bands</button>
+        <button type="button" class:active={rfPanelOpen} onclick={openRfSection} disabled={!connected}>RF</button>
+        <button type="button" class:active={logExpanded} onclick={openEventsSection}>Events</button>
+        <button type="button" class:active={showShortcuts} onclick={() => (showShortcuts = !showShortcuts)}>Help</button>
+        <button type="button" onclick={() => scrollToSection('spectrum-display')}>Spectrum</button>
+      </nav>
+    {/if}
     {#if showShortcuts}
-      <section class="shortcuts-card card" aria-label="Keyboard shortcuts">
+      <section class="shortcuts-card card" aria-label="Shortcuts and gestures">
         <div class="shortcuts-head">
-          <strong>Keyboard shortcuts</strong>
+          <strong>{isCompactLayout ? 'Touch and keyboard help' : 'Keyboard shortcuts'}</strong>
           <button type="button" class="mini" onclick={() => (showShortcuts = false)}>Close</button>
         </div>
+        {#if isCompactLayout}
+          <ul>
+            <li>Tap spectrum or waterfall to tune · scroll to pan the hardware window</li>
+            <li>Drag on spectrum with <b>Pan window</b> selected to move center without moving the VFO</li>
+            <li>Use <b>RF</b> for gain, AGC, antenna, and Bias-T while listening</li>
+            <li><b>Bands</b> and <b>Events</b> jump to the same panels as on desktop</li>
+          </ul>
+          <p class="shortcuts-sub">With an external keyboard connected:</p>
+        {/if}
         <ul>
           <li><kbd>Space</kbd> Listen or mute the active VFO</li>
           <li><kbd>←</kbd> <kbd>→</kbd> Fine-tune when the spectrum is focused</li>
@@ -1190,7 +1237,7 @@
     </div>
 
     {#if connected && deviceCaps?.connected}
-      <section class="rf-panel card" class:collapsed={!rfPanelOpen}>
+      <section id="rf-controls" class="rf-panel card" class:collapsed={!rfPanelOpen}>
         <div class="rf-panel-head">
           <div>
             <h2>RF controls</h2>
@@ -1325,7 +1372,7 @@
       </section>
     {/if}
 
-    <div class="spectrum-wrap card" class:stale={spectrumStale}>
+    <div id="spectrum-display" class="spectrum-wrap card" class:stale={spectrumStale}>
       <div class="spectrum-heading">
         <div class="spectrum-title-block">
           <h2>Live spectrum</h2>
@@ -1441,7 +1488,7 @@
   </section>
 
   <!-- Message log -->
-  <aside class="log card" class:expanded={logExpanded}>
+  <aside id="events-log" class="log card" class:expanded={logExpanded}>
     <div class="dock-tabs">
       <button class="dock-tab" class:active={dockFilter === 'all'} onclick={() => (dockFilter = 'all')}>All <b>{messages.length}</b></button>
       <button class="dock-tab" class:active={dockFilter === 'trunk'} onclick={() => (dockFilter = 'trunk')}>Trunking</button>
@@ -1478,6 +1525,7 @@
     overflow: hidden;
   }
   .scanner-layout.banks-collapsed { grid-template-columns: 52px 1fr; }
+  #band-presets, #rf-controls, #spectrum-display, #events-log { scroll-margin-top: 64px; }
   .banks {
     display: flex; flex-direction: column; gap: 8px;
     overflow: hidden;
@@ -1521,6 +1569,26 @@
   .shortcuts-card { padding: 10px 12px; border-color: rgba(45, 212, 191, 0.35); background: rgba(45, 212, 191, 0.06); }
   .shortcuts-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
   .shortcuts-card ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; color: var(--fg-dim); font-size: 12px; }
+  .shortcuts-sub { margin: 8px 0 4px; color: var(--fg-dim); font-size: 11px; }
+  .mobile-workspace-bar {
+    display: none;
+    gap: 6px;
+    padding: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .mobile-workspace-bar button {
+    flex: 1 0 auto;
+    min-height: 44px;
+    min-width: 72px;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  .mobile-workspace-bar button.active {
+    color: #03120f;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
   .shortcuts-card kbd {
     display: inline-block;
     min-width: 1.4em;
@@ -1609,6 +1677,8 @@
   .display-field input[type='number'] { width: 72px; min-height: 30px; padding: 4px 6px; font-size: 11px; }
   .display-field input[type='range'] { width: 72px; }
   .display-toggle { display: flex; align-items: center; gap: 4px; font: 10px var(--mono); color: var(--fg-dim); min-height: 30px; }
+  .display-controls select { min-height: 30px; font-size: 11px; }
+  .rf-control input[type='range'] { min-height: 32px; }
   .receiver-readout { display: flex; flex-direction:column; align-items:flex-start; gap: 2px; font-family: var(--mono); }
   .receiver-readout span, .receiver-readout small { color: var(--fg-dim); font-size: 10px; }
   .receiver-readout strong { color: var(--accent); font-size: 14px; }
@@ -1712,7 +1782,19 @@
 
   @media (max-width: 760px) {
     .scanner-layout { display:flex; flex-direction:column; height:auto; min-height:100%; padding:8px; gap:8px; overflow:visible; }
+    .scanner-layout.compact .mobile-workspace-bar { display: flex; }
+    #band-presets, #rf-controls, #spectrum-display, #events-log { scroll-margin-top: 128px; }
     .banks { max-height:none; order:3; padding:10px; }
+    .banks.collapsed { flex-direction: row; align-items: center; padding: 8px 10px; }
+    .banks.collapsed .banks-toggle {
+      writing-mode: horizontal-tb;
+      transform: none;
+      width: 100%;
+      min-height: 44px;
+      padding: 10px 12px;
+      font-size: 13px;
+      text-transform: none;
+    }
     .banks-header { display:grid; grid-template-columns:1fr; gap:6px; }
     .banks-header input { min-height:42px; font-size:14px; }
     .bank-groups { max-height:280px; }
@@ -1723,9 +1805,18 @@
     .quick-modes { overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none; }
     .quick-modes .strip-label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
     .quick { flex:0 0 auto; min-height:40px; padding:8px 12px; }
-    .runtime-status { justify-content:space-between; }
-    .runtime-status .status-pill:nth-child(2), .runtime-status .status-pill:nth-child(3) { display:none; }
-    .settings-link { margin-left:auto; }
+    .runtime-status {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      padding-bottom: 2px;
+    }
+    .runtime-status .status-pill { flex: 0 0 auto; font-size: 10px; }
+    .runtime-status .layout-toggle { display: none; }
+    .settings-link { margin-left: 0; flex: 0 0 auto; min-height: 40px; display: inline-flex; align-items: center; }
+    .layout-toggle, .panel-toggle, .mini, .mini-link { min-height: 44px; }
     .setup-card { align-items:flex-start; flex-direction:column; }
     .device-strip { gap:8px; flex-wrap:wrap; padding:11px; }
     .device-strip > div:first-child { width:100%; font-size:14px; }
@@ -1734,6 +1825,10 @@
     .vfo-summary { margin-left:auto; }
     .audio-status { width:100%; padding-top:6px; border-top:1px solid var(--line); }
     .receiver-readout { order:-1; width:100%; }
+    .rf-panel-head { flex-direction: column; align-items: stretch; gap: 8px; }
+    .rf-panel-actions { justify-content: flex-start; flex-wrap: wrap; }
+    .rf-control input[type='range'] { min-height: 44px; }
+    .rf-control select, .rf-control input[type='number'] { min-height: 44px; font-size: 14px; }
     .spectrum-wrap { min-height:0; }
     .spectrum-wrap h2 { display:flex; flex-wrap:wrap; gap:5px; align-items:baseline; }
     .spectrum-heading { align-items:flex-start; }
@@ -1745,13 +1840,26 @@
     .center-controls > button:nth-of-type(2) { grid-column:1 / -1; grid-row:3; }
     .frequency-entry input { min-height:42px; font-size:18px; }
     .interaction-help { font-size:12px; line-height:1.4; }
-    .spectrum-wrap canvas { height:120px; }
-    .spectrum-wrap canvas.waterfall { height:max(300px, 45vh); }
+    .spectrum-wrap canvas { height:140px; }
+    .spectrum-wrap canvas.waterfall { height:max(280px, 42vh); }
+    .waterfall-head { flex-direction: column; align-items: stretch; gap: 8px; }
+    .display-controls {
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: end;
+      gap: 8px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      width: 100%;
+      padding-bottom: 4px;
+    }
+    .display-field input[type='number'] { min-height: 44px; width: 84px; font-size: 14px; }
+    .display-field input[type='range'] { width: 96px; min-height: 44px; }
+    .display-controls select { min-height: 44px; font-size: 13px; }
+    .display-controls .mini { min-height: 44px; flex: 0 0 auto; }
+    .display-toggle { min-height: 44px; }
     .rf-grid { grid-template-columns: 1fr; }
     .rf-control.wide { grid-column: auto; }
-    .display-controls { width: 100%; }
-    .waterfall-head { flex-wrap:wrap; }
-    .waterfall-head h2 { min-width:180px; }
     .vfo-grid { grid-template-columns:1fr; gap:10px; }
     .vfo-tile { padding:12px; gap:8px; }
     .vfo-freq { font-size:22px; }
@@ -1764,6 +1872,7 @@
     .log { display:none; }
     .scanner-layout.log-expanded .log { display:block; order:4; min-height:220px; }
     .getting-started { flex-direction:column; align-items:flex-start; }
+    .getting-started-actions button { min-height: 44px; }
   }
 
   /* Short laptop / WebView windows: live RF controls beat an empty log dock. */
