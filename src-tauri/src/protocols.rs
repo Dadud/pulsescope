@@ -122,7 +122,11 @@ mod tests {
     fn device(driver: &str, connected: bool, sample_rate: u32) -> DeviceStatus {
         DeviceStatus {
             connected,
-            lifecycle: crate::device::DeviceLifecycle::Ready,
+            lifecycle: if connected {
+                crate::device::DeviceLifecycle::Streaming
+            } else {
+                crate::device::DeviceLifecycle::Disconnected
+            },
             driver: driver.into(),
             label: String::new(),
             sample_rate,
