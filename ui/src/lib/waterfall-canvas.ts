@@ -1,7 +1,15 @@
 /** Main-thread waterfall history renderer. OffscreenCanvas workers are opt-in only
  *  because several desktop webviews fail to display transferred surfaces. */
 
-export type WaterfallPalette = 'classic' | 'mono';
+import {
+  getWaterfallLUT,
+  normalizeDb,
+  sampleBinLinear,
+  type WaterfallPalette,
+  waterfallColor,
+} from './spectrum-display';
+
+export type { WaterfallPalette };
 
 export function canvasBackingSize(
   canvas: HTMLCanvasElement,
@@ -18,19 +26,13 @@ export function canvasBackingSize(
   };
 }
 
-function rgbForValue(palette: WaterfallPalette, value: number, hue: number): [number, number, number] {
-  if (palette === 'mono') return [1, 1, 1];
-  const c = 1 - Math.abs((hue / 60) % 2 - 1);
-  const sector = Math.floor(hue / 60);
-  switch (sector) {
-    case 0: return [1, c, 0];
-    case 1: return [c, 1, 0];
-    case 2: return [0, 1, c];
-    case 3: return [0, c, 1];
-    case 4: return [c, 0, 1];
-    default: return [1, 0, c];
-  }
-}
+export type WaterfallDrawOptions = {
+  gain?: number;
+  palette?: WaterfallPalette;
+  minDb?: number;
+  maxDb?: number;
+  rowsPerFrame?: number;
+};
 
 export class WaterfallCanvas {
   private canvas: HTMLCanvasElement | null = null;
@@ -39,8 +41,7 @@ export class WaterfallCanvas {
   private image: ImageData | null = null;
   private observer: ResizeObserver | null = null;
   private lastBins: number[] = [];
-  private gain = 1;
-  private palette: WaterfallPalette = 'classic';
+  private options: WaterfallDrawOptions = {};
 
   attach(canvas: HTMLCanvasElement) {
     this.detach();
@@ -51,10 +52,10 @@ export class WaterfallCanvas {
     this.observer = new ResizeObserver(() => {
       this.pixels = null;
       this.image = null;
-      if (this.lastBins.length) this.draw(this.lastBins, this.gain, this.palette);
+      if (this.lastBins.length) this.draw(this.lastBins, this.options);
     });
     this.observer.observe(canvas);
-    if (this.lastBins.length) this.draw(this.lastBins, this.gain, this.palette);
+    if (this.lastBins.length) this.draw(this.lastBins, this.options);
   }
 
   detach() {
@@ -74,11 +75,21 @@ export class WaterfallCanvas {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
-  draw(bins: number[], gain: number, palette: WaterfallPalette) {
+  draw(bins: number[], gainOrOptions: number | WaterfallDrawOptions = 1, palette?: WaterfallPalette) {
+    const options: WaterfallDrawOptions =
+      typeof gainOrOptions === 'number'
+        ? { gain: gainOrOptions, palette: palette ?? 'openwebrx' }
+        : gainOrOptions;
     this.lastBins = bins;
-    this.gain = gain;
-    this.palette = palette;
+    this.options = options;
     if (!this.canvas || !this.ctx || bins.length === 0) return;
+
+    const minDb = options.minDb ?? -120;
+    const maxDb = options.maxDb ?? -20;
+    const gain = options.gain ?? 1;
+    const paletteName = options.palette ?? 'openwebrx';
+    const rowsPerFrame = Math.max(1, Math.min(4, options.rowsPerFrame ?? 1));
+    const lut = getWaterfallLUT(paletteName);
 
     const backing = canvasBackingSize(this.canvas, 1200, 420);
     if (this.canvas.width !== backing.width) this.canvas.width = backing.width;
@@ -92,21 +103,19 @@ export class WaterfallCanvas {
       this.pixels = new Uint8ClampedArray(w * h * 4);
     }
 
-    const rowsPerFrame = 3;
     const rowBytes = w * 4;
     if (h > rowsPerFrame) {
       this.pixels.copyWithin(rowBytes * rowsPerFrame, 0, rowBytes * (h - rowsPerFrame));
     }
 
     for (let x = 0; x < w; x += 1) {
-      const index = Math.min(bins.length - 1, Math.floor((x / w) * bins.length));
-      const value = Math.max(0, Math.min(1, ((bins[index] + 100) / 80) * gain));
-      const hue = 240 - value * 240;
-      const rgb = rgbForValue(palette, value, hue);
+      const db = sampleBinLinear(bins, x / Math.max(1, w - 1));
+      const normalized = Math.max(0, Math.min(1, normalizeDb(db, minDb, maxDb) * gain));
+      const rgb = waterfallColor(paletteName, normalized, lut ?? undefined);
       const pixel = x * 4;
-      this.pixels[pixel] = Math.round(rgb[0] * value * 255);
-      this.pixels[pixel + 1] = Math.round(rgb[1] * value * 255);
-      this.pixels[pixel + 2] = Math.round(rgb[2] * value * 255);
+      this.pixels[pixel] = Math.round(rgb[0] * 255);
+      this.pixels[pixel + 1] = Math.round(rgb[1] * 255);
+      this.pixels[pixel + 2] = Math.round(rgb[2] * 255);
       this.pixels[pixel + 3] = 255;
     }
 

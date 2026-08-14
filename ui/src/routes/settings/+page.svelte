@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Api } from '$lib/api';
+  import { gainStageLabel, isCommonRfSetting } from '$lib/spectrum-display';
 
   let cfg = $state<any>(null);
   let status = $state<any>(null);
@@ -34,10 +35,11 @@
     const ranges = caps?.sample_rate_ranges_hz ?? [];
     return preferred.filter((rate) => ranges.some((range: any) => rate >= range.minimum && rate <= range.maximum));
   }
-  function gainStageLabel(stage: any) {
-    if (status?.driver === 'sdrplay' && (stage.name === 'IFGR' || stage.name === 'RFGR')) return `${stage.name} gain reduction`;
-    return `${stage.name} gain`;
+  function gainStageLabelLocal(stage: any) {
+    return gainStageLabel(stage, status?.driver);
   }
+  const commonSettings = $derived((caps?.settings ?? []).filter((setting: any) => isCommonRfSetting(setting)));
+  const expertSettings = $derived((caps?.settings ?? []).filter((setting: any) => !isCommonRfSetting(setting)));
   async function control(name: string, value: string | number | boolean) {
     deviceError = ''; controlNotice = 'Applying…';
     try {
@@ -138,15 +140,23 @@
       {#if caps.agc_supported}<label class="row"><span><b>RF AGC</b><small> Automatic RF level; manual reductions are ignored while enabled.</small></span><input type="checkbox" checked={caps.agc_enabled} onchange={(e) => control('agc', e.currentTarget.checked)} /></label>{/if}
       {#if controlNotice}<p class="control-notice" role="status">{controlNotice}</p>{/if}
       {#if caps.antennas.length > 1}<label class="row"><span>Antenna</span><select value={caps.antenna} onchange={(e) => control('antenna', e.currentTarget.value)}>{#each caps.antennas as antenna}<option value={antenna}>{antenna}</option>{/each}</select></label>{/if}
+      {#each caps.gain_stages as stage}
+        <label class="row"><span>{gainStageLabelLocal(stage)} ({stage.value_db.toFixed(1)} dB){#if status?.driver === 'sdrplay'}<small> Lower reduction = more RF gain.</small>{/if}</span><input disabled={caps.agc_enabled} type="range" min={stage.min_db} max={stage.max_db} step={stage.step_db || 1} value={stage.value_db} oninput={(e) => (stage.value_db = Number(e.currentTarget.value))} onchange={(e) => control(`gain:${stage.name}`, e.currentTarget.value)} /></label>
+      {/each}
+      {#each commonSettings as setting}
+        <label class="row"><span>{setting.name}<small>{setting.key}</small></span>
+          {#if setting.kind === 'bool'}<input type="checkbox" checked={setting.value === 'true'} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.checked)} />
+          {:else if setting.options.length}<select value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)}>{#each setting.options as option}<option value={option}>{option}</option>{/each}</select>
+          {:else if setting.kind === 'string'}<input type="text" value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)} />
+          {:else}<input type="number" min={setting.min} max={setting.max} step={setting.step || 1} value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)} />{/if}
+        </label>
+      {/each}
       {#if expertMode}
         <h3>Expert RF controls</h3>
         {#if caps.dc_offset_auto_supported}<label class="row"><span>DC offset auto</span><input type="checkbox" checked={caps.dc_offset_auto} onchange={(e) => control('dc_offset_auto', e.currentTarget.checked)} /></label>{/if}
         {#if caps.iq_balance_auto_supported}<label class="row"><span>IQ balance auto</span><input type="checkbox" checked={caps.iq_balance_auto} onchange={(e) => control('iq_balance_auto', e.currentTarget.checked)} /></label>{/if}
         {#if caps.frequency_correction_supported}<label class="row"><span>Frequency correction (PPM)</span><input type="number" step="0.1" value={caps.frequency_correction_ppm} onchange={(e) => control('frequency_correction_ppm', e.currentTarget.value)} /></label>{/if}
-        {#each caps.gain_stages as stage}
-          <label class="row"><span>{gainStageLabel(stage)} ({stage.value_db.toFixed(1)} dB){#if status?.driver === 'sdrplay'}<small> Lower reduction = more RF gain.</small>{/if}</span><input disabled={caps.agc_enabled} type="range" min={stage.min_db} max={stage.max_db} step={stage.step_db || 1} value={stage.value_db} oninput={(e) => (stage.value_db = Number(e.currentTarget.value))} onchange={(e) => control(`gain:${stage.name}`, e.currentTarget.value)} /></label>
-        {/each}
-        {#each caps.settings as setting}
+        {#each expertSettings as setting}
           <label class="row"><span>{setting.name}</span>
             {#if setting.kind === 'bool'}<input type="checkbox" checked={setting.value === 'true'} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.checked)} />
             {:else if setting.options.length}<select value={setting.value} onchange={(e) => control(`setting:${setting.key}`, e.currentTarget.value)}>{#each setting.options as option}<option value={option}>{option}</option>{/each}</select>

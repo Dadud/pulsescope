@@ -2,7 +2,22 @@
   import { untrack } from 'svelte';
   import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame, type ReceiverBookmark } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
-  import { WaterfallCanvas, type WaterfallPalette } from '$lib/waterfall-canvas';
+  import { WaterfallCanvas } from '$lib/waterfall-canvas';
+  import {
+    autoDisplayLevels,
+    formatSpectrumFrequency,
+    gainStageLabel,
+    horizontalDbGridLines,
+    isCommonRfSetting,
+    loadSpectrumDisplayConfig,
+    normalizeDb,
+    PeakHoldTrace,
+    saveSpectrumDisplayConfig,
+    sampleBinLinear,
+    SpectrumSmoother,
+    type SpectrumDisplayConfig,
+    type WaterfallPalette,
+  } from '$lib/spectrum-display';
 
   let banks: ScanRange[] = $state([]);
   let bookmarks: ReceiverBookmark[] = $state([]);
@@ -37,12 +52,16 @@
   let droppedSpectrumFrames = $state(0);
   let nowMs = $state(Date.now());
   const waterfallCanvasRenderer = new WaterfallCanvas();
+  const spectrumSmoother = new SpectrumSmoother();
+  const peakHold = new PeakHoldTrace();
   let renderFps = $state(0);
   let renderFrames = 0;
   let renderWindowStarted = performance.now();
   let drawPending = false;
   let waterfallGain = $state(1);
-  let waterfallPalette = $state<WaterfallPalette>('classic');
+  let displayConfig = $state<SpectrumDisplayConfig>(loadSpectrumDisplayConfig());
+  let rfPanelOpen = $state(true);
+  let rfControlBusy = $state(false);
   let initialLoadInFlight = false;
   let browserAudio: BrowserAudio | null = null;
   let audioState: BrowserAudioState = $state('off');
@@ -122,6 +141,9 @@
       && (spectrumBins.length === 0 || allVfosMuted),
   );
   const audibleVfo = $derived(vfos.find((vfo) => !vfo.muted) ?? vfos[0] ?? null);
+  const deviceDriver = $derived(deviceCaps?.identity?.driver ?? deviceCaps?.driver ?? '');
+  const commonRfSettings = $derived((deviceCaps?.settings ?? []).filter((setting: any) => isCommonRfSetting(setting)));
+  const expertRfSettings = $derived((deviceCaps?.settings ?? []).filter((setting: any) => !isCommonRfSetting(setting)));
 
   const quickModes = [
     { label: 'FM Radio', match: 'FM Broadcast' },
@@ -159,8 +181,10 @@
   // during setup from turning reconnects into effect restarts.
   $effect(() => untrack(() => {
     browserAudio = new BrowserAudio((state) => { audioState = state; });
+    displayConfig = loadSpectrumDisplayConfig();
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
-    waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
+    rfPanelOpen = localStorage.getItem('pulsescope.ui.rf-panel') !== '0';
+    spectrumSmoother.setAlpha(displayConfig.smoothing);
     banksCollapsed = localStorage.getItem('pulsescope.ui.banksCollapsed') === '1';
     logExpanded = localStorage.getItem('pulsescope.ui.logExpanded') === '1';
     dismissedOnboarding = localStorage.getItem('pulsescope.ui.onboarding.dismissed') === '1';
@@ -440,40 +464,134 @@
     return 'Other';
   }
 
+  function persistDisplayConfig() {
+    saveSpectrumDisplayConfig(displayConfig);
+    spectrumSmoother.setAlpha(displayConfig.smoothing);
+    spectrumSmoother.reset();
+    peakHold.reset();
+    if (spectrumBins.length) {
+      drawSpectrum();
+      drawWaterfall();
+    }
+  }
+
   function setWaterfallGain(event: Event) {
     waterfallGain = Number((event.currentTarget as HTMLInputElement).value);
     localStorage.setItem('pulsescope.waterfall.gain', String(waterfallGain));
     if (spectrumBins.length) drawWaterfall();
   }
-  function setWaterfallPalette(event: Event) {
-    waterfallPalette = (event.currentTarget as HTMLSelectElement).value === 'mono' ? 'mono' : 'classic';
-    localStorage.setItem('pulsescope.waterfall.palette', waterfallPalette);
-    if (spectrumBins.length) drawWaterfall();
+
+  function setDisplayPalette(event: Event) {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    displayConfig.palette = value === 'mono' || value === 'classic' || value === 'openwebrx' ? value : 'openwebrx';
+    persistDisplayConfig();
+  }
+
+  function setDisplaySmoothing(event: Event) {
+    displayConfig.smoothing = Number((event.currentTarget as HTMLInputElement).value);
+    persistDisplayConfig();
+  }
+
+  function setDisplayMinDb(event: Event) {
+    displayConfig.minDb = Number((event.currentTarget as HTMLInputElement).value);
+    if (displayConfig.maxDb <= displayConfig.minDb + 10) displayConfig.maxDb = displayConfig.minDb + 50;
+    persistDisplayConfig();
+  }
+
+  function setDisplayMaxDb(event: Event) {
+    displayConfig.maxDb = Number((event.currentTarget as HTMLInputElement).value);
+    if (displayConfig.maxDb <= displayConfig.minDb + 10) displayConfig.minDb = displayConfig.maxDb - 50;
+    persistDisplayConfig();
+  }
+
+  function autoSpectrumLevels() {
+    if (!spectrumBins.length) return;
+    const levels = autoDisplayLevels(spectrumBins);
+    displayConfig.minDb = levels.minDb;
+    displayConfig.maxDb = levels.maxDb;
+    persistDisplayConfig();
+  }
+
+  function toggleRfPanel() {
+    rfPanelOpen = !rfPanelOpen;
+    localStorage.setItem('pulsescope.ui.rf-panel', rfPanelOpen ? '1' : '0');
+  }
+
+  async function refreshDeviceCaps() {
+    try {
+      deviceCaps = await Api.deviceCapabilities();
+    } catch (e) {
+      notice = `RF controls unavailable: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  async function setDeviceControl(control: string, value: string | number | boolean) {
+    if (rfControlBusy) return;
+    rfControlBusy = true;
+    try {
+      const result = await Api.deviceControl(control, value);
+      deviceCaps = result.capabilities ?? result;
+    } catch (e) {
+      notice = String(e);
+    } finally {
+      rfControlBusy = false;
+    }
+  }
+
+  function displayBins(): number[] {
+    if (!spectrumBins.length) return spectrumBins;
+    if (displayConfig.smoothing <= 0) return spectrumBins;
+    spectrumSmoother.setAlpha(displayConfig.smoothing);
+    return spectrumSmoother.process(spectrumBins);
   }
 
   function drawSpectrum() {
     if (!canvas || spectrumBins.length === 0) return;
-    const backing = canvasBackingSize(canvas, 1200, 180);
+    const backing = canvasBackingSize(canvas, 1200, 200);
     ensureCanvasBacking(canvas, backing.width, backing.height);
     const ctx = canvas.getContext('2d')!;
     const w = canvas.width;
     const h = canvas.height;
+    const minDb = displayConfig.minDb;
+    const maxDb = displayConfig.maxDb;
+    const dpr = window.devicePixelRatio || 1;
+    const bins = displayBins();
+    const peaks = displayConfig.peakHold ? peakHold.process(bins) : null;
     ctx.clearRect(0, 0, w, h);
 
-    // Grid
-    ctx.strokeStyle = '#1f2c36';
+    const labelPad = Math.round(18 * dpr);
+    const plotTop = labelPad;
+    const plotHeight = h - labelPad;
+
+    ctx.strokeStyle = '#1a242d';
     ctx.lineWidth = 1;
-    for (let i = 0; i <= 10; i++) {
-      const x = (i / 10) * w;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-      const frequency = centerFreqHz - sampleRateHz / 2 + (i / 10) * sampleRateHz;
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = `${Math.max(10, Math.round(10 * (window.devicePixelRatio || 1)))}px ui-monospace, monospace`;
-      ctx.textAlign = i === 0 ? 'left' : i === 10 ? 'right' : 'center';
-      ctx.fillText(frequency >= 1e9 ? `${(frequency / 1e9).toFixed(4)}G` : `${(frequency / 1e6).toFixed(4)}M`, x, 14 * (window.devicePixelRatio || 1));
+    for (const db of horizontalDbGridLines(minDb, maxDb, 5)) {
+      const norm = normalizeDb(db, minDb, maxDb);
+      const y = plotTop + plotHeight - norm * plotHeight;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+      ctx.fillStyle = '#64748b';
+      ctx.font = `${Math.max(9, Math.round(9 * dpr))}px ui-monospace, monospace`;
+      ctx.textAlign = 'left';
+      ctx.fillText(`${Math.round(db)} dB`, 4 * dpr, Math.max(plotTop + 10 * dpr, y - 2 * dpr));
     }
 
-    // Active VFO markers make tuning context visible even on a wide span.
+    for (let i = 0; i <= 10; i++) {
+      const x = (i / 10) * w;
+      ctx.strokeStyle = '#1f2c36';
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      const frequency = centerFreqHz - sampleRateHz / 2 + (i / 10) * sampleRateHz;
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = `${Math.max(10, Math.round(10 * dpr))}px ui-monospace, monospace`;
+      ctx.textAlign = i === 0 ? 'left' : i === 10 ? 'right' : 'center';
+      ctx.fillText(formatSpectrumFrequency(frequency), x, 12 * dpr);
+    }
+
     for (const vfo of vfos) {
       const normalized = (vfo.frequency_hz - (centerFreqHz - sampleRateHz / 2)) / sampleRateHz;
       if (normalized < 0 || normalized > 1) continue;
@@ -481,32 +599,75 @@
       const passbandHz = vfo.mode === 'wfm' ? 200_000 : vfo.mode === 'nfm' ? 12_500 : vfo.mode === 'am' ? 10_000 : 3_000;
       const passbandWidth = Math.max(2, passbandHz / sampleRateHz * w);
       ctx.fillStyle = vfo.muted ? 'rgba(100,116,139,.10)' : 'rgba(45,212,191,.14)';
-      ctx.fillRect(x - passbandWidth / 2, 0, passbandWidth, h);
+      ctx.fillRect(x - passbandWidth / 2, plotTop, passbandWidth, plotHeight);
       ctx.strokeStyle = vfo.muted ? '#64748b' : '#f59e0b';
-      ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
-    ctx.strokeStyle = '#94a3b8'; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h); ctx.stroke(); ctx.setLineDash([]);
-
-    // Spectrum trace. Use the immediate canvas path API: it works in both
-    // Chromium's Tauri webview and normal browsers without Path2D cloning.
-    const n = spectrumBins.length;
-    const min = -100, max = 0;
+    ctx.strokeStyle = '#94a3b8';
+    ctx.setLineDash([2, 3]);
     ctx.beginPath();
-    for (let i = 0; i < n; i++) {
-      const x = (i / Math.max(1, n - 1)) * w;
-      const norm = Math.max(0, Math.min(1, (spectrumBins[i] - min) / (max - min)));
-      const y = h - norm * h;
-      if (i === 0) ctx.moveTo(x, y);
+    ctx.moveTo(w / 2, plotTop);
+    ctx.lineTo(w / 2, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const traceY = (db: number) => plotTop + plotHeight - normalizeDb(db, minDb, maxDb) * plotHeight;
+
+    ctx.beginPath();
+    for (let x = 0; x < w; x += 1) {
+      const db = sampleBinLinear(bins, x / Math.max(1, w - 1));
+      const y = traceY(db);
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    const fill = ctx.createLinearGradient(0, plotTop, 0, h);
+    fill.addColorStop(0, 'rgba(45,212,191,0.35)');
+    fill.addColorStop(1, 'rgba(45,212,191,0.02)');
+    ctx.fillStyle = fill;
+    ctx.fill();
+
+    ctx.beginPath();
+    for (let x = 0; x < w; x += 1) {
+      const db = sampleBinLinear(bins, x / Math.max(1, w - 1));
+      const y = traceY(db);
+      if (x === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
     ctx.strokeStyle = '#2dd4bf';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = Math.max(1, 1.5 * dpr);
     ctx.stroke();
+
+    if (peaks) {
+      ctx.beginPath();
+      for (let x = 0; x < w; x += 1) {
+        const db = sampleBinLinear(peaks, x / Math.max(1, w - 1));
+        const y = traceY(db);
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = 'rgba(251,191,36,0.85)';
+      ctx.lineWidth = Math.max(1, 1 * dpr);
+      ctx.stroke();
+    }
   }
 
   function drawWaterfall() {
     if (!waterfallCanvas || spectrumBins.length === 0) return;
-    waterfallCanvasRenderer.draw(spectrumBins, waterfallGain, waterfallPalette);
+    waterfallCanvasRenderer.draw(spectrumBins, {
+      gain: waterfallGain,
+      palette: displayConfig.palette,
+      minDb: displayConfig.minDb,
+      maxDb: displayConfig.maxDb,
+      rowsPerFrame: 1,
+    });
   }
 
   function bindWaterfallCanvas(node: HTMLCanvasElement) {
@@ -822,7 +983,7 @@
     for (let i = 0; i < 48; i++) {
       const index = Math.min(spectrumBins.length - 1, start + Math.floor((i / 47) * (width - 1)));
       const x = (i / 47) * 100;
-      const norm = Math.max(0, Math.min(1, (spectrumBins[index] + 100) / 100));
+      const norm = Math.max(0, Math.min(1, normalizeDb(spectrumBins[index], displayConfig.minDb, displayConfig.maxDb)));
       points.push(`${x.toFixed(1)},${(38 - norm * 32).toFixed(1)}`);
     }
     return points.join(' ');
@@ -1028,6 +1189,142 @@
       </div>
     </div>
 
+    {#if connected && deviceCaps?.connected}
+      <section class="rf-panel card" class:collapsed={!rfPanelOpen}>
+        <div class="rf-panel-head">
+          <div>
+            <h2>RF controls</h2>
+            <p class="rf-panel-help">Gain, AGC, antenna, and device-specific options (Bias-T, preamp) from the driver.</p>
+          </div>
+          <div class="rf-panel-actions">
+            <button type="button" class="mini" onclick={toggleRfPanel} aria-expanded={rfPanelOpen}>{rfPanelOpen ? 'Hide' : 'Show'}</button>
+            <button type="button" class="mini" onclick={() => void refreshDeviceCaps()} disabled={rfControlBusy}>Refresh</button>
+            <a class="mini-link" href="#/settings">All device settings</a>
+          </div>
+        </div>
+        {#if rfPanelOpen}
+          <div class="rf-grid">
+            {#if deviceCaps.agc_supported}
+              <label class="rf-control">
+                <span>RF AGC</span>
+                <input
+                  type="checkbox"
+                  checked={deviceCaps.agc_enabled}
+                  disabled={rfControlBusy}
+                  onchange={(e) => setDeviceControl('agc', e.currentTarget.checked)}
+                />
+              </label>
+            {/if}
+            {#if deviceCaps.antennas?.length > 1}
+              <label class="rf-control">
+                <span>Antenna</span>
+                <select
+                  value={deviceCaps.antenna}
+                  disabled={rfControlBusy}
+                  onchange={(e) => setDeviceControl('antenna', e.currentTarget.value)}
+                >
+                  {#each deviceCaps.antennas as antenna}
+                    <option value={antenna}>{antenna}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
+            {#each deviceCaps.gain_stages ?? [] as stage (stage.name)}
+              <label class="rf-control wide">
+                <span>
+                  {gainStageLabel(stage, deviceDriver)}
+                  <small>{stage.value_db.toFixed(1)} dB{#if deviceDriver === 'sdrplay'} · lower reduction = more gain{/if}</small>
+                </span>
+                <input
+                  type="range"
+                  min={stage.min_db}
+                  max={stage.max_db}
+                  step={stage.step_db || 1}
+                  value={stage.value_db}
+                  disabled={rfControlBusy || deviceCaps.agc_enabled}
+                  oninput={(e) => (stage.value_db = Number(e.currentTarget.value))}
+                  onchange={(e) => setDeviceControl(`gain:${stage.name}`, e.currentTarget.value)}
+                />
+              </label>
+            {/each}
+            {#each commonRfSettings as setting (setting.key)}
+              <label class="rf-control">
+                <span>{setting.name}</span>
+                {#if setting.kind === 'bool'}
+                  <input
+                    type="checkbox"
+                    checked={setting.value === 'true'}
+                    disabled={rfControlBusy}
+                    onchange={(e) => setDeviceControl(`setting:${setting.key}`, e.currentTarget.checked)}
+                  />
+                {:else if setting.options?.length}
+                  <select
+                    value={setting.value}
+                    disabled={rfControlBusy}
+                    onchange={(e) => setDeviceControl(`setting:${setting.key}`, e.currentTarget.value)}
+                  >
+                    {#each setting.options as option}
+                      <option value={option}>{option}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  <input
+                    type="number"
+                    min={setting.min}
+                    max={setting.max}
+                    step={setting.step || 1}
+                    value={setting.value}
+                    disabled={rfControlBusy}
+                    onchange={(e) => setDeviceControl(`setting:${setting.key}`, e.currentTarget.value)}
+                  />
+                {/if}
+              </label>
+            {/each}
+            {#if expertRfSettings.length}
+              <details class="rf-expert">
+                <summary>More driver settings ({expertRfSettings.length})</summary>
+                <div class="rf-grid">
+                  {#each expertRfSettings as setting (setting.key)}
+                    <label class="rf-control">
+                      <span>{setting.name}</span>
+                      {#if setting.kind === 'bool'}
+                        <input
+                          type="checkbox"
+                          checked={setting.value === 'true'}
+                          disabled={rfControlBusy}
+                          onchange={(e) => setDeviceControl(`setting:${setting.key}`, e.currentTarget.checked)}
+                        />
+                      {:else if setting.options?.length}
+                        <select
+                          value={setting.value}
+                          disabled={rfControlBusy}
+                          onchange={(e) => setDeviceControl(`setting:${setting.key}`, e.currentTarget.value)}
+                        >
+                          {#each setting.options as option}
+                            <option value={option}>{option}</option>
+                          {/each}
+                        </select>
+                      {:else}
+                        <input
+                          type="number"
+                          min={setting.min}
+                          max={setting.max}
+                          step={setting.step || 1}
+                          value={setting.value}
+                          disabled={rfControlBusy}
+                          onchange={(e) => setDeviceControl(`setting:${setting.key}`, e.currentTarget.value)}
+                        />
+                      {/if}
+                    </label>
+                  {/each}
+                </div>
+              </details>
+            {/if}
+          </div>
+        {/if}
+      </section>
+    {/if}
+
     <div class="spectrum-wrap card" class:stale={spectrumStale}>
       <div class="spectrum-heading">
         <div class="spectrum-title-block">
@@ -1051,10 +1348,21 @@
       <div class="waterfall-head">
         <div class="waterfall-title-block">
           <h2 class="waterfall-title">Waterfall</h2>
-          <p class="waterfall-sub">Time history of the FFT — newest row at the top</p>
+          <p class="waterfall-sub">openWebRX-style levels · newest row at top · yellow trace = peak hold</p>
         </div>
-        <label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label>
-        <select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select>
+        <div class="display-controls">
+          <label class="display-field"><span>Min dB</span><input type="number" step="5" value={displayConfig.minDb} onchange={setDisplayMinDb} aria-label="Spectrum minimum dB" /></label>
+          <label class="display-field"><span>Max dB</span><input type="number" step="5" value={displayConfig.maxDb} onchange={setDisplayMaxDb} aria-label="Spectrum maximum dB" /></label>
+          <button type="button" class="mini" onclick={autoSpectrumLevels} title="Auto-adjust levels like openWebRX">Auto levels</button>
+          <label class="display-field"><span>Smooth</span><input type="range" min="0" max="0.85" step="0.05" value={displayConfig.smoothing} oninput={setDisplaySmoothing} aria-label="Spectrum smoothing" /></label>
+          <label class="display-field"><span>Intensity</span><input aria-label="Waterfall intensity boost" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label>
+          <select aria-label="Waterfall palette" value={displayConfig.palette} onchange={setDisplayPalette}>
+            <option value="openwebrx">OpenWebRX</option>
+            <option value="classic">Classic</option>
+            <option value="mono">Mono</option>
+          </select>
+          <label class="display-toggle"><input type="checkbox" checked={displayConfig.peakHold} onchange={(e) => { displayConfig.peakHold = e.currentTarget.checked; peakHold.reset(); persistDisplayConfig(); }} /> Peak</label>
+        </div>
       </div>
       <div class="waterfall-stage">
         <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} use:bindWaterfallCanvas onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Scroll to pan the receiver center; select Pan window to click or drag."></canvas>
@@ -1282,6 +1590,25 @@
   .device-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 12px; font-size: 13px; flex-wrap: wrap; }
   .device-name { display: flex; align-items: center; min-width: 140px; }
   .device-meta { display: flex; flex-direction: column; gap: 2px; align-items: flex-end; text-align: right; }
+  .rf-panel { padding: 10px 12px; }
+  .rf-panel.collapsed .rf-grid { display: none; }
+  .rf-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .rf-panel-head h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-dim); }
+  .rf-panel-help { margin: 4px 0 0; color: var(--fg-dim); font-size: 11px; max-width: 42rem; }
+  .rf-panel-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .mini-link { color: var(--accent-2); font-size: 11px; text-decoration: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; }
+  .rf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 12px; align-items: end; }
+  .rf-control { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--fg-dim); }
+  .rf-control.wide { grid-column: span 2; }
+  .rf-control span small { display: block; color: var(--fg-dim); font: 9px var(--mono); }
+  .rf-control select, .rf-control input[type='number'] { min-height: 32px; font-size: 12px; }
+  .rf-expert { grid-column: 1 / -1; color: var(--fg-dim); font-size: 12px; }
+  .rf-expert summary { cursor: pointer; padding: 6px 0; }
+  .display-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; }
+  .display-field { display: flex; flex-direction: column; gap: 2px; font: 9px var(--mono); color: var(--fg-dim); }
+  .display-field input[type='number'] { width: 72px; min-height: 30px; padding: 4px 6px; font-size: 11px; }
+  .display-field input[type='range'] { width: 72px; }
+  .display-toggle { display: flex; align-items: center; gap: 4px; font: 10px var(--mono); color: var(--fg-dim); min-height: 30px; }
   .receiver-readout { display: flex; flex-direction:column; align-items:flex-start; gap: 2px; font-family: var(--mono); }
   .receiver-readout span, .receiver-readout small { color: var(--fg-dim); font-size: 10px; }
   .receiver-readout strong { color: var(--accent); font-size: 14px; }
@@ -1297,7 +1624,7 @@
   .spectrum-wrap { flex: 0 0 auto; min-height: 560px; position: relative; }
   .spectrum-wrap.stale canvas { opacity: 0.45; }
   .stale-overlay { position:absolute; inset:36px 12px 112px; display:grid; place-items:center; color:var(--warn); background:rgb(7 12 18 / 55%); font:700 12px var(--mono); text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
-  .spectrum-wrap canvas { display: block; width: 100%; height: 150px; background: var(--bg); border-radius: 4px; }
+  .spectrum-wrap canvas { display: block; width: 100%; height: 170px; background: #070c12; border-radius: 4px; }
   .spectrum-wrap canvas { cursor:crosshair; }
   .spectrum-wrap canvas.center-mode { cursor:grab; touch-action:none; }
   .spectrum-wrap canvas.center-mode:active { cursor:grabbing; }
@@ -1326,7 +1653,7 @@
   .waterfall-stage { position:relative; }
   .waterfall-empty { position:absolute; inset:0; display:grid; place-items:center; padding:16px; text-align:center; color:var(--fg-dim); background:rgb(7 12 18 / 72%); font:12px var(--sans); pointer-events:none; border-radius:4px; }
   .waterfall-empty.warn { color:var(--warn); }
-  .spectrum-wrap canvas.waterfall { height: clamp(320px, 48vh, 620px); image-rendering: pixelated; }
+  .spectrum-wrap canvas.waterfall { height: clamp(320px, 48vh, 620px); image-rendering: auto; }
   .scan-progress { display:grid; grid-template-columns:auto 1fr 38px; align-items:center; gap:10px; margin-top:8px; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
   .scan-progress > span { display:flex; flex-direction:column; font-size:11px; }
   .scan-progress small { color:var(--fg-dim); font:9px var(--mono); }
