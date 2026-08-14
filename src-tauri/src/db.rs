@@ -25,6 +25,7 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
+        conn.execute_batch(include_str!("../migrations/002_receiver_workspace.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
@@ -723,6 +724,40 @@ mod tests {
         assert_eq!(rows[1].timestamp_ms, 200);
         assert_eq!(db.recent_signal_events(0).unwrap().len(), 1);
         drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn receiver_workspace_migration_is_idempotent_and_persistent() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-workspace-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn().execute(
+                "INSERT INTO receiver_profiles(id,name,center_frequency_hz,sample_rate_hz,bandwidth_hz,mode,created_ms,updated_ms) VALUES('fm','Local FM',99500000,10000000,8000000,'wfm',1,1)",
+                [],
+            ).unwrap();
+            db.conn().execute(
+                "INSERT INTO receiver_bookmarks(label,frequency_hz,mode,bandwidth_hz,profile_id,created_ms,updated_ms) VALUES('Station',99700000,'wfm',200000,'fm',1,1)",
+                [],
+            ).unwrap();
+        }
+        let reopened = Db::open(&path).unwrap();
+        let count: i64 = reopened
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM receiver_bookmarks WHERE profile_id='fm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(reopened);
         let _ = std::fs::remove_file(path);
     }
 }

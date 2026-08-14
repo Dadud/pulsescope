@@ -11,6 +11,32 @@ let paletteLocation: WebGLUniformLocation | null = null;
 let width = 0;
 let height = 0;
 
+function resizeHistory(nextWidth: number, nextHeight: number) {
+  if (!target || nextWidth === width && nextHeight === height) return;
+  const previous = intensity;
+  const previousWidth = width;
+  const previousHeight = height;
+  width = Math.max(1, nextWidth);
+  height = Math.max(1, nextHeight);
+  target.width = width;
+  target.height = height;
+  intensity = new Uint8Array(width * height);
+  if (previous && previousWidth > 0 && previousHeight > 0) {
+    for (let y = 0; y < height; y += 1) {
+      const sourceY = Math.min(previousHeight - 1, Math.floor(y / height * previousHeight));
+      for (let x = 0; x < width; x += 1) {
+        const sourceX = Math.min(previousWidth - 1, Math.floor(x / width * previousWidth));
+        intensity[y * width + x] = previous[sourceY * previousWidth + sourceX];
+      }
+    }
+  }
+  if (gl) gl.viewport(0, 0, width, height);
+  if (context2d) {
+    rgba = new Uint8ClampedArray(width * height * 4);
+    image = context2d.createImageData(width, height);
+  }
+}
+
 function compileShader(context: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = context.createShader(type)!;
   context.shaderSource(shader, source);
@@ -81,6 +107,7 @@ self.onmessage = (event: MessageEvent<RenderMessage>) => {
     if (!gl) { context2d = target.getContext('2d'); rgba = new Uint8ClampedArray(width * height * 4); image = context2d?.createImageData(width, height) ?? null; }
     self.postMessage({ type: 'ready', renderer }); return;
   }
+  if (target && message.width && message.height) resizeHistory(message.width, message.height);
   if (message.clear && intensity) intensity.fill(0);
   if (message.bins?.length) updateHistory(message.bins, message.gain ?? 1);
   if (!intensity || (!message.bins?.length && !message.clear)) return;

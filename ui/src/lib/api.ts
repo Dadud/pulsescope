@@ -107,6 +107,32 @@ export interface SpectrumStreamFrame {
   sessionRevision: number;
 }
 
+export interface ReceiverBookmark {
+  id?: number;
+  label: string;
+  frequency_hz: number;
+  mode: string;
+  bandwidth_hz: number;
+  profile_id?: string | null;
+  color?: string;
+  decoder?: string;
+  notes?: string;
+  enabled?: boolean;
+}
+
+export interface ReceiverProfile {
+  id?: string;
+  name: string;
+  center_frequency_hz: number;
+  sample_rate_hz: number;
+  bandwidth_hz: number;
+  mode: string;
+  region?: string;
+  deemphasis_us?: number | null;
+  gain_policy?: Record<string, unknown>;
+  decoder_policy?: Record<string, unknown>;
+}
+
 const LIVE_REQUEST_TIMEOUT_MS = 5_000;
 
 export class ApiError extends Error {
@@ -357,6 +383,20 @@ export const Api = {
   transcriptionStop: () => postJson('/transcription/stop'),
 
   featurePacks: () => getJson('/feature-packs'),
+  systemHealthV2: () => getJson('/api/v2/system/health'),
+  receiversV2: () => getJson('/api/v2/receivers'),
+  hardwareWindowsV2: () => getJson('/api/v2/hardware-windows'),
+  listenerSessionsV2: () => getJson('/api/v2/listener-sessions'),
+  saveListenerSessionV2: (body: any) => postJson('/api/v2/listener-sessions', body),
+  profilesV2: () => getJson<{ contract_version: number; profiles: ReceiverProfile[] }>('/api/v2/profiles'),
+  saveProfileV2: (body: ReceiverProfile) => postJson('/api/v2/profiles', body),
+  applyProfileV2: (id: string) => postJson(`/api/v2/profiles/${encodeURIComponent(id)}/apply`),
+  deleteProfileV2: (id: string) => deleteJson(`/api/v2/profiles/${encodeURIComponent(id)}`),
+  bookmarksV2: () => getJson<{ contract_version: number; bookmarks: ReceiverBookmark[] }>('/api/v2/bookmarks'),
+  saveBookmarkV2: (body: ReceiverBookmark) => postJson('/api/v2/bookmarks', body),
+  deleteBookmarkV2: (id: number) => deleteJson(`/api/v2/bookmarks/${id}`),
+  bandplansV2: () => getJson('/api/v2/bandplans'),
+  decoderJobsV2: () => getJson('/api/v2/decoder-jobs'),
   decoderCatalogV2: () => getJson<{ contract_version: number; decoders: any[] }>('/api/v2/decoders/catalog'),
   featureStatusV2: () => getJson('/api/v2/features'),
   featurePackEnable: (id: string, enabled: boolean) => postJson(`/feature-packs/${encodeURIComponent(id)}/enable`, { enabled }),

@@ -17,11 +17,12 @@
   });
 
   const primaryLinks = [
-    ['#/', 'Receiver'], ['#/messages', 'Activity'], ['#/recording', 'Recordings'],
-    ['#/settings', 'Hardware']
+    ['#/', 'Receiver'], ['#/monitor', 'Monitor'], ['#/messages', 'Activity'],
+    ['#/recording', 'Recordings'], ['#/settings', 'Hardware']
   ];
   const moreLinks = [
     ['#/signal-id', 'Signal identification'], ['#/occupancy', 'Band occupancy'],
+    ['#/profiles', 'Profiles & bookmarks'],
     ['#/jobs', 'Scheduled jobs'], ['#/cases', 'Cases'],
     ['#/feature-packs', 'Decoder setup'], ['#/blacklist', 'Frequency exclusions'],
     ['#/debug', 'Diagnostics']
@@ -66,7 +67,7 @@
   <nav class="mobile-tabs" aria-label="Main sections">
     {#each primaryLinks as [href, label]}
       <a href={href} class:active={currentPath === href} aria-current={currentPath === href ? 'page' : undefined}>
-        <span aria-hidden="true">{href === '#/' ? '⌁' : href === '#/messages' ? '◉' : href === '#/recording' ? '●' : '⚙'}</span>
+        <span aria-hidden="true">{href === '#/' ? '⌁' : href === '#/monitor' ? '▦' : href === '#/messages' ? '◉' : href === '#/recording' ? '●' : '⚙'}</span>
         {label}
       </a>
     {/each}

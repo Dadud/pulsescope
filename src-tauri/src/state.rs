@@ -36,6 +36,10 @@ pub struct AppState {
     /// returns its original response instead of applying a second retune or
     /// session takeover.
     pub command_results: Mutex<HashMap<String, serde_json::Value>>,
+    /// Per-browser view state. Listener sessions never own the physical SDR;
+    /// they describe each client's viewport and selected VFO while the shared
+    /// receiver lease controls hardware-window retunes.
+    pub listener_sessions: RwLock<HashMap<String, ListenerSession>>,
     pub trunking: RwLock<TrunkingRuntime>,
     pub sidecars: SidecarRegistry,
     /// Broadcasts every scanner event (spectrum, signal hit, decoded message,
@@ -78,6 +82,7 @@ impl AppState {
             scanner: RwLock::new(None),
             receiver_session: Mutex::new(ReceiverSession::default()),
             command_results: Mutex::new(HashMap::new()),
+            listener_sessions: RwLock::new(HashMap::new()),
             trunking: RwLock::new(TrunkingRuntime::default()),
             sidecars: SidecarRegistry::new(),
             events: events_tx,
@@ -495,6 +500,18 @@ pub struct ReceiverSession {
     pub revision: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ListenerSession {
+    pub id: String,
+    pub client_name: String,
+    pub receiver_id: String,
+    pub view_center_hz: u64,
+    pub view_span_hz: u32,
+    pub active_vfo_id: Option<usize>,
+    pub revision: u64,
+    pub updated_ms: i64,
+}
+
 impl ReceiverSession {
     pub fn claim(&mut self, owner: &str, force: bool) -> Result<(), String> {
         if let Some(current) = &self.owner {
@@ -654,7 +671,7 @@ pub enum ScannerEvent {
 
 #[cfg(test)]
 mod recording_tests {
-    use super::{receiver_needs_recovery, ReceiverSession, RecordingState};
+    use super::{receiver_needs_recovery, ListenerSession, ReceiverSession, RecordingState};
     use crate::scanner::{ScannerRuntimeState, VfoState};
     use rustfft::num_complex::Complex;
     use std::fs::{self, File};
@@ -737,5 +754,22 @@ mod recording_tests {
         assert_eq!(session.revision, 2);
         session.release("operator");
         assert_eq!(session.revision, 3);
+    }
+
+    #[test]
+    fn listener_session_serializes_independent_view_state() {
+        let listener = ListenerSession {
+            id: "browser-a".into(),
+            client_name: "Phone".into(),
+            receiver_id: "receiver-0".into(),
+            view_center_hz: 100_100_000,
+            view_span_hz: 2_000_000,
+            active_vfo_id: Some(0),
+            revision: 4,
+            updated_ms: 123,
+        };
+        let json = serde_json::to_value(listener).unwrap();
+        assert_eq!(json["view_span_hz"], 2_000_000);
+        assert_eq!(json["revision"], 4);
     }
 }

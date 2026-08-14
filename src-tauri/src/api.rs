@@ -74,6 +74,23 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/v2/receivers/:id/tune", post(receiver_tune_v2))
         .route("/v2/receivers/:id/controls", get(receiver_controls_v2))
         .route("/v2/sessions", get(sessions_v2).post(session_command_v2))
+        .route("/v2/hardware-windows", get(hardware_windows_v2))
+        .route(
+            "/v2/listener-sessions",
+            get(listener_sessions_v2).post(listener_session_upsert_v2),
+        )
+        .route("/v2/profiles", get(profiles_v2).post(profile_upsert_v2))
+        .route(
+            "/v2/profiles/:id",
+            get(profile_v2).delete(profile_delete_v2),
+        )
+        .route("/v2/profiles/:id/apply", post(profile_apply_v2))
+        .route("/v2/bookmarks", get(bookmarks_v2).post(bookmark_upsert_v2))
+        .route(
+            "/v2/bookmarks/:id",
+            axum::routing::delete(bookmark_delete_v2),
+        )
+        .route("/v2/bandplans", get(bandplans_v2))
         .route("/v2/decoders/catalog", get(decoder_catalog_v2))
         .route("/v2/decoder-jobs", get(decoder_jobs_v2))
         .route("/v2/recordings", get(recordings_v2))
@@ -819,6 +836,425 @@ async fn sessions_v2(State(s): State<ApiState>) -> impl IntoResponse {
     Json(
         json!({"contract_version":2,"sessions":[{"id":"primary","receiver_id":"receiver-0","state":s.0.receiver_session.lock().clone()}]}),
     )
+}
+
+async fn hardware_windows_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let status = s.0.device.status();
+    let capabilities = s.0.device.capabilities();
+    let session = s.0.receiver_session.lock().clone();
+    let usable_span_hz = status.bandwidth_hz.min(status.sample_rate);
+    Json(json!({
+        "contract_version": 2,
+        "windows": [{
+            "id": "receiver-0",
+            "device_id": stable_device_id(&status, &capabilities),
+            "center_frequency_hz": status.center_freq_hz,
+            "sample_rate_hz": status.sample_rate,
+            "bandwidth_hz": status.bandwidth_hz,
+            "usable_span_hz": usable_span_hz,
+            "lower_edge_hz": status.center_freq_hz.saturating_sub((usable_span_hz / 2) as u64),
+            "upper_edge_hz": status.center_freq_hz.saturating_add((usable_span_hz / 2) as u64),
+            "owner": session.owner,
+            "revision": session.revision
+        }]
+    }))
+}
+
+#[derive(Deserialize)]
+struct ListenerSessionReq {
+    id: Option<String>,
+    #[serde(default = "default_client_name")]
+    client_name: String,
+    #[serde(default = "default_receiver_id")]
+    receiver_id: String,
+    view_center_hz: u64,
+    view_span_hz: u32,
+    active_vfo_id: Option<usize>,
+    expected_revision: Option<u64>,
+}
+
+fn default_client_name() -> String {
+    "LAN browser".into()
+}
+fn default_receiver_id() -> String {
+    "receiver-0".into()
+}
+
+async fn listener_sessions_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let now = crate::scanner::now_ms();
+    let mut stored = s.0.listener_sessions.write();
+    stored.retain(|_, session| now.saturating_sub(session.updated_ms) <= 3_600_000);
+    let sessions = stored.values().cloned().collect::<Vec<_>>();
+    Json(json!({"contract_version":2,"sessions":sessions}))
+}
+
+async fn listener_session_upsert_v2(
+    State(s): State<ApiState>,
+    Json(req): Json<ListenerSessionReq>,
+) -> impl IntoResponse {
+    if req.receiver_id != "receiver-0" || req.view_span_hz == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error":"receiver_id must be receiver-0 and view_span_hz must be positive"}),
+            ),
+        )
+            .into_response();
+    }
+    let status = s.0.device.status();
+    let usable_span_hz = status.bandwidth_hz.min(status.sample_rate);
+    let lower = status
+        .center_freq_hz
+        .saturating_sub((usable_span_hz / 2) as u64);
+    let upper = status
+        .center_freq_hz
+        .saturating_add((usable_span_hz / 2) as u64);
+    let requested_lower = req
+        .view_center_hz
+        .saturating_sub((req.view_span_hz / 2) as u64);
+    let requested_upper = req
+        .view_center_hz
+        .saturating_add((req.view_span_hz / 2) as u64);
+    if req.view_span_hz > usable_span_hz || requested_lower < lower || requested_upper > upper {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"listener viewport must remain inside the shared hardware window","hardware_window":{"lower_edge_hz":lower,"upper_edge_hz":upper,"usable_span_hz":usable_span_hz}}))).into_response();
+    }
+    let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut sessions = s.0.listener_sessions.write();
+    let now = crate::scanner::now_ms();
+    sessions.retain(|_, session| now.saturating_sub(session.updated_ms) <= 3_600_000);
+    if !sessions.contains_key(&id) && sessions.len() >= 128 {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":"listener session limit reached"})),
+        )
+            .into_response();
+    }
+    let current_revision = sessions
+        .get(&id)
+        .map(|session| session.revision)
+        .unwrap_or(0);
+    if let Some(expected) = req.expected_revision {
+        if expected != current_revision {
+            return (StatusCode::CONFLICT, Json(json!({"error":"stale revision","expected":current_revision,"received":expected}))).into_response();
+        }
+    }
+    let session = crate::state::ListenerSession {
+        id: id.clone(),
+        client_name: req.client_name,
+        receiver_id: req.receiver_id,
+        view_center_hz: req.view_center_hz,
+        view_span_hz: req.view_span_hz,
+        active_vfo_id: req.active_vfo_id,
+        revision: current_revision.saturating_add(1),
+        updated_ms: now,
+    };
+    sessions.insert(id, session.clone());
+    (StatusCode::OK, Json(json!({"ok":true,"session":session}))).into_response()
+}
+
+#[derive(serde::Serialize, Deserialize)]
+struct ReceiverProfile {
+    id: Option<String>,
+    name: String,
+    center_frequency_hz: u64,
+    sample_rate_hz: u32,
+    bandwidth_hz: u32,
+    mode: String,
+    #[serde(default)]
+    region: String,
+    deemphasis_us: Option<u32>,
+    #[serde(default = "empty_object")]
+    gain_policy: Value,
+    #[serde(default = "empty_object")]
+    decoder_policy: Value,
+    #[serde(default)]
+    created_ms: i64,
+    #[serde(default)]
+    updated_ms: i64,
+}
+
+fn empty_object() -> Value {
+    json!({})
+}
+
+fn query_profiles(s: &ApiState, id: Option<&str>) -> Result<Vec<ReceiverProfile>, String> {
+    let conn = s.0.db.conn();
+    let mut statement = conn.prepare("SELECT id,name,center_frequency_hz,sample_rate_hz,bandwidth_hz,mode,region,deemphasis_us,gain_policy_json,decoder_policy_json,created_ms,updated_ms FROM receiver_profiles WHERE (?1 IS NULL OR id=?1) ORDER BY name")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([id], |row| {
+            Ok(ReceiverProfile {
+                id: Some(row.get(0)?),
+                name: row.get(1)?,
+                center_frequency_hz: row.get(2)?,
+                sample_rate_hz: row.get(3)?,
+                bandwidth_hz: row.get(4)?,
+                mode: row.get(5)?,
+                region: row.get(6)?,
+                deemphasis_us: row.get(7)?,
+                gain_policy: serde_json::from_str(&row.get::<_, String>(8)?)
+                    .unwrap_or_else(|_| json!({})),
+                decoder_policy: serde_json::from_str(&row.get::<_, String>(9)?)
+                    .unwrap_or_else(|_| json!({})),
+                created_ms: row.get(10)?,
+                updated_ms: row.get(11)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+async fn profiles_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    match query_profiles(&s, None) {
+        Ok(profiles) => (
+            StatusCode::OK,
+            Json(json!({"contract_version":2,"profiles":profiles})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error})),
+        )
+            .into_response(),
+    }
+}
+async fn profile_v2(State(s): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    match query_profiles(&s, Some(&id)) {
+        Ok(mut profiles) if !profiles.is_empty() => (
+            StatusCode::OK,
+            Json(json!({"contract_version":2,"profile":profiles.remove(0)})),
+        )
+            .into_response(),
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"profile not found"})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error})),
+        )
+            .into_response(),
+    }
+}
+async fn profile_upsert_v2(
+    State(s): State<ApiState>,
+    Json(mut profile): Json<ReceiverProfile>,
+) -> impl IntoResponse {
+    if profile.name.trim().is_empty() || profile.sample_rate_hz == 0 || profile.bandwidth_hz == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"name, sample_rate_hz, and bandwidth_hz are required"})),
+        )
+            .into_response();
+    }
+    let id = profile
+        .id
+        .take()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let now = crate::scanner::now_ms();
+    let conn = s.0.db.conn();
+    let result = conn.execute("INSERT INTO receiver_profiles(id,name,center_frequency_hz,sample_rate_hz,bandwidth_hz,mode,region,deemphasis_us,gain_policy_json,decoder_policy_json,created_ms,updated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11) ON CONFLICT(id) DO UPDATE SET name=excluded.name,center_frequency_hz=excluded.center_frequency_hz,sample_rate_hz=excluded.sample_rate_hz,bandwidth_hz=excluded.bandwidth_hz,mode=excluded.mode,region=excluded.region,deemphasis_us=excluded.deemphasis_us,gain_policy_json=excluded.gain_policy_json,decoder_policy_json=excluded.decoder_policy_json,updated_ms=excluded.updated_ms",
+        rusqlite::params![id,profile.name,profile.center_frequency_hz,profile.sample_rate_hz,profile.bandwidth_hz,profile.mode,profile.region,profile.deemphasis_us,profile.gain_policy.to_string(),profile.decoder_policy.to_string(),now]);
+    match result {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({"ok":true,"id":id,"updated_ms":now})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn profile_delete_v2(State(s): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    match s
+        .0
+        .db
+        .conn()
+        .execute("DELETE FROM receiver_profiles WHERE id=?1", [&id])
+    {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"profile not found"})),
+        )
+            .into_response(),
+        Ok(_) => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn profile_apply_v2(State(s): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    let profile = match query_profiles(&s, Some(&id)) {
+        Ok(mut profiles) if !profiles.is_empty() => profiles.remove(0),
+        Ok(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error":"profile not found"})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":error})),
+            )
+                .into_response()
+        }
+    };
+    let original = s.0.device.status();
+    let apply = (|| -> anyhow::Result<()> {
+        s.0.device.set_sample_rate(profile.sample_rate_hz)?;
+        s.0.device.set_bandwidth(profile.bandwidth_hz)?;
+        s.0.device.set_frequency(profile.center_frequency_hz)?;
+        Ok(())
+    })();
+    if let Err(error) = apply {
+        // A rejected profile must not leave the shared LAN receiver in a
+        // surprising half-applied state.
+        let _ = s.0.device.set_sample_rate(original.sample_rate);
+        let _ = s.0.device.set_bandwidth(original.bandwidth_hz);
+        let _ = s.0.device.set_frequency(original.center_freq_hz);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error":error.to_string(),"rolled_back":true,"actual":s.0.device.status()}),
+            ),
+        )
+            .into_response();
+    }
+    let status = s.0.device.status();
+    (
+        StatusCode::OK,
+        Json(json!({"ok":true,"profile_id":id,"actual":status,"default_mode":profile.mode})),
+    )
+        .into_response()
+}
+
+#[derive(serde::Serialize, Deserialize)]
+struct ReceiverBookmark {
+    id: Option<i64>,
+    label: String,
+    frequency_hz: u64,
+    mode: String,
+    bandwidth_hz: u32,
+    profile_id: Option<String>,
+    #[serde(default)]
+    color: String,
+    #[serde(default)]
+    decoder: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    created_ms: i64,
+    #[serde(default)]
+    updated_ms: i64,
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn bookmarks_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let conn = s.0.db.conn();
+    let result = (|| -> Result<Vec<ReceiverBookmark>, rusqlite::Error> {
+        let mut statement = conn.prepare("SELECT id,label,frequency_hz,mode,bandwidth_hz,profile_id,color,decoder,notes,enabled,created_ms,updated_ms FROM receiver_bookmarks ORDER BY frequency_hz")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ReceiverBookmark {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    frequency_hz: row.get(2)?,
+                    mode: row.get(3)?,
+                    bandwidth_hz: row.get(4)?,
+                    profile_id: row.get(5)?,
+                    color: row.get(6)?,
+                    decoder: row.get(7)?,
+                    notes: row.get(8)?,
+                    enabled: row.get(9)?,
+                    created_ms: row.get(10)?,
+                    updated_ms: row.get(11)?,
+                })
+            })?
+            .collect();
+        rows
+    })();
+    match result {
+        Ok(bookmarks) => (
+            StatusCode::OK,
+            Json(json!({"contract_version":2,"bookmarks":bookmarks})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn bookmark_upsert_v2(
+    State(s): State<ApiState>,
+    Json(bookmark): Json<ReceiverBookmark>,
+) -> impl IntoResponse {
+    if bookmark.label.trim().is_empty() || bookmark.frequency_hz == 0 || bookmark.bandwidth_hz == 0
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"label, frequency_hz, and bandwidth_hz are required"})),
+        )
+            .into_response();
+    }
+    let now = crate::scanner::now_ms();
+    let conn = s.0.db.conn();
+    let result = if let Some(id) = bookmark.id {
+        conn.execute("UPDATE receiver_bookmarks SET label=?2,frequency_hz=?3,mode=?4,bandwidth_hz=?5,profile_id=?6,color=?7,decoder=?8,notes=?9,enabled=?10,updated_ms=?11 WHERE id=?1",rusqlite::params![id,bookmark.label,bookmark.frequency_hz,bookmark.mode,bookmark.bandwidth_hz,bookmark.profile_id,bookmark.color,bookmark.decoder,bookmark.notes,bookmark.enabled,now]).map(|_| id)
+    } else {
+        conn.execute("INSERT INTO receiver_bookmarks(label,frequency_hz,mode,bandwidth_hz,profile_id,color,decoder,notes,enabled,created_ms,updated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",rusqlite::params![bookmark.label,bookmark.frequency_hz,bookmark.mode,bookmark.bandwidth_hz,bookmark.profile_id,bookmark.color,bookmark.decoder,bookmark.notes,bookmark.enabled,now]).map(|_| conn.last_insert_rowid())
+    };
+    match result {
+        Ok(id) => (
+            StatusCode::OK,
+            Json(json!({"ok":true,"id":id,"updated_ms":now})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn bookmark_delete_v2(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
+    match s
+        .0
+        .db
+        .conn()
+        .execute("DELETE FROM receiver_bookmarks WHERE id=?1", [id])
+    {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"bookmark not found"})),
+        )
+            .into_response(),
+        Ok(_) => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn bandplans_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    let bands=s.0.config.read().scan_ranges.iter().map(|range| json!({"id":range.name.to_lowercase().replace(' ',"-"),"name":range.name,"start_hz":range.start_hz,"end_hz":range.end_hz,"default_mode":range.mode,"channel_bandwidth_hz":range.channel_bw_hz,"scan_enabled":range.enabled})).collect::<Vec<_>>();
+    Json(json!({"contract_version":2,"source":"server configuration","bands":bands}))
 }
 
 #[derive(Deserialize)]

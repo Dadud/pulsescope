@@ -13,6 +13,8 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Receiver session recovery | Fixture verified | normal | yes | Retune recovers in 700 ms and USB recovery in 20 s without restarting the service. |
 | Multi-device registry and allocator | Planned | expert | yes | Discover, select, allocate, and independently recover two simultaneous receivers. |
 | Versioned RadioDevice contract | Beta | expert | yes | Every control and capability is reported at runtime and unsupported controls are rejected. |
+| Profiles, bookmarks and bandplans | Beta | normal | yes | Persistence, backup, profile application, capability rejection, and multi-client consistency pass API and browser tests. |
+| Independent LAN listener sessions | Beta | expert | yes | At least three browsers maintain independent viewport and VFO state while shared hardware retunes remain revision-safe. |
 
 ## Hardware
 
@@ -49,6 +51,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 |---|---|---|:---:|---|
 | Worker waterfall renderer | Fixture verified | normal | yes | 50 FPS desktop, 30 FPS mobile, bounded queues and no normal main-thread task over 100 ms. |
 | WebGL2 waterfall acceleration | Beta | normal | yes | WebGL2 worker passes visual parity and performance tests with Canvas2D fallback. |
+| Receiver and Monitor workspaces | Beta | normal | yes | Desktop and mobile browser tests prove tuning remains waterfall-first while multi-VFO monitoring stays independently usable. |
 | Scanner and VFO signal locking | Hardware verified | normal | yes | Stable deduplicated locks, held VFO state, event logging, and resume behavior on live RF. |
 | Installable touch-first PWA | Beta | normal | yes | Install, tune, listen, background/resume, saved station, and responsive browser tests on iOS and Android. |
 | Tauri desktop wrapper | Beta | expert | yes | Remote and managed-local server modes pass API conformance tests on Windows, macOS, and Linux. |

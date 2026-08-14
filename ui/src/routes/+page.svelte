@@ -1,9 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame } from '$lib/api';
+  import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame, type ReceiverBookmark } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
 
   let banks: ScanRange[] = $state([]);
+  let bookmarks: ReceiverBookmark[] = $state([]);
+  let bookmarkLabel = $state('');
   let activeRange: string | null = $state(null);
   let vfos: VfoState[] = $state([]);
   let messages: DecodedMessage[] = $state([]);
@@ -60,6 +62,8 @@
   let panStartCenterHz = 0;
   let panDragged = false;
   let suppressSurfaceClick = false;
+  let listenerSessionId = '';
+  let listenerSessionRevision = 0;
 
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
   const displayedCenterHz = $derived(pendingCenterHz ?? centerFreqHz);
@@ -132,6 +136,8 @@
     browserAudio = new BrowserAudio((state) => { audioState = state; });
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
+    listenerSessionId = localStorage.getItem('pulsescope.listener.id') || crypto.randomUUID();
+    localStorage.setItem('pulsescope.listener.id', listenerSessionId);
     const onSpectrum = (event: Event) => {
       const spectrum = (event as CustomEvent).detail;
       activeRange = spectrum?.range ?? activeRange;
@@ -270,7 +276,7 @@
 
   async function loadInitial() {
     try {
-      const [bankList, status, storedSignals, capabilities] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100), Api.deviceCapabilities()]);
+      const [bankList, status, storedSignals, capabilities, savedBookmarks] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100), Api.deviceCapabilities(), Api.bookmarksV2().catch(() => ({ bookmarks: [] }))]);
       banks = bankList;
       deviceLabel = status.label;
       connected = status.connected;
@@ -279,8 +285,10 @@
       appliedBandwidthHz = Number(status.bandwidth_hz ?? 0);
       signalHistory = storedSignals;
       deviceCaps = capabilities;
+      bookmarks = savedBookmarks.bookmarks;
       applyVfos(await Api.vfoStates());
       messages = await Api.decodedMessages(100);
+      await syncListenerView();
     } catch (e) {
       console.warn('init failed', e);
       notice = `init failed: ${e}`;
@@ -360,6 +368,15 @@
     if (canvas.height !== height) canvas.height = height;
   }
 
+  function canvasBackingSize(canvas: HTMLCanvasElement, fallbackWidth: number, fallbackHeight: number) {
+    const rect = canvas.getBoundingClientRect();
+    const scale = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    return {
+      width: Math.max(320, Math.round((rect.width || fallbackWidth) * scale)),
+      height: Math.max(80, Math.round((rect.height || fallbackHeight) * scale)),
+    };
+  }
+
   function bandGroup(bank: ScanRange): string {
     const name = bank.name.toLowerCase();
     if (name.includes('broadcast') || name.includes('fm')) return 'Broadcast';
@@ -384,7 +401,8 @@
 
   function drawSpectrum() {
     if (!canvas || spectrumBins.length === 0) return;
-    ensureCanvasBacking(canvas, 900, 220);
+    const backing = canvasBackingSize(canvas, 1200, 180);
+    ensureCanvasBacking(canvas, backing.width, backing.height);
     const ctx = canvas.getContext('2d')!;
     const w = canvas.width;
     const h = canvas.height;
@@ -396,6 +414,11 @@
     for (let i = 0; i <= 10; i++) {
       const x = (i / 10) * w;
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      const frequency = centerFreqHz - sampleRateHz / 2 + (i / 10) * sampleRateHz;
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = `${Math.max(10, Math.round(10 * (window.devicePixelRatio || 1)))}px ui-monospace, monospace`;
+      ctx.textAlign = i === 0 ? 'left' : i === 10 ? 'right' : 'center';
+      ctx.fillText(frequency >= 1e9 ? `${(frequency / 1e9).toFixed(4)}G` : `${(frequency / 1e6).toFixed(4)}M`, x, 14 * (window.devicePixelRatio || 1));
     }
 
     // Active VFO markers make tuning context visible even on a wide span.
@@ -403,6 +426,10 @@
       const normalized = (vfo.frequency_hz - (centerFreqHz - sampleRateHz / 2)) / sampleRateHz;
       if (normalized < 0 || normalized > 1) continue;
       const x = normalized * w;
+      const passbandHz = vfo.mode === 'wfm' ? 200_000 : vfo.mode === 'nfm' ? 12_500 : vfo.mode === 'am' ? 10_000 : 3_000;
+      const passbandWidth = Math.max(2, passbandHz / sampleRateHz * w);
+      ctx.fillStyle = vfo.muted ? 'rgba(100,116,139,.10)' : 'rgba(45,212,191,.14)';
+      ctx.fillRect(x - passbandWidth / 2, 0, passbandWidth, h);
       ctx.strokeStyle = vfo.muted ? '#64748b' : '#f59e0b';
       ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
     }
@@ -427,17 +454,19 @@
 
   function drawWaterfall() {
     if (!waterfallCanvas || spectrumBins.length === 0) return;
-    ensureCanvasBacking(waterfallCanvas, 900, 180);
+    const backing = canvasBackingSize(waterfallCanvas, 1200, 420);
     if (typeof Worker !== 'undefined' && typeof waterfallCanvas.transferControlToOffscreen === 'function') {
       if (!waterfallWorker) {
+        ensureCanvasBacking(waterfallCanvas, backing.width, backing.height);
         const offscreen = waterfallCanvas.transferControlToOffscreen();
         waterfallWorker = new Worker(new URL('../lib/waterfall-worker.ts', import.meta.url), { type: 'module' });
         waterfallWorker.onmessage = (event) => { if (event.data?.type === 'ready') waterfallRenderer = event.data.renderer; };
-        waterfallWorker.postMessage({ canvas: offscreen, width: 900, height: 180 }, [offscreen]);
+        waterfallWorker.postMessage({ canvas: offscreen, width: backing.width, height: backing.height }, [offscreen]);
       }
-      waterfallWorker.postMessage({ bins: spectrumBins, gain: waterfallGain, palette: waterfallPalette });
+      waterfallWorker.postMessage({ bins: spectrumBins, gain: waterfallGain, palette: waterfallPalette, width: backing.width, height: backing.height });
       return;
     }
+    ensureCanvasBacking(waterfallCanvas, backing.width, backing.height);
     const ctx = waterfallCanvas.getContext('2d');
     if (!ctx) return;
     const w = waterfallCanvas.width;
@@ -515,6 +544,7 @@
       deviceCaps = result.capabilities ?? deviceCaps;
       clearWaterfallHistory();
       notice = `Capture set to ${(sampleRateHz / 1e6).toFixed(0)} MSPS with ${(appliedBandwidthHz / 1e6).toFixed(3)} MHz RF bandwidth`;
+      await syncListenerView();
     } catch (error) { notice = `Could not change visible spectrum: ${String(error)}`; }
   }
 
@@ -533,10 +563,34 @@
       await Api.vfoFrequency(vfos[0].id, frequencyHz);
       await Api.vfoMute(vfos[0].id, false);
       notice = `Capture window centered and listening at ${fmtHz(frequencyHz)}`;
+      await syncListenerView();
     } catch (error) {
       browserAudio?.stop();
       notice = `Could not listen to signal: ${String(error)}`;
     } finally { audioGesturePending = false; }
+  }
+
+  async function tuneBookmark(bookmark: ReceiverBookmark) {
+    await tuneFoundSignal({ frequency_hz: bookmark.frequency_hz });
+    if (vfos[0] && bookmark.mode) await Api.vfoMode(vfos[0].id, bookmark.mode);
+  }
+
+  async function saveCurrentBookmark() {
+    const vfo = vfos[0];
+    const label = bookmarkLabel.trim();
+    if (!vfo || !label) return;
+    try {
+      await Api.saveBookmarkV2({ label, frequency_hz: vfo.frequency_hz, mode: vfo.mode, bandwidth_hz: activeBank?.channel_bw_hz ?? 12_500, enabled: true });
+      bookmarks = (await Api.bookmarksV2()).bookmarks;
+      bookmarkLabel = '';
+      notice = `Saved ${label} at ${fmtHz(vfo.frequency_hz)}`;
+    } catch (error) { notice = `Could not save bookmark: ${String(error)}`; }
+  }
+
+  async function removeBookmark(bookmark: ReceiverBookmark) {
+    if (bookmark.id === undefined) return;
+    await Api.deleteBookmarkV2(bookmark.id);
+    bookmarks = bookmarks.filter((item) => item.id !== bookmark.id);
   }
 
   function clearWaterfallHistory() {
@@ -559,6 +613,7 @@
       centerFreqHz = requestedHz;
       clearWaterfallHistory();
       notice = `Receiver centered on ${fmtHz(requestedHz)}`;
+      await syncListenerView();
       window.setTimeout(() => { if (notice.startsWith('Receiver centered')) notice = ''; }, 1800);
     } catch (error) {
       notice = `Could not change center frequency: ${String(error)}`;
@@ -593,6 +648,28 @@
   function setCenterFromInput(event: Event) {
     const mhz = Number((event.currentTarget as HTMLInputElement).value);
     if (Number.isFinite(mhz) && mhz > 0) scheduleCenterFrequency(mhz * 1e6, 0);
+  }
+
+  async function syncListenerView(retry = true) {
+    if (!listenerSessionId || !centerFreqHz || !sampleRateHz) return;
+    try {
+      const result = await Api.saveListenerSessionV2({
+        id: listenerSessionId,
+        client_name: /Mobi|Android/i.test(navigator.userAgent) ? 'Mobile browser' : 'Desktop browser',
+        receiver_id: 'receiver-0',
+        view_center_hz: Math.round(centerFreqHz),
+        view_span_hz: Math.round(Math.min(sampleRateHz, appliedBandwidthHz || sampleRateHz)),
+        active_vfo_id: vfos[0]?.id ?? null,
+        expected_revision: listenerSessionRevision,
+      });
+      listenerSessionRevision = Number(result.session?.revision ?? listenerSessionRevision);
+    } catch (error: any) {
+      if (retry && error?.status === 409) {
+        const result: any = await Api.listenerSessionsV2();
+        listenerSessionRevision = Number(result.sessions?.find((session: any) => session.id === listenerSessionId)?.revision ?? 0);
+        await syncListenerView(false);
+      }
+    }
   }
 
   function panSurfaceWheel(event: WheelEvent) {
@@ -776,6 +853,15 @@
     {#if scanRunning}
       <button class="primary stop" onclick={stopScan}>■ Stop Scan</button>
     {/if}
+    <section class="bookmark-section">
+      <h3>Bookmarks</h3>
+      <div class="bookmark-add"><input bind:value={bookmarkLabel} placeholder="Name current VFO" aria-label="Bookmark name" onkeydown={(event) => { if (event.key === 'Enter') void saveCurrentBookmark(); }} /><button onclick={saveCurrentBookmark} disabled={!bookmarkLabel.trim() || !vfos.length}>Save</button></div>
+      <ul class="bookmark-list">
+        {#each bookmarks as bookmark (bookmark.id)}
+          <li><button class="bookmark-tune" onclick={() => tuneBookmark(bookmark)}><span>{bookmark.label}</span><small>{fmtHz(bookmark.frequency_hz)} · {bookmark.mode.toUpperCase()}</small></button><button class="bookmark-delete" aria-label={`Delete ${bookmark.label}`} onclick={() => removeBookmark(bookmark)}>×</button></li>
+        {:else}<li class="empty-banks">No saved frequencies yet.</li>{/each}
+      </ul>
+    </section>
   </aside>
 
   <!-- Main: spectrum + VFO tiles -->
@@ -933,7 +1019,7 @@
 <style>
   .scanner-layout {
     display: grid;
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: 230px 1fr;
     grid-template-rows: minmax(0, 1fr) 140px;
     gap: 8px;
     height: 100%;
@@ -953,6 +1039,16 @@
   .bank-group h3 { margin: 10px 4px 4px; color: var(--accent-2); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
   .bank-group ul { list-style: none; margin: 0; padding: 0; }
   .empty-banks { color: var(--fg-dim); font-size: 12px; padding: 12px 4px; }
+  .bookmark-section { border-top:1px solid var(--line); margin-top:10px; padding-top:10px; }
+  .bookmark-section>h3 { margin:0 0 7px; color:var(--fg-dim); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+  .bookmark-add { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px; }
+  .bookmark-add input { min-width:0; }
+  .bookmark-list { list-style:none; margin:7px 0 0; padding:0; }
+  .bookmark-list li { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px; align-items:center; }
+  .bookmark-tune { display:grid; gap:1px; text-align:left; min-width:0; background:transparent; border-color:transparent; padding:6px; }
+  .bookmark-tune span { overflow:hidden; text-overflow:ellipsis; }
+  .bookmark-tune small { color:var(--fg-dim); font:9px var(--mono); }
+  .bookmark-delete { width:30px; padding:4px; color:var(--fg-dim); background:transparent; border-color:transparent; }
   .banks li { margin: 2px 0; }
   .range-row {
     display: flex; flex-direction: column; width: 100%;
@@ -994,10 +1090,10 @@
   .audio-status { color: var(--fg-dim); text-transform: capitalize; }
   .audio-status.on { color: var(--ok); }
 
-  .spectrum-wrap { flex: 0 0 auto; min-height: 250px; position: relative; }
+  .spectrum-wrap { flex: 0 0 auto; min-height: 560px; position: relative; }
   .spectrum-wrap.stale canvas { opacity: 0.45; }
   .stale-overlay { position:absolute; inset:36px 12px 112px; display:grid; place-items:center; color:var(--warn); background:rgb(7 12 18 / 55%); font:700 12px var(--mono); text-transform:uppercase; letter-spacing:.08em; pointer-events:none; }
-  .spectrum-wrap canvas { display: block; width: 100%; height: 95px; background: var(--bg); border-radius: 4px; }
+  .spectrum-wrap canvas { display: block; width: 100%; height: 150px; background: var(--bg); border-radius: 4px; }
   .spectrum-wrap canvas { cursor:crosshair; }
   .spectrum-wrap canvas.center-mode { cursor:grab; touch-action:none; }
   .spectrum-wrap canvas.center-mode:active { cursor:grabbing; }
@@ -1021,7 +1117,7 @@
   .waterfall-head h2 { flex:1; }
   .waterfall-head label, .waterfall-head select { font:10px var(--mono); color:var(--fg-dim); }
   .waterfall-head input { width:70px; vertical-align:middle; }
-  .spectrum-wrap canvas.waterfall { height: 95px; image-rendering: pixelated; }
+  .spectrum-wrap canvas.waterfall { height: clamp(320px, 48vh, 620px); image-rendering: pixelated; }
   .scan-progress { display:grid; grid-template-columns:auto 1fr 38px; align-items:center; gap:10px; margin-top:8px; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
   .scan-progress > span { display:flex; flex-direction:column; font-size:11px; }
   .scan-progress small { color:var(--fg-dim); font:9px var(--mono); }
@@ -1112,8 +1208,8 @@
     .center-controls > button:nth-of-type(2) { grid-column:1 / -1; grid-row:3; }
     .frequency-entry input { min-height:42px; font-size:18px; }
     .interaction-help { font-size:12px; line-height:1.4; }
-    .spectrum-wrap canvas { height:150px; }
-    .spectrum-wrap canvas.waterfall { height:120px; }
+    .spectrum-wrap canvas { height:120px; }
+    .spectrum-wrap canvas.waterfall { height:max(300px, 45vh); }
     .waterfall-head { flex-wrap:wrap; }
     .waterfall-head h2 { min-width:180px; }
     .vfo-grid { grid-template-columns:1fr; gap:10px; }
@@ -1132,8 +1228,9 @@
   @media (max-height: 850px) {
     .scanner-layout { grid-template-rows: minmax(0, 1fr); }
     .log { display: none; }
-    .spectrum-wrap { min-height: 230px; }
-    .spectrum-wrap canvas, .spectrum-wrap canvas.waterfall { height: 80px; }
+    .spectrum-wrap { min-height: 430px; }
+    .spectrum-wrap canvas { height: 110px; }
+    .spectrum-wrap canvas.waterfall { height: 260px; }
     .vfo-tile { padding: 8px; }
     .signal-history { display: none; }
   }

@@ -31,6 +31,14 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | POST | `/api/v2/receivers/:id/tune` | `{ command_id, expected_revision, frequency_hz }` |
 | GET | `/api/v2/receivers/:id/controls` | Generated control contract plus actual values |
 | GET/POST | `/api/v2/sessions` | List or claim/release the physical receiver lease |
+| GET | `/api/v2/hardware-windows` | Shared capture window, usable edges, owner, and revision |
+| GET/POST | `/api/v2/listener-sessions` | Independent per-browser viewport and selected-VFO state |
+| GET/POST | `/api/v2/profiles` | Persistent server-owned receiver profiles |
+| GET/DELETE | `/api/v2/profiles/:id` | Read or remove a receiver profile |
+| POST | `/api/v2/profiles/:id/apply` | Atomically apply the stored sample-rate and center-frequency contract |
+| GET/POST | `/api/v2/bookmarks` | Persistent shared frequency bookmarks |
+| DELETE | `/api/v2/bookmarks/:id` | Remove a shared bookmark |
+| GET | `/api/v2/bandplans` | Configured RF bands and scan defaults |
 | GET | `/api/v2/system/health` | Capture, FFT, VFO, audio, decoder, client, and recovery freshness |
 | GET | `/api/v2/decoders/catalog` | Truthful beta/installed decoder catalog and missing verification gate |
 | GET | `/api/v2/decoder-jobs` | Isolated decoder-process state |

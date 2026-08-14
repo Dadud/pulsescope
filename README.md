@@ -1,5 +1,7 @@
 # PulseScope
 
+Contributor and AI coding-tool guidance starts in [AGENTS.md](AGENTS.md). Architecture and development workflow are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md); conversation history is not project state. The active product sequence is in the [receiver modernization roadmap](docs/RECEIVER_MODERNIZATION.md).
+
 Current implementation and verification status is generated from the release contract: [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md). Beta features are labeled with their remaining acceptance gate; only physically tested hardware is described as hardware verified.
 
 Before first appliance startup, run `docker compose --profile preflight run --rm preflight`. Persistent configuration and calibration can be exported with `sh deploy/backup.sh`; `deploy/restore.sh` requires an explicit `RESTORE` confirmation and restarts only the PulseScope service.
@@ -40,7 +42,7 @@ Compare its feature coverage against the category leaders in
 - ✅ **UDP streaming** (PSAU audio + PSIQ IQ with magic/version headers)
 - ✅ **79 default scan ranges** from AM Broadcast through GOES HRIT/LRIT
 - ✅ **Docker multi-stage build** + systemd unit for headless deployment
-- ✅ **35 unit tests passing**
+- ✅ **Automated Rust, UI, release-contract, contributor-context, and container gates in CI**
 
 See `NYXSCOPE_PARITY_MATRIX.md` for honest feature-by-feature classification
 (what's wired, what's partial, what's blocked, what's deliberately unavailable).

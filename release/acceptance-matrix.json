@@ -120,6 +120,24 @@
       "acceptance_gate": "WebGL2 worker passes visual parity and performance tests with Canvas2D fallback.", "evidence": []
     },
     {
+      "id": "receiver-monitor-workspaces", "name": "Receiver and Monitor workspaces", "group": "client",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Desktop and mobile browser tests prove tuning remains waterfall-first while multi-VFO monitoring stays independently usable.",
+      "evidence": [{"type": "build", "ref": "Svelte Receiver and Monitor production routes"}]
+    },
+    {
+      "id": "profiles-bookmarks-bandplans", "name": "Profiles, bookmarks and bandplans", "group": "receiver",
+      "status": "development", "visibility": "normal", "required": true,
+      "acceptance_gate": "Persistence, backup, profile application, capability rejection, and multi-client consistency pass API and browser tests.",
+      "evidence": [{"type": "build", "ref": "SQLite migration 002 and versioned v2 workspace APIs"}]
+    },
+    {
+      "id": "lan-listener-sessions", "name": "Independent LAN listener sessions", "group": "receiver",
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "At least three browsers maintain independent viewport and VFO state while shared hardware retunes remain revision-safe.",
+      "evidence": [{"type": "build", "ref": "Revisioned /api/v2/listener-sessions contract"}]
+    },
+    {
       "id": "scanner-vfo-locking", "name": "Scanner and VFO signal locking", "group": "client",
       "status": "hardware_verified", "visibility": "normal", "required": true,
       "acceptance_gate": "Stable deduplicated locks, held VFO state, event logging, and resume behavior on live RF.",
