@@ -1705,6 +1705,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     if let Some(handle) = existing_handle {
         handle.flush_iq();
         s.0.audio.clear_queue();
+        configure_ham_decoders(&s, &range);
         start_configured_sidecars(&s).await;
         let _ = handle
             .cmd_tx
@@ -1730,10 +1731,46 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     if let Some(handle) = s.0.scanner.read().as_ref() {
         let _ = handle
             .cmd_tx
-            .send(crate::scanner::ScannerCommand::Start { range });
+            .send(crate::scanner::ScannerCommand::Start { range: range.clone() });
     }
+    configure_ham_decoders(&s, &range);
     start_configured_sidecars(&s).await;
     Json(json!({"ok": true}))
+}
+
+fn stop_ham_decoders(s: &ApiState) {
+    for (_, task) in s.0.ham_decoder_tasks.lock().drain() {
+        task.abort();
+    }
+}
+
+fn configure_ham_decoders(s: &ApiState, range: &crate::config::ScanRange) {
+    stop_ham_decoders(s);
+    let frequency_hz = s.0.device.status().center_freq_hz;
+    if range.name.starts_with("FT8 ") {
+        match which::which("jt9") {
+            Ok(executable) => {
+                let task = crate::sstv::spawn_ft8(s.0.audio.clone(), s.0.db.clone(), s.0.events.clone(), s.0.data_dir.clone(), frequency_hz, executable);
+                s.0.ham_decoder_tasks.lock().insert("ft8".into(), task);
+                tracing::info!(range = %range.name, "FT8 auto-decoder started");
+            }
+            Err(_) => tracing::warn!(range = %range.name, "FT8 profile selected but jt9 is not installed"),
+        }
+        return;
+    }
+    if !range.name.starts_with("SSTV ") { return; }
+    // SSTV is a native, streaming decoder: beginning an SSTV operating-window
+    // monitor automatically enables its audio tap without launching a GUI
+    // application or exposing a device to arbitrary process arguments.
+    let task = crate::sstv::spawn(
+        s.0.audio.clone(),
+        s.0.db.clone(),
+        s.0.events.clone(),
+        s.0.data_dir.clone(),
+        frequency_hz,
+    );
+    s.0.ham_decoder_tasks.lock().insert("sstv".into(), task);
+    tracing::info!(range = %range.name, "native SSTV auto-decoder started");
 }
 
 async fn start_configured_sidecars(s: &ApiState) {
@@ -1791,6 +1828,7 @@ async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
         let _ = cmd_tx.send(crate::scanner::ScannerCommand::Stop);
     }
     s.0.audio.clear_queue();
+    stop_ham_decoders(&s);
     s.0.receiver_session.lock().release("scanner");
     let _ = s.0.sidecars.kill_all().await;
     Json(json!({"ok": true}))

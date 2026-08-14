@@ -68,6 +68,7 @@ RUN apt-get update \
         libusb-1.0-0 \
         soapysdr-module-all \
         soapysdr-tools \
+        wsjtx \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

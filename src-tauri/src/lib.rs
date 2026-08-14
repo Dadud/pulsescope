@@ -20,5 +20,6 @@ pub mod pocsag;
 pub mod scanner;
 pub mod sidecar;
 pub mod signal_id;
+pub mod sstv;
 pub mod state;
 pub mod voice_decoder;

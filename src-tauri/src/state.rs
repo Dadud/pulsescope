@@ -42,6 +42,9 @@ pub struct AppState {
     pub listener_sessions: RwLock<HashMap<String, ListenerSession>>,
     pub trunking: RwLock<TrunkingRuntime>,
     pub sidecars: SidecarRegistry,
+    /// Native ham decoder tasks are explicitly tied to their selected narrow
+    /// operating window and are cancelled when the operator changes range.
+    pub ham_decoder_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// Broadcasts every scanner event (spectrum, signal hit, decoded message,
     /// trunking update) to subscribed WS clients. High throughput — receivers
     /// may drop frames if they fall behind.
@@ -85,6 +88,7 @@ impl AppState {
             listener_sessions: RwLock::new(HashMap::new()),
             trunking: RwLock::new(TrunkingRuntime::default()),
             sidecars: SidecarRegistry::new(),
+            ham_decoder_tasks: Mutex::new(HashMap::new()),
             events: events_tx,
             spectrum: spectrum_tx,
             data_dir,

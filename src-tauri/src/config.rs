@@ -85,7 +85,7 @@ impl Config {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("config.toml");
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
+            Ok(text) => toml::from_str(&text).map(merge_builtin_scan_ranges).unwrap_or_else(|e| {
                 tracing::warn!("failed to parse {path:?}: {e}; using defaults");
                 Config::default()
             }),
@@ -105,6 +105,18 @@ impl Config {
         std::fs::write(&path, text)?;
         Ok(())
     }
+}
+
+/// Preserve operator configuration while making newly shipped built-in bands
+/// appear on upgrades. A persisted `scan_ranges` array used to permanently
+/// hide new bands from existing appliances.
+fn merge_builtin_scan_ranges(mut config: Config) -> Config {
+    for builtin in default_scan_ranges() {
+        if !config.scan_ranges.iter().any(|range| range.name == builtin.name) {
+            config.scan_ranges.push(builtin);
+        }
+    }
+    config
 }
 
 // ── section structs ───────────────────────────────────────────────────────
@@ -816,6 +828,28 @@ impl Default for ScanRange {
 pub fn default_scan_ranges() -> Vec<ScanRange> {
     use AutoSquelchMode::*;
     vec![
+        // LF/MF allocations are included for capable direct-sampling radios.
+        // Regional privileges vary, so these presets are disabled by default.
+        range(
+            "2200m Amateur",
+            135_700,
+            137_800,
+            "usb",
+            500,
+            1,
+            62_500,
+            Off,
+        ),
+        range(
+            "630m Amateur",
+            472_000,
+            479_000,
+            "usb",
+            500,
+            1,
+            62_500,
+            Off,
+        ),
         range(
             "AM Broadcast",
             540_000,
@@ -983,6 +1017,16 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             Adaptive,
         ),
         range(
+            "4m Amateur (regional)",
+            70_000_000,
+            70_500_000,
+            "nfm",
+            12_500,
+            3,
+            768_000,
+            Adaptive,
+        ),
+        range(
             "R/C Aircraft",
             72_000_000,
             73_000_000,
@@ -1061,6 +1105,148 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             3,
             5_000_000,
             Adaptive,
+        ),
+        // Narrow digital-mode windows have their own presets so auto-decoder
+        // selection never has to infer a mode from a full amateur allocation.
+        range(
+            "FT8 80m",
+            3_572_000,
+            3_574_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 40m",
+            7_073_000,
+            7_075_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 30m",
+            10_135_000,
+            10_137_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 20m",
+            14_073_000,
+            14_075_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "SSTV 20m",
+            14_229_000,
+            14_231_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 17m",
+            18_099_000,
+            18_101_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 15m",
+            21_073_000,
+            21_075_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "SSTV 15m",
+            21_339_000,
+            21_341_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 12m",
+            24_914_000,
+            24_916_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 10m",
+            28_073_000,
+            28_075_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "SSTV 10m",
+            28_679_000,
+            28_681_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 6m",
+            50_312_000,
+            50_314_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "FT8 2m",
+            144_173_000,
+            144_175_000,
+            "usb",
+            3_000,
+            1,
+            125_000,
+            Off,
+        ),
+        range(
+            "SSTV 2m",
+            144_499_000,
+            144_501_000,
+            "nfm",
+            12_500,
+            1,
+            125_000,
+            Off,
         ),
         range(
             "MURS",
@@ -1433,6 +1619,16 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             Adaptive,
         ),
         range(
+            "9cm Amateur",
+            3_300_000_000,
+            3_500_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
             "ISM 2.4 GHz",
             2_400_000_000,
             2_483_500_000,
@@ -1466,6 +1662,46 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             "5cm Amateur",
             5_650_000_000,
             5_925_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "3cm Amateur",
+            10_000_000_000,
+            10_500_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "1.25cm Amateur",
+            24_000_000_000,
+            24_250_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "6mm Amateur",
+            47_000_000_000,
+            47_200_000_000,
+            "nfm",
+            12_500,
+            3,
+            8_000_000,
+            Adaptive,
+        ),
+        range(
+            "4mm Amateur",
+            75_500_000_000,
+            81_000_000_000,
             "nfm",
             12_500,
             3,

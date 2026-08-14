@@ -3637,6 +3637,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "slowrx",
  "soapysdr-sys",
  "tauri",
  "tauri-build",
@@ -4531,6 +4532,16 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slowrx"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "553f6d8e7607ca042e43e914db6c3fd0cf6909e68c7e50dbc4e240ea18d2fd68"
+dependencies = [
+ "rustfft",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "smallvec"

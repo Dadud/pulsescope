@@ -109,6 +109,8 @@
     { label: 'AIS 162', match: 'AIS' },
     { label: 'ACARS 130', match: 'ACARS' },
     { label: 'APRS 144', match: 'APRS' },
+    { label: 'FT8 20m', match: 'FT8 20m' },
+    { label: 'SSTV 20m', match: 'SSTV 20m' },
     { label: '433 Sensors', match: 'ISM 433' },
     { label: '915 Sensors', match: 'ISM 915' },
     { label: 'Pagers', match: 'Pagers' }
