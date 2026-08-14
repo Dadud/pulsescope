@@ -430,7 +430,8 @@ async fn scanner_loop(
                             // Monitoring is opt-in. The SSTV automation is the
                             // narrow exception: it needs post-demod audio, but
                             // it remains silent until a browser subscribes.
-                            muted: !(range.name.starts_with("SSTV ") || range.name.starts_with("FT8 ")),
+                            muted: !(range.name.starts_with("SSTV ")
+                                || range.name.starts_with("FT8 ")),
                             volume: 0.7,
                             audio_agc: true,
                             squelch_open: false,

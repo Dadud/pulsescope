@@ -56,6 +56,7 @@ pub struct AppState {
     pub started_ms: i64,
     pub receiver_recoveries: AtomicU64,
     pub last_receiver_recovery_ms: AtomicI64,
+    pub metrics: Arc<crate::operations::Metrics>,
 }
 
 impl AppState {
@@ -95,6 +96,7 @@ impl AppState {
             started_ms: crate::scanner::now_ms(),
             receiver_recoveries: AtomicU64::new(0),
             last_receiver_recovery_ms: AtomicI64::new(0),
+            metrics: Arc::new(crate::operations::Metrics::default()),
         })
     }
 

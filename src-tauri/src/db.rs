@@ -45,6 +45,13 @@ impl Db {
     pub fn conn(&self) -> parking_lot::MutexGuard<'_, Connection> {
         self.conn.lock()
     }
+
+    pub fn integrity_check(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .conn()
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?
+            == "ok")
+    }
 }
 
 // ── types ─────────────────────────────────────────────────────────────────

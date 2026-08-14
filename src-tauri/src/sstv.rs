@@ -14,7 +14,13 @@ use crate::audio::AudioSink;
 use crate::db::{Db, DecodedMessage};
 use crate::state::ScannerEvent;
 
-pub fn spawn(audio: Arc<AudioSink>, db: Db, events: broadcast::Sender<ScannerEvent>, data_dir: PathBuf, frequency_hz: u64) -> tokio::task::JoinHandle<()> {
+pub fn spawn(
+    audio: Arc<AudioSink>,
+    db: Db,
+    events: broadcast::Sender<ScannerEvent>,
+    data_dir: PathBuf,
+    frequency_hz: u64,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut frames = audio.subscribe();
         let mut decoder = match slowrx::SstvDecoder::new(48_000) {
@@ -35,22 +41,62 @@ pub fn spawn(audio: Arc<AudioSink>, db: Db, events: broadcast::Sender<ScannerEve
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             };
-            let mono = frame.samples.chunks(frame.channels.max(1) as usize)
+            let mono = frame
+                .samples
+                .chunks(frame.channels.max(1) as usize)
                 .map(|samples| samples.iter().copied().sum::<f32>() / samples.len().max(1) as f32)
                 .collect::<Vec<_>>();
             for event in decoder.process(&mono) {
                 match event {
-                    slowrx::SstvEvent::VisDetected { mode, hedr_shift_hz, .. } => {
-                        publish(&db, &events, frequency_hz, "sstv", "mode_detected", format!("SSTV {mode:?} detected (tuning offset {hedr_shift_hz:+.0} Hz)"));
+                    slowrx::SstvEvent::VisDetected {
+                        mode,
+                        hedr_shift_hz,
+                        ..
+                    } => {
+                        publish(
+                            &db,
+                            &events,
+                            frequency_hz,
+                            "sstv",
+                            "mode_detected",
+                            format!(
+                                "SSTV {mode:?} detected (tuning offset {hedr_shift_hz:+.0} Hz)"
+                            ),
+                        );
                     }
                     slowrx::SstvEvent::UnknownVis { code, .. } => {
-                        publish(&db, &events, frequency_hz, "sstv", "unknown_vis", format!("SSTV VIS {code} detected but is not supported by this decoder"));
+                        publish(
+                            &db,
+                            &events,
+                            frequency_hz,
+                            "sstv",
+                            "unknown_vis",
+                            format!(
+                                "SSTV VIS {code} detected but is not supported by this decoder"
+                            ),
+                        );
                     }
                     slowrx::SstvEvent::ImageComplete { image, partial } => {
-                        let filename = format!("sstv-{}-{}.ppm", crate::scanner::now_ms(), format!("{:?}", image.mode).to_lowercase());
+                        let filename = format!(
+                            "sstv-{}-{}.ppm",
+                            crate::scanner::now_ms(),
+                            format!("{:?}", image.mode).to_lowercase()
+                        );
                         let path = image_dir.join(filename);
                         match write_ppm(&path, image.width, image.height, &image.pixels) {
-                            Ok(()) => publish(&db, &events, frequency_hz, "sstv", "image", format!("SSTV {:?} image decoded{}: {}", image.mode, if partial { " (partial)" } else { "" }, path.display())),
+                            Ok(()) => publish(
+                                &db,
+                                &events,
+                                frequency_hz,
+                                "sstv",
+                                "image",
+                                format!(
+                                    "SSTV {:?} image decoded{}: {}",
+                                    image.mode,
+                                    if partial { " (partial)" } else { "" },
+                                    path.display()
+                                ),
+                            ),
                             Err(error) => tracing::warn!(%error, "failed to save SSTV image"),
                         }
                     }
@@ -66,7 +112,14 @@ pub fn spawn(audio: Arc<AudioSink>, db: Db, events: broadcast::Sender<ScannerEve
 /// documented `jt9 -8 wav-file` command-line decoder.  It is deliberately a
 /// file boundary rather than a raw-stdin sidecar: jt9 documents WAV and shared
 /// memory inputs, not a generic audio pipe.
-pub fn spawn_ft8(audio: Arc<AudioSink>, db: Db, events: broadcast::Sender<ScannerEvent>, data_dir: PathBuf, frequency_hz: u64, executable: PathBuf) -> tokio::task::JoinHandle<()> {
+pub fn spawn_ft8(
+    audio: Arc<AudioSink>,
+    db: Db,
+    events: broadcast::Sender<ScannerEvent>,
+    data_dir: PathBuf,
+    frequency_hz: u64,
+    executable: PathBuf,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut frames = audio.subscribe();
         let mut period_start = None::<i64>;
@@ -88,7 +141,16 @@ pub fn spawn_ft8(audio: Arc<AudioSink>, db: Db, events: broadcast::Sender<Scanne
             if let Some(start) = period_start {
                 if bucket != start {
                     if samples.len() >= 12_000 * 14 {
-                        decode_ft8_period(&executable, &temp_dir, start, &samples, &db, &events, frequency_hz).await;
+                        decode_ft8_period(
+                            &executable,
+                            &temp_dir,
+                            start,
+                            &samples,
+                            &db,
+                            &events,
+                            frequency_hz,
+                        )
+                        .await;
                     }
                     samples.clear();
                 }
@@ -106,7 +168,15 @@ pub fn spawn_ft8(audio: Arc<AudioSink>, db: Db, events: broadcast::Sender<Scanne
     })
 }
 
-async fn decode_ft8_period(executable: &PathBuf, temp_dir: &PathBuf, period_start: i64, samples: &[f32], db: &Db, events: &broadcast::Sender<ScannerEvent>, frequency_hz: u64) {
+async fn decode_ft8_period(
+    executable: &PathBuf,
+    temp_dir: &PathBuf,
+    period_start: i64,
+    samples: &[f32],
+    db: &Db,
+    events: &broadcast::Sender<ScannerEvent>,
+    frequency_hz: u64,
+) {
     let path = temp_dir.join(format!("ft8-{period_start}.wav"));
     if let Err(error) = write_wav_mono_16(&path, 12_000, samples) {
         tracing::warn!(%error, "failed to create FT8 WAV period");
@@ -124,17 +194,28 @@ async fn decode_ft8_period(executable: &PathBuf, temp_dir: &PathBuf, period_star
                 let line = line.trim();
                 // jt9 also writes banners and diagnostics. FT8 decoded lines
                 // carry a CQ or the FT8 `~` mode marker plus message fields.
-                if line.contains("CQ ") || (line.contains('~') && line.split_whitespace().count() >= 5) {
+                if line.contains("CQ ")
+                    || (line.contains('~') && line.split_whitespace().count() >= 5)
+                {
                     publish(db, events, frequency_hz, "ft8", "message", line.to_string());
                 }
             }
         }
-        Ok(output) => tracing::warn!(status = ?output.status, stderr = %String::from_utf8_lossy(&output.stderr), "FT8 decoder exited unsuccessfully"),
+        Ok(output) => {
+            tracing::warn!(status = ?output.status, stderr = %String::from_utf8_lossy(&output.stderr), "FT8 decoder exited unsuccessfully")
+        }
         Err(error) => tracing::warn!(%error, "FT8 decoder could not start"),
     }
 }
 
-fn publish(db: &Db, events: &broadcast::Sender<ScannerEvent>, frequency_hz: u64, protocol: &str, message_type: &str, content: String) {
+fn publish(
+    db: &Db,
+    events: &broadcast::Sender<ScannerEvent>,
+    frequency_hz: u64,
+    protocol: &str,
+    message_type: &str,
+    content: String,
+) {
     let message = DecodedMessage {
         id: None,
         frequency_hz,
@@ -155,7 +236,9 @@ fn write_ppm(path: &PathBuf, width: u32, height: u32, pixels: &[[u8; 3]]) -> std
     use std::io::Write;
     let mut file = fs::File::create(path)?;
     write!(file, "P6\n{width} {height}\n255\n")?;
-    for pixel in pixels { file.write_all(pixel)?; }
+    for pixel in pixels {
+        file.write_all(pixel)?;
+    }
     Ok(())
 }
 

@@ -85,10 +85,12 @@ impl Config {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("config.toml");
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map(merge_builtin_scan_ranges).unwrap_or_else(|e| {
-                tracing::warn!("failed to parse {path:?}: {e}; using defaults");
-                Config::default()
-            }),
+            Ok(text) => toml::from_str(&text)
+                .map(merge_builtin_scan_ranges)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("failed to parse {path:?}: {e}; using defaults");
+                    Config::default()
+                }),
             Err(_) => {
                 tracing::info!("no config at {path:?}; using defaults");
                 Config::default()
@@ -112,7 +114,11 @@ impl Config {
 /// hide new bands from existing appliances.
 fn merge_builtin_scan_ranges(mut config: Config) -> Config {
     for builtin in default_scan_ranges() {
-        if !config.scan_ranges.iter().any(|range| range.name == builtin.name) {
+        if !config
+            .scan_ranges
+            .iter()
+            .any(|range| range.name == builtin.name)
+        {
             config.scan_ranges.push(builtin);
         }
     }
@@ -840,16 +846,7 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             62_500,
             Off,
         ),
-        range(
-            "630m Amateur",
-            472_000,
-            479_000,
-            "usb",
-            500,
-            1,
-            62_500,
-            Off,
-        ),
+        range("630m Amateur", 472_000, 479_000, "usb", 500, 1, 62_500, Off),
         range(
             "AM Broadcast",
             540_000,
@@ -1109,124 +1106,40 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
         // Narrow digital-mode windows have their own presets so auto-decoder
         // selection never has to infer a mode from a full amateur allocation.
         range(
-            "FT8 80m",
-            3_572_000,
-            3_574_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 80m", 3_572_000, 3_574_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 40m",
-            7_073_000,
-            7_075_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 40m", 7_073_000, 7_075_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 30m",
-            10_135_000,
-            10_137_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 30m", 10_135_000, 10_137_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 20m",
-            14_073_000,
-            14_075_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 20m", 14_073_000, 14_075_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "SSTV 20m",
-            14_229_000,
-            14_231_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "SSTV 20m", 14_229_000, 14_231_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 17m",
-            18_099_000,
-            18_101_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 17m", 18_099_000, 18_101_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 15m",
-            21_073_000,
-            21_075_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 15m", 21_073_000, 21_075_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "SSTV 15m",
-            21_339_000,
-            21_341_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "SSTV 15m", 21_339_000, 21_341_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 12m",
-            24_914_000,
-            24_916_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 12m", 24_914_000, 24_916_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 10m",
-            28_073_000,
-            28_075_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 10m", 28_073_000, 28_075_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "SSTV 10m",
-            28_679_000,
-            28_681_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "SSTV 10m", 28_679_000, 28_681_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
-            "FT8 6m",
-            50_312_000,
-            50_314_000,
-            "usb",
-            3_000,
-            1,
-            125_000,
-            Off,
+            "FT8 6m", 50_312_000, 50_314_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
             "FT8 2m",

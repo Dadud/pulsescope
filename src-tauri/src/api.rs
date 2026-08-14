@@ -66,6 +66,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/health", get(health))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/metrics", get(metrics_snapshot))
+        .route("/diagnostics/bundle", get(diagnostic_bundle_export))
         .route("/v2/system/health", get(system_health_v2))
         .route("/v2/features", get(feature_status_v2))
         .route("/v2/devices", get(devices_v2))
@@ -159,6 +161,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/decoded_messages", get(decoded_messages))
         .route("/rtl433_messages", get(rtl433_messages))
         .route("/protocol_messages", get(protocol_messages))
+        .route("/protocols/slices", get(protocol_slices))
+        .route("/protocols/:id/capability", get(protocol_capability))
         // ── talkgroups ───────────────────────────────────────────────────
         .route("/talkgroups", get(talkgroups).post(talkgroup_update))
         .route("/talkgroups/systems", get(talkgroup_systems))
@@ -608,6 +612,81 @@ async fn health_ready(State(s): State<ApiState>) -> impl IntoResponse {
             "reasons": reasons,
         })),
     )
+}
+
+async fn metrics_snapshot(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(s.0.metrics.snapshot())
+}
+
+async fn diagnostic_bundle_export(State(s): State<ApiState>) -> impl IntoResponse {
+    let config = toml::to_string_pretty(&*s.0.config.read()).unwrap_or_default();
+    let status = serde_json::to_string_pretty(&json!({
+        "device": s.0.device.status(),
+        "audio": s.0.audio.status(),
+        "sidecars": s.0.sidecars.statuses(),
+        "metrics": s.0.metrics.snapshot(),
+    }))
+    .unwrap_or_default();
+    match crate::operations::diagnostic_bundle(
+        &s.0.data_dir,
+        &[("config.toml", config), ("status.json", status)],
+    ) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/zip"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=pulsescope-diagnostics.zip",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => crate::operations::OperationalError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "DIAGNOSTIC_BUNDLE_FAILED",
+            safe_message: "The diagnostic bundle could not be created.",
+            context: error,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        }
+        .into_response(),
+    }
+}
+
+async fn protocol_slices(State(s): State<ApiState>) -> impl IntoResponse {
+    let device = s.0.device.status();
+    Json(
+        crate::protocols::slices()
+            .into_iter()
+            .map(|slice| {
+                let hardware = crate::protocols::capability_check(&slice, &device);
+                json!({"slice": slice, "hardware": hardware, "running": false})
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+async fn protocol_capability(
+    Path(id): Path<String>,
+    State(s): State<ApiState>,
+) -> impl IntoResponse {
+    let Some(slice) = crate::protocols::slices()
+        .into_iter()
+        .find(|slice| slice.id == id)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"available": false, "running": false, "reason": "unknown protocol slice"})),
+        )
+            .into_response();
+    };
+    let hardware = crate::protocols::capability_check(&slice, &s.0.device.status());
+    (
+        StatusCode::OK,
+        Json(json!({"slice": slice, "hardware": hardware, "running": false})),
+    )
+        .into_response()
 }
 
 async fn system_health_v2(State(s): State<ApiState>) -> impl IntoResponse {
@@ -1729,9 +1808,9 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     let handle = crate::scanner::ScannerHandle::spawn(cfg, dependencies);
     *s.0.scanner.write() = Some(handle);
     if let Some(handle) = s.0.scanner.read().as_ref() {
-        let _ = handle
-            .cmd_tx
-            .send(crate::scanner::ScannerCommand::Start { range: range.clone() });
+        let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start {
+            range: range.clone(),
+        });
     }
     configure_ham_decoders(&s, &range);
     start_configured_sidecars(&s).await;
@@ -1750,15 +1829,26 @@ fn configure_ham_decoders(s: &ApiState, range: &crate::config::ScanRange) {
     if range.name.starts_with("FT8 ") {
         match which::which("jt9") {
             Ok(executable) => {
-                let task = crate::sstv::spawn_ft8(s.0.audio.clone(), s.0.db.clone(), s.0.events.clone(), s.0.data_dir.clone(), frequency_hz, executable);
+                let task = crate::sstv::spawn_ft8(
+                    s.0.audio.clone(),
+                    s.0.db.clone(),
+                    s.0.events.clone(),
+                    s.0.data_dir.clone(),
+                    frequency_hz,
+                    executable,
+                );
                 s.0.ham_decoder_tasks.lock().insert("ft8".into(), task);
                 tracing::info!(range = %range.name, "FT8 auto-decoder started");
             }
-            Err(_) => tracing::warn!(range = %range.name, "FT8 profile selected but jt9 is not installed"),
+            Err(_) => {
+                tracing::warn!(range = %range.name, "FT8 profile selected but jt9 is not installed")
+            }
         }
         return;
     }
-    if !range.name.starts_with("SSTV ") { return; }
+    if !range.name.starts_with("SSTV ") {
+        return;
+    }
     // SSTV is a native, streaming decoder: beginning an SSTV operating-window
     // monitor automatically enables its audio tap without launching a GUI
     // application or exposing a device to arbitrary process arguments.

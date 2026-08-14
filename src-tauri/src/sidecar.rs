@@ -19,12 +19,20 @@ use tokio::sync::broadcast;
 use crate::db::Db;
 use crate::state::ScannerEvent;
 
+const MAX_LINE_BYTES: usize = 64 * 1024;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+const IO_TIMEOUT: Duration = Duration::from_millis(750);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RESTARTS: u8 = 3;
+
 #[derive(Clone)]
 pub struct SidecarRegistry {
     children: Arc<Mutex<HashMap<String, Arc<Mutex<Child>>>>>,
     inputs: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<ChildStdin>>>>>,
     stderr: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
     input_stats: Arc<Mutex<HashMap<String, (u64, u64)>>>,
+    failures: Arc<Mutex<HashMap<String, String>>>,
+    restarts: Arc<Mutex<HashMap<String, u8>>>,
 }
 
 pub fn encode_u8_iq(samples: &[rustfft::num_complex::Complex<f32>]) -> Vec<u8> {
@@ -50,6 +58,8 @@ impl SidecarRegistry {
             inputs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             stderr: Arc::new(Mutex::new(HashMap::new())),
             input_stats: Arc::new(Mutex::new(HashMap::new())),
+            failures: Arc::new(Mutex::new(HashMap::new())),
+            restarts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -89,7 +99,7 @@ impl SidecarRegistry {
         let stderr = child.stderr.take().expect("stderr");
         let protocol = name.to_string();
 
-        let stdout = tokio::io::BufReader::new(stdout);
+        let mut stdout = tokio::io::BufReader::new(stdout);
         let events_tx_clone = events_tx.clone();
         let protocol_for_task = protocol.clone();
         tokio::spawn(async move {
@@ -97,12 +107,15 @@ impl SidecarRegistry {
             let mut lines = stdout.lines();
             loop {
                 match lines.next_line().await {
-                    Ok(Some(line)) => {
+                    Ok(Some(line)) if line.len() <= MAX_LINE_BYTES => {
                         tracing::debug!(proto = %protocol_for_task, line = %line, "sidecar");
                         if let Some(m) = parse_line(&protocol_for_task, &line) {
                             let _ = db.insert_decoded_message(&m);
                             let _ = events_tx_clone.send(ScannerEvent::DecodedMessage(m));
                         }
+                    }
+                    Ok(Some(_)) => {
+                        tracing::warn!(proto = %protocol_for_task, "oversized sidecar line discarded");
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -125,7 +138,7 @@ impl SidecarRegistry {
                 if buffer.len() >= 200 {
                     buffer.pop_front();
                 }
-                buffer.push_back(line);
+                buffer.push_back(line.chars().take(MAX_LINE_BYTES).collect());
             }
         });
 
@@ -137,7 +150,12 @@ impl SidecarRegistry {
             .lock()
             .await
             .insert(name.to_string(), Arc::new(tokio::sync::Mutex::new(stdin)));
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::timeout(
+            STARTUP_TIMEOUT,
+            tokio::time::sleep(Duration::from_millis(250)),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("decoder readiness timed out"))?;
         let exited = self
             .children
             .lock()
@@ -146,10 +164,9 @@ impl SidecarRegistry {
         if let Some(status) = exited {
             self.inputs.lock().await.remove(name);
             self.children.lock().remove(name);
-            return Err(anyhow::anyhow!(
-                "decoder exited during startup with {}",
-                status
-            ));
+            let detail = format!("decoder exited during startup with {status}");
+            self.failures.lock().insert(name.into(), detail.clone());
+            return Err(anyhow::anyhow!(detail));
         }
         Ok(())
     }
@@ -251,10 +268,15 @@ impl SidecarRegistry {
                 SidecarStatus {
                     name: name.clone(),
                     running,
+                    healthy: running && !self.failures.lock().contains_key(name),
                     pid: if running { child.id() } else { None },
                     exit_code,
                     input_samples: stats.0,
                     input_bytes: stats.1,
+                    output_messages: 0,
+                    restarts: *self.restarts.lock().get(name).unwrap_or(&0),
+                    restart_limit: MAX_RESTARTS,
+                    failure: self.failures.lock().get(name).cloned(),
                 }
             })
             .collect()
@@ -418,10 +440,15 @@ fn field_after(line: &str, marker: &str) -> Option<String> {
 pub struct SidecarStatus {
     pub name: String,
     pub running: bool,
+    pub healthy: bool,
     pub pid: Option<u32>,
     pub exit_code: Option<i32>,
     pub input_samples: u64,
     pub input_bytes: u64,
+    pub output_messages: u64,
+    pub restarts: u8,
+    pub restart_limit: u8,
+    pub failure: Option<String>,
 }
 
 #[cfg(test)]
