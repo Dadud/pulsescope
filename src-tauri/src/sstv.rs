@@ -5,7 +5,7 @@
 //! core appliance stays lightweight; the decoder event carries the file path.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
@@ -170,7 +170,7 @@ pub fn spawn_ft8(
 
 async fn decode_ft8_period(
     executable: &PathBuf,
-    temp_dir: &PathBuf,
+    temp_dir: &Path,
     period_start: i64,
     samples: &[f32],
     db: &Db,

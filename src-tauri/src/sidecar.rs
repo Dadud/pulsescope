@@ -214,8 +214,23 @@ impl SidecarRegistry {
         }
         for handle in handles {
             let mut stdin = handle.lock().await;
-            if let Err(e) = stdin.write_all(&bytes).await {
-                tracing::debug!(error = %e, "sidecar IQ input closed");
+            match tokio::time::timeout(IO_TIMEOUT, stdin.write_all(&bytes)).await {
+                Ok(Ok(())) => {
+                    if let Err(error) = stdin.flush().await {
+                        tracing::debug!(error = %error, "sidecar IQ input closed");
+                    }
+                }
+                Ok(Err(error)) => {
+                    self.failures
+                        .lock()
+                        .insert("rtl_433".into(), format!("stdin closed: {error}"));
+                }
+                Err(error) => {
+                    self.failures.lock().insert(
+                        "rtl_433".into(),
+                        format!("stdin backpressure timeout: {error}"),
+                    );
+                }
             }
         }
     }
@@ -225,7 +240,14 @@ impl SidecarRegistry {
         let child_arc = self.children.lock().remove(name);
         if let Some(child_arc) = child_arc {
             let mut child = child_arc.lock();
-            let _ = child.start_kill();
+            let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                if child.try_wait()?.is_some() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            child.start_kill()?;
         }
         Ok(())
     }

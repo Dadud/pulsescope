@@ -41,6 +41,7 @@ pub fn slices() -> Vec<ProtocolSlice> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn slice(
     id: &'static str,
     name: &'static str,
@@ -121,14 +122,17 @@ mod tests {
     fn device(driver: &str, connected: bool, sample_rate: u32) -> DeviceStatus {
         DeviceStatus {
             connected,
+            lifecycle: crate::device::DeviceLifecycle::Ready,
             driver: driver.into(),
             label: String::new(),
             sample_rate,
+            bandwidth_hz: sample_rate,
             center_freq_hz: 0,
             ppm_correction: 0.0,
             gain: String::new(),
             bias_tee_on: false,
             saturation: false,
+            stream: crate::device::StreamCountersSnapshot::default(),
         }
     }
     #[test]
