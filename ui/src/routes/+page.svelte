@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame, type ReceiverBookmark } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
+  import { WaterfallCanvas, type WaterfallPalette } from '$lib/waterfall-canvas';
 
   let banks: ScanRange[] = $state([]);
   let bookmarks: ReceiverBookmark[] = $state([]);
@@ -35,16 +36,13 @@
   let lastSpectrumSequence = $state(0);
   let droppedSpectrumFrames = $state(0);
   let nowMs = $state(Date.now());
-  let waterfallPixels: Uint8ClampedArray | null = null;
-  let waterfallImage: ImageData | null = null;
-  let waterfallWorker: Worker | null = null;
-  let waterfallRenderer = $state('canvas2d');
+  const waterfallCanvasRenderer = new WaterfallCanvas();
   let renderFps = $state(0);
   let renderFrames = 0;
   let renderWindowStarted = performance.now();
   let drawPending = false;
   let waterfallGain = $state(1);
-  let waterfallPalette = $state('classic');
+  let waterfallPalette = $state<WaterfallPalette>('classic');
   let initialLoadInFlight = false;
   let browserAudio: BrowserAudio | null = null;
   let audioState: BrowserAudioState = $state('off');
@@ -66,6 +64,18 @@
   let listenerSessionRevision = 0;
 
   const spectrumStale = $derived(lastSpectrumAt === 0 || nowMs - lastSpectrumAt > 2_000);
+  const spectrumLive = $derived(spectrumConnection === 'open' && !spectrumStale && spectrumBins.length > 0);
+  const spectrumStatusLabel = $derived(
+    spectrumError
+      ? 'error'
+      : spectrumLive
+        ? 'live'
+        : spectrumBins.length > 0
+          ? 'polling'
+          : connected
+            ? 'waiting'
+            : 'offline',
+  );
   const displayedCenterHz = $derived(pendingCenterHz ?? centerFreqHz);
   const activeBank = $derived(banks.find((bank) => bank.name === activeRange));
   const scanProgress = $derived(activeBank && activeBank.end_hz > activeBank.start_hz
@@ -192,7 +202,7 @@
       eventReconnectTimer = null;
       spectrumWs?.close(); spectrumWs = null;
       ws?.close(); ws = null;
-      waterfallWorker?.terminate(); waterfallWorker = null;
+      waterfallCanvasRenderer.detach();
       browserAudio?.stop(); browserAudio = null;
     };
   }));
@@ -415,10 +425,12 @@
   function setWaterfallGain(event: Event) {
     waterfallGain = Number((event.currentTarget as HTMLInputElement).value);
     localStorage.setItem('pulsescope.waterfall.gain', String(waterfallGain));
+    if (spectrumBins.length) drawWaterfall();
   }
   function setWaterfallPalette(event: Event) {
     waterfallPalette = (event.currentTarget as HTMLSelectElement).value === 'mono' ? 'mono' : 'classic';
     localStorage.setItem('pulsescope.waterfall.palette', waterfallPalette);
+    if (spectrumBins.length) drawWaterfall();
   }
 
   function drawSpectrum() {
@@ -476,57 +488,28 @@
 
   function drawWaterfall() {
     if (!waterfallCanvas || spectrumBins.length === 0) return;
-    const backing = canvasBackingSize(waterfallCanvas, 1200, 420);
-    if (typeof Worker !== 'undefined' && typeof waterfallCanvas.transferControlToOffscreen === 'function') {
-      if (!waterfallWorker) {
-        ensureCanvasBacking(waterfallCanvas, backing.width, backing.height);
-        const offscreen = waterfallCanvas.transferControlToOffscreen();
-        waterfallWorker = new Worker(new URL('../lib/waterfall-worker.ts', import.meta.url), { type: 'module' });
-        waterfallWorker.onmessage = (event) => { if (event.data?.type === 'ready') waterfallRenderer = event.data.renderer; };
-        waterfallWorker.postMessage({ canvas: offscreen, width: backing.width, height: backing.height }, [offscreen]);
-      }
-      waterfallWorker.postMessage({ bins: spectrumBins, gain: waterfallGain, palette: waterfallPalette, width: backing.width, height: backing.height });
-      return;
-    }
-    ensureCanvasBacking(waterfallCanvas, backing.width, backing.height);
-    const ctx = waterfallCanvas.getContext('2d');
-    if (!ctx) return;
-    const w = waterfallCanvas.width;
-    const h = waterfallCanvas.height;
-    // Keep history outside the canvas. WebView render cycles may clear a
-    // canvas bitmap; this typed buffer makes the waterfall deterministic.
-    if (!waterfallPixels || waterfallPixels.length !== w * h * 4) {
-      waterfallPixels = new Uint8ClampedArray(w * h * 4);
-    }
-    // Browser polling is deliberately low-rate on LAN/mobile. Write a small
-    // stripe per accepted FFT frame so the waterfall visibly advances instead
-    // of looking frozen after a single one-pixel row.
-    const rowsPerFrame = 3;
-    const rowBytes = w * 4;
-    if (h > rowsPerFrame) waterfallPixels.copyWithin(rowBytes * rowsPerFrame, 0, rowBytes * (h - rowsPerFrame));
-    for (let x = 0; x < w; x++) {
-      const index = Math.min(spectrumBins.length - 1, Math.floor((x / w) * spectrumBins.length));
-      const value = Math.max(0, Math.min(1, ((spectrumBins[index] + 100) / 80) * waterfallGain));
-      const hue = 240 - value * 240;
-      const c = 1 - Math.abs((hue / 60) % 2 - 1);
-      const sector = Math.floor(hue / 60);
-      const rgb = waterfallPalette === 'mono'
-        ? [1, 1, 1]
-        : sector === 0 ? [1, c, 0] : sector === 1 ? [c, 1, 0] : sector === 2 ? [0, 1, c] : sector === 3 ? [0, c, 1] : sector === 4 ? [c, 0, 1] : [1, 0, c];
-      const pixel = x * 4;
-      waterfallPixels[pixel] = Math.round(rgb[0] * value * 255);
-      waterfallPixels[pixel + 1] = Math.round(rgb[1] * value * 255);
-      waterfallPixels[pixel + 2] = Math.round(rgb[2] * value * 255);
-      waterfallPixels[pixel + 3] = 255;
-    }
-    for (let row = 1; row < rowsPerFrame; row++) {
-      waterfallPixels.set(waterfallPixels.subarray(0, rowBytes), row * rowBytes);
-    }
-    if (!waterfallImage || waterfallImage.width !== w || waterfallImage.height !== h) {
-      waterfallImage = ctx.createImageData(w, h);
-    }
-    waterfallImage.data.set(waterfallPixels);
-    ctx.putImageData(waterfallImage, 0, 0);
+    waterfallCanvasRenderer.draw(spectrumBins, waterfallGain, waterfallPalette);
+  }
+
+  function bindWaterfallCanvas(node: HTMLCanvasElement) {
+    waterfallCanvas = node;
+    waterfallCanvasRenderer.attach(node);
+    if (spectrumBins.length) drawWaterfall();
+    return {
+      destroy() {
+        waterfallCanvasRenderer.detach();
+      },
+    };
+  }
+
+  function bindSpectrumCanvas(node: HTMLCanvasElement) {
+    canvas = node;
+    if (spectrumBins.length) drawSpectrum();
+    return {
+      destroy() {
+        canvas = undefined as unknown as HTMLCanvasElement;
+      },
+    };
   }
 
   async function startScan(name: string) {
@@ -616,9 +599,7 @@
   }
 
   function clearWaterfallHistory() {
-    waterfallPixels = null;
-    waterfallImage = null;
-    if (waterfallWorker) waterfallWorker.postMessage({ clear: true });
+    waterfallCanvasRenderer.clear();
   }
 
   async function applyCenterFrequency(frequencyHz: number) {
@@ -844,8 +825,9 @@
   <!-- Scan-range sidebar -->
   <aside class="banks">
     <div class="banks-header">
-      <h2>Scan Ranges</h2>
-      <input bind:value={filter} placeholder="filter…" />
+      <h2>Band presets</h2>
+      <p class="banks-help">Select a band to tune the hardware window and start surveying.</p>
+      <input bind:value={filter} placeholder="Filter bands…" aria-label="Filter band presets" />
     </div>
     <div class="bank-groups">
       {#each groupedBanks as entry (entry.group)}
@@ -873,7 +855,7 @@
       {/each}
     </div>
     {#if scanRunning}
-      <button class="primary stop" onclick={stopScan}>■ Stop Scan</button>
+      <button class="primary stop" onclick={stopScan}>■ Stop survey</button>
     {/if}
     <section class="bookmark-section">
       <h3>Bookmarks</h3>
@@ -891,16 +873,17 @@
     {#if notice}<div class="ui-notice" role="status">{notice}</div>{/if}
     <div class="command-strip card">
       <div class="quick-modes">
-        <span class="strip-label">Listen or monitor</span>
+        <span class="strip-label">Quick bands</span>
         {#each quickModes as mode}
           <button class="quick" onclick={() => startQuickMode(mode.match)}>{mode.label}</button>
         {/each}
       </div>
       <div class="runtime-status">
-        <span class="status-pill" class:on={connected}>● SDR {connected ? 'online' : 'offline'}</span>
-        <span class="status-pill" class:on={scanRunning}>● Receiver {scanRunning ? 'active' : 'idle'}</span>
-        <span class="status-pill" class:on={eventConnection === 'open'}>● Data {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
-        <a href="#/settings" class="settings-link">Hardware</a>
+        <span class="status-pill" class:on={connected}>● Radio {connected ? 'online' : 'offline'}</span>
+        <span class="status-pill" class:on={spectrumLive}>● Spectrum {spectrumStatusLabel}</span>
+        <span class="status-pill" class:on={scanRunning}>● Survey {scanRunning ? 'running' : 'idle'}</span>
+        <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
+        <a href="#/settings" class="settings-link">Hardware setup</a>
       </div>
     </div>
     {#if !connected}
@@ -916,22 +899,39 @@
       </section>
     {/if}
     <div class="device-strip card">
-      <div>
+      <div class="device-name">
         <span class="dot" class:on={connected}></span>
         {deviceLabel}
       </div>
-      <div class="receiver-readout"><span>HARDWARE CENTER</span><strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Tuning…'}</strong><small>Moves the entire sampled RF window</small></div>
-      {#if availableSampleRates().length}<label class="span-select"><span>CAPTURE WINDOW</span><select value={sampleRateHz} onchange={setVisibleSpan} aria-label="SDR capture sample rate">{#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS</option>{/each}</select><small>Applied RF bandwidth: {appliedBandwidthHz > 0 ? fmtHz(appliedBandwidthHz) : 'reading…'}. Sample rate and analog bandwidth are different.</small></label>{/if}
-      <div class="vfo-summary">{vfos.length} VFO{vfos.length === 1 ? '' : 's'} active</div>
-      <div class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</div>
+      <div class="receiver-readout">
+        <span>Hardware center</span>
+        <strong>{displayedCenterHz > 0 ? fmtHz(displayedCenterHz) : 'Not tuned'}</strong>
+        <small>Shared RF window — panning moves what every client sees</small>
+      </div>
+      {#if availableSampleRates().length}
+        <label class="span-select">
+          <span>Capture span</span>
+          <select value={sampleRateHz} onchange={setVisibleSpan} aria-label="SDR capture sample rate">
+            {#each availableSampleRates() as rate}<option value={rate}>{rate / 1e6} MSPS</option>{/each}
+          </select>
+          <small>Applied bandwidth {appliedBandwidthHz > 0 ? fmtHz(appliedBandwidthHz) : 'reading…'} · sample rate ≠ analog bandwidth</small>
+        </label>
+      {/if}
+      <div class="device-meta">
+        <span class="vfo-summary">{vfos.length} listening VFO{vfos.length === 1 ? '' : 's'}</span>
+        <span class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</span>
+      </div>
     </div>
 
     <div class="spectrum-wrap card" class:stale={spectrumStale}>
       <div class="spectrum-heading">
-        <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumStale ? 'reconnecting…' : `${spectrumBins.length} bins · ${Math.max(0, nowMs - lastSpectrumAt)} ms old · ${renderFps} FPS · latest-only queue${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</small></h2>
+        <div class="spectrum-title-block">
+          <h2>Live spectrum</h2>
+          <p class="fft-status">{spectrumError || (spectrumStale ? 'Reconnecting to FFT stream…' : `${spectrumBins.length} bins · ${Math.max(0, nowMs - lastSpectrumAt)} ms old · ${renderFps} FPS${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</p>
+        </div>
         <div class="spectrum-tools" role="group" aria-label="Spectrum interaction">
-          <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Pick listening frequency</button>
-          <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Move capture window</button>
+          <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Tune VFO</button>
+          <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Pan window</button>
         </div>
       </div>
       <div class="center-controls">
@@ -940,18 +940,34 @@
         <button onclick={centerOnVfo} disabled={!vfos.length} title="Put VFO 0 in the middle of the visible spectrum">Center on VFO</button>
         <button onclick={() => panCenter(0.25)} aria-label="Move center right by one quarter of the visible span">¼ span →</button>
       </div>
-      <p class="interaction-help">{spectrumTool === 'vfo' ? 'Click a signal to move only the listening VFO inside the current RF window. Scroll to move the whole window.' : 'Click or drag to move the entire sampled RF window without changing the listening VFO.'}</p>
-      <canvas class:center-mode={spectrumTool === 'center'} bind:this={canvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)} aria-label={spectrumTool === 'center' ? 'Spectrum center control. Click or drag to change center frequency; use arrow keys for fine adjustment.' : 'Spectrum tuner. Click to tune VFO 0; scroll to pan center frequency; use arrow keys to fine tune.'} title={spectrumTool === 'center' ? 'Click or drag to move the receiver center' : 'Click to tune VFO 0; scroll to pan'}></canvas>
+      <p class="interaction-help">{spectrumTool === 'vfo' ? 'Click a peak to tune the listening VFO. Scroll or drag to pan the hardware window.' : 'Click or drag to pan the hardware window without moving the listening VFO.'}</p>
+      <canvas class:center-mode={spectrumTool === 'center'} use:bindSpectrumCanvas onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin="0" aria-valuemax={Math.max(1, sampleRateHz)} aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)} aria-label={spectrumTool === 'center' ? 'Spectrum center control. Click or drag to change center frequency; use arrow keys for fine adjustment.' : 'Spectrum tuner. Click to tune VFO 0; scroll to pan center frequency; use arrow keys to fine tune.'} title={spectrumTool === 'center' ? 'Click or drag to move the receiver center' : 'Click to tune VFO 0; scroll to pan'}></canvas>
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
-      <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history <small>{waterfallRenderer}</small></h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
-      <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} bind:this={waterfallCanvas} onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Scroll to pan the receiver center; select Move center to click or drag."></canvas>
+      <div class="waterfall-head">
+        <div class="waterfall-title-block">
+          <h2 class="waterfall-title">Waterfall</h2>
+          <p class="waterfall-sub">Time history of the FFT — newest row at the top</p>
+        </div>
+        <label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label>
+        <select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select>
+      </div>
+      <div class="waterfall-stage">
+        <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} use:bindWaterfallCanvas onclick={tuneFromSpectrum} onwheel={panSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Scroll to pan the receiver center; select Pan window to click or drag."></canvas>
+        {#if !connected}
+          <div class="waterfall-empty">Connect an SDR to see the waterfall.</div>
+        {:else if spectrumBins.length === 0}
+          <div class="waterfall-empty">Waiting for FFT frames from the receiver…</div>
+        {:else if spectrumStale}
+          <div class="waterfall-empty warn">Spectrum stream paused — showing last known frames.</div>
+        {/if}
+      </div>
       {#if scanRunning && activeBank}
         <div class="scan-progress" role="status"><span><b>Scanning {activeBank.name}</b><small>{fmtHz(activeBank.start_hz)} – {fmtHz(activeBank.end_hz)}</small></span><div class="scan-track"><i style={`width:${scanProgress}%`}></i></div><strong>{scanProgress.toFixed(0)}%</strong></div>
       {/if}
     </div>
 
     <section class="signal-history card">
-      <div class="history-head"><div><h2>Signals found</h2><small>The scanner holds each hit, assigns a VFO slot, and writes it to the signal log.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
+      <div class="history-head"><div><h2>Found signals</h2><small>Scanner hits assigned to VFO slots during the current survey.</small></div><button class="mini" onclick={async () => (signalHistory = await Api.signalEvents(100))}>Refresh</button></div>
       {#if foundSignals.length === 0}
         <div class="history-empty">No signals found in this survey yet.</div>
       {:else}
@@ -1056,7 +1072,8 @@
     border-radius: 8px;
     padding: 8px;
   }
-  .banks-header h2 { margin: 0 0 6px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .banks-header h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .banks-help { margin: 0 0 8px; color: var(--fg-dim); font-size: 11px; line-height: 1.35; }
   .bank-groups { overflow-y: auto; flex: 1; }
   .bank-group h3 { margin: 10px 4px 4px; color: var(--accent-2); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
   .bank-group ul { list-style: none; margin: 0; padding: 0; }
@@ -1090,7 +1107,7 @@
   .setup-card p { margin:3px 0 0; color:var(--fg-dim); font-size:12px; }
   .setup-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .setup-actions a { display:inline-flex; align-items:center; min-height:30px; padding:6px 12px; border-radius:6px; text-decoration:none; }
-  .command-strip { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 4px; background: #13294b; }
+  .command-strip { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; background: var(--bg-elev-2); border: 1px solid var(--line); }
   .quick-modes, .runtime-status { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
   .strip-label { color: var(--fg-dim); text-transform: uppercase; font: 10px var(--mono); margin-right: 4px; }
   .quick { padding: 4px 7px; font-size: 11px; border-radius: 3px; }
@@ -1099,7 +1116,9 @@
   .settings-link { color: var(--fg); text-decoration: none; font-size: 12px; border-left: 1px solid var(--line-strong); padding-left: 8px; }
 
   .center { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }
-  .device-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 12px; font-size: 13px; }
+  .device-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 12px; font-size: 13px; flex-wrap: wrap; }
+  .device-name { display: flex; align-items: center; min-width: 140px; }
+  .device-meta { display: flex; flex-direction: column; gap: 2px; align-items: flex-end; text-align: right; }
   .receiver-readout { display: flex; flex-direction:column; align-items:flex-start; gap: 2px; font-family: var(--mono); }
   .receiver-readout span, .receiver-readout small { color: var(--fg-dim); font-size: 10px; }
   .receiver-readout strong { color: var(--accent); font-size: 14px; }
@@ -1119,8 +1138,9 @@
   .spectrum-wrap canvas { cursor:crosshair; }
   .spectrum-wrap canvas.center-mode { cursor:grab; touch-action:none; }
   .spectrum-wrap canvas.center-mode:active { cursor:grabbing; }
-  .spectrum-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-  .spectrum-heading h2 { margin:0; }
+  .spectrum-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .spectrum-title-block h2 { margin:0; }
+  .spectrum-title-block .fft-status { margin:2px 0 0; color:var(--fg-dim); font:10px var(--mono); }
   .spectrum-tools { display:flex; gap:3px; padding:2px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
   .spectrum-tools button { min-height:28px; padding:4px 9px; border:0; font-size:11px; }
   .spectrum-tools button.active { color:#03120f; background:var(--accent); }
@@ -1134,11 +1154,15 @@
   .frequency-entry b { padding:0 9px; color:var(--fg-dim); font:11px var(--mono); }
   .interaction-help { margin:4px 0 7px; color:var(--fg-dim); font-size:11px; }
   .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
-  .waterfall-title { margin-top: 6px !important; }
-  .waterfall-head { display:flex; align-items:center; gap:8px; }
-  .waterfall-head h2 { flex:1; }
+  .waterfall-title { margin: 0 !important; }
+  .waterfall-title-block .waterfall-sub { margin:2px 0 0; color:var(--fg-dim); font:10px var(--mono); }
+  .waterfall-head { display:flex; align-items:flex-end; gap:8px; margin-top:8px; }
+  .waterfall-head .waterfall-title-block { flex:1; }
   .waterfall-head label, .waterfall-head select { font:10px var(--mono); color:var(--fg-dim); }
   .waterfall-head input { width:70px; vertical-align:middle; }
+  .waterfall-stage { position:relative; }
+  .waterfall-empty { position:absolute; inset:0; display:grid; place-items:center; padding:16px; text-align:center; color:var(--fg-dim); background:rgb(7 12 18 / 72%); font:12px var(--sans); pointer-events:none; border-radius:4px; }
+  .waterfall-empty.warn { color:var(--warn); }
   .spectrum-wrap canvas.waterfall { height: clamp(320px, 48vh, 620px); image-rendering: pixelated; }
   .scan-progress { display:grid; grid-template-columns:auto 1fr 38px; align-items:center; gap:10px; margin-top:8px; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
   .scan-progress > span { display:flex; flex-direction:column; font-size:11px; }
@@ -1181,7 +1205,7 @@
   .strength-val { font-family: var(--mono); font-size: 10px; color: var(--fg-dim); width: 48px; text-align: right; }
 
   .log { grid-column: 1 / -1; min-height: 0; padding: 0; overflow: hidden; border-radius: 4px; }
-  .dock-tabs { display: flex; align-items: center; gap: 3px; padding: 4px 8px; background: #13294b; border-bottom: 1px solid var(--line-strong); }
+  .dock-tabs { display: flex; align-items: center; gap: 3px; padding: 4px 8px; background: var(--bg-elev-2); border-bottom: 1px solid var(--line-strong); }
   .dock-tab { border: 0; background: transparent; color: var(--fg-dim); padding: 4px 9px; font-size: 11px; border-radius: 3px; }
   .dock-tab.active { color: var(--fg); background: var(--bg-elev-2); }
   .dock-tab b { color: var(--accent); font: 10px var(--mono); }

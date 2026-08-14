@@ -18,7 +18,7 @@
 
   const primaryLinks = [
     ['#/', 'Receiver'], ['#/monitor', 'Monitor'], ['#/messages', 'Activity'],
-    ['#/recording', 'Recordings'], ['#/settings', 'Hardware']
+    ['#/recording', 'Recordings'], ['#/settings', 'Device']
   ];
   const moreLinks = [
     ['#/signal-id', 'Signal identification'], ['#/occupancy', 'Band occupancy'],
