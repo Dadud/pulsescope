@@ -710,18 +710,39 @@ async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
     let status = s.0.device.status();
     let capabilities = s.0.device.capabilities();
     let active_id = stable_device_id(&status, &capabilities);
-    let discovered = crate::device::DeviceLayer::discover().into_iter().map(|device| {
-        let is_active = status.connected && (device.driver == status.driver || device.key == s.0.config.read().device.last_device_key);
-        json!({
-            "id": if is_active { active_id.clone() } else { device.hardware_key.clone() },
+    // Discovery is intentionally best-effort: some vendor Soapy modules can
+    // open a device without being enumerable by SoapySDRUtil.  The receiver's
+    // live status is authoritative, so always publish it first.  Previously
+    // this endpoint relabeled a running SDRplay as the fallback mock source
+    // whenever discovery only returned `driver=mock`.
+    let mut discovered = Vec::new();
+    if status.connected {
+        discovered.push(json!({
+            "id": active_id.clone(),
+            "driver": status.driver,
+            "label": status.label,
+            "connection": capabilities.identity.connection,
+            "active": true,
+            "lifecycle": serde_json::to_value(status.lifecycle).unwrap_or(json!("disconnected")),
+            "certification": if status.driver == "sdrplay" { "hardware_verified" } else { "compatibility" }
+        }));
+    }
+    for device in crate::device::DeviceLayer::discover() {
+        // Do not add a duplicate active entry and do not advertise the mock
+        // fallback beside a real, active radio as if it were the selected one.
+        if status.connected && (device.driver == status.driver || device.driver == "mock") {
+            continue;
+        }
+        discovered.push(json!({
+            "id": device.hardware_key,
             "driver": device.driver,
             "label": device.label,
             "connection": "local_usb",
-            "active": is_active,
-            "lifecycle": if is_active { serde_json::to_value(status.lifecycle).unwrap_or(json!("disconnected")) } else { json!("detected") },
-            "certification": if is_active && status.driver == "sdrplay" { "hardware_verified" } else { "compatibility" }
-        })
-    }).collect::<Vec<_>>();
+            "active": false,
+            "lifecycle": "detected",
+            "certification": "compatibility"
+        }));
+    }
     Json(json!({"contract_version": 2, "active_device_id": active_id, "devices": discovered}))
 }
 
