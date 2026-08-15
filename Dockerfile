@@ -60,16 +60,19 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        direwolf \
         libasound2 \
         libhidapi-libusb0 \
         libsoapysdr0.8 \
         libssl3 \
         libudev1 \
         libusb-1.0-0 \
+        multimon-ng \
+        rtl-433 \
         soapysdr-module-all \
         soapysdr-tools \
-        wsjtx \
         tini \
+        wsjtx \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 500 pulsescope \

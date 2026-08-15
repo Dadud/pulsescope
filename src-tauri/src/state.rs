@@ -64,7 +64,11 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Arc<Self> {
         let data_dir = crate::state::AppState::default_data_dir();
-        let config = Config::load(&data_dir);
+        let mut config = Config::load(&data_dir);
+        if crate::depmanager::bootstrap_discovered_decoder_paths(&mut config, &data_dir) {
+            tracing::info!("configured decoder paths from system discovery");
+            let _ = config.save(&data_dir);
+        }
         let decoder_scheduler =
             DecoderScheduler::with_trusted_keys(DecoderScheduler::load_trusted_keys(&data_dir));
         let db = Db::open(&data_dir.join("pulsescope.db")).expect("failed to open pulsescope.db");

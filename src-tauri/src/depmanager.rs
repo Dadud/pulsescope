@@ -825,6 +825,37 @@ fn find_decoder(
     (false, None, "not_found".into())
 }
 
+pub fn bootstrap_discovered_decoder_paths(config: &mut Config, data_dir: &Path) -> bool {
+    let mut updated = false;
+    for status in scan_all(data_dir) {
+        if !status.found {
+            continue;
+        }
+        let Some(path) = status.path.as_ref().filter(|path| !path.trim().is_empty()) else {
+            continue;
+        };
+        let needs_update = configured_decoder_path(config, &status.name)
+            .is_some_and(|current| !Path::new(current.trim()).is_file());
+        if needs_update && apply_decoder_path(config, &status.name, path) {
+            updated = true;
+        }
+    }
+    updated
+}
+
+fn configured_decoder_path<'a>(config: &'a Config, decoder_name: &str) -> Option<&'a str> {
+    match decoder_name {
+        "rtl_433" => Some(&config.rtl433.path),
+        "multimon-ng" => Some(&config.digital_decoder.multimon_path),
+        "acarsdec" => Some(&config.acarsdec.path),
+        "direwolf" => Some(&config.aprs.path),
+        "dumpvdl2" => Some(&config.vdl2.path),
+        "dsd-fme" | "dsd-neo" => Some(&config.dsd.dsdneo_path),
+        "dump978" | "dump978-fa" => Some(&config.dump978.path),
+        _ => None,
+    }
+}
+
 /// Write discovered decoder executables into config path fields.
 pub fn configure_decoder_paths(config: &mut Config, data_dir: &Path) -> Vec<ConfiguredDecoder> {
     let mut results = Vec::new();
@@ -1131,6 +1162,26 @@ mod tests {
         ] {
             assert!(ids.contains(&required), "missing adaptation for {required}");
         }
+    }
+
+    #[test]
+    fn bootstrap_updates_non_file_config_paths() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "pulsescope-depmanager-bootstrap-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let decoder = manifest_for_decoder("multimon-ng").expect("multimon-ng manifest");
+        let subdir = decoder.extract_subdir.expect("multimon extract subdir");
+        let exe_path = data_dir.join("decoders").join(subdir).join(decoder.exe_name);
+        touch_executable(&exe_path);
+
+        let mut config = Config::default();
+        assert!(!Path::new(&config.digital_decoder.multimon_path).is_file());
+        assert!(bootstrap_discovered_decoder_paths(&mut config, &data_dir));
+        assert_eq!(config.digital_decoder.multimon_path, exe_path.to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

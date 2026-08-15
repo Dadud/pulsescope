@@ -35,6 +35,14 @@ else
   fail 'SoapySDRUtil is missing'
 fi
 
+for decoder_bin in rtl_433 multimon-ng direwolf jt9 wsprd; do
+  if command -v "$decoder_bin" >/dev/null 2>&1; then
+    pass "decoder binary $decoder_bin is installed"
+  else
+    warn "decoder binary $decoder_bin is missing"
+  fi
+done
+
 if [ -d /opt/pulsescope/drivers ]; then pass 'persistent driver volume is mounted'; else warn 'persistent proprietary-driver volume is not mounted'; fi
 
 if [ "$failures" -gt 0 ]; then

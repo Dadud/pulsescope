@@ -4,6 +4,8 @@
 
 The receiver laptop does not need to compile PulseScope. Build on a faster Linux Docker host, transfer the immutable image, then run the same Compose file:
 
+The runtime image ships common decoder sidecars from Debian: `rtl-433`, `multimon-ng`, `direwolf`, and WSJT-X (`jt9`, `wsprd`). On first boot PulseScope writes discovered absolute paths into `config.toml` so feature packs show installed executables without manual configuration.
+
 ```sh
 docker build -t pulsescope:VERSION .
 docker save pulsescope:VERSION | gzip > pulsescope-VERSION.tar.gz
