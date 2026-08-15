@@ -1236,9 +1236,42 @@ async fn profile_apply_v2(State(s): State<ApiState>, Path(id): Path<String>) -> 
             .into_response();
     }
     let status = s.0.device.status();
+    if let Some(deemphasis_us) = profile
+        .deemphasis_us
+        .filter(|value| *value == 50 || *value == 75)
+    {
+        {
+            let mut config = s.0.config.write();
+            config.demodulator.de_emphasis_us = deemphasis_us;
+            let _ = config.save(&s.0.data_dir);
+        }
+        if let Some(handle) = s.0.scanner.read().as_ref() {
+            handle.state.lock().wfm_deemphasis_us = deemphasis_us;
+        }
+    }
+    if let Some(handle) = s.0.scanner.read().as_ref() {
+        let _ = handle
+            .cmd_tx
+            .send(crate::scanner::ScannerCommand::SetVfoMode {
+                id: 0,
+                mode: profile.mode.clone(),
+            });
+        let _ = handle
+            .cmd_tx
+            .send(crate::scanner::ScannerCommand::SetVfoFrequency {
+                id: 0,
+                frequency_hz: profile.center_frequency_hz,
+            });
+    }
     (
         StatusCode::OK,
-        Json(json!({"ok":true,"profile_id":id,"actual":status,"default_mode":profile.mode})),
+        Json(json!({
+            "ok":true,
+            "profile_id":id,
+            "actual":status,
+            "default_mode":profile.mode,
+            "deemphasis_us": profile.deemphasis_us
+        })),
     )
         .into_response()
 }
@@ -3463,16 +3496,25 @@ async fn scan_ctcss(State(s): State<ApiState>) -> Json<Value> {
     let count = (sample_rate as f64 * 0.3) as usize;
     match s.0.device.read_iq(count) {
         Ok(iq) if iq.len() > 1024 => {
-            use crate::demod::{demodulate, detect_ctcss, detect_dcs, Mode};
-            let mut previous = None;
-            let audio = demodulate(Mode::Nfm, &iq, &mut previous);
+            let audio = {
+                use crate::demod::{demodulate, mix_down, Mode};
+                let mut previous = None;
+                let mut phase = 0.0;
+                let offset = vfos
+                    .first()
+                    .map(|vfo| vfo.frequency_hz as f64 - status.center_freq_hz as f64)
+                    .unwrap_or(0.0);
+                let baseband = mix_down(&iq, offset, sample_rate, &mut phase);
+                demodulate(Mode::Nfm, &baseband, &mut previous)
+            };
             let audio_rate = sample_rate as f32;
+            use crate::demod::{detect_ctcss, detect_dcs};
             let ctcss = detect_ctcss(&audio, audio_rate);
             let dcs = detect_dcs(&audio, audio_rate);
             Json(json!({
                 "available": true,
                 "vfo_id": vfo_id,
-                "frequency_hz": status.center_freq_hz,
+                "frequency_hz": vfos.first().map(|vfo| vfo.frequency_hz).unwrap_or(status.center_freq_hz),
                 "ctcss": ctcss.map(|(tone, conf)| json!({"tone_hz": (tone * 10.0).round() / 10.0, "confidence": conf})),
                 "dcs": dcs,
                 "samples_analyzed": audio.len(),
@@ -3898,9 +3940,15 @@ async fn transcription_stop(State(s): State<ApiState>) -> impl IntoResponse {
 }
 async fn transcription_status(State(s): State<ApiState>) -> impl IntoResponse {
     let c = s.0.config.read();
-    Json(
-        json!({"running":c.transcription.enabled,"enabled":c.transcription.enabled,"engine":c.transcription.engine,"model":c.transcription.model}),
-    )
+    Json(json!({
+        "available": false,
+        "running": false,
+        "enabled": false,
+        "engine": c.transcription.engine,
+        "model": c.transcription.model,
+        "status": "planned",
+        "missing_gate": "Speech transcription transport is not implemented"
+    }))
 }
 async fn transcription_list() -> impl IntoResponse {
     Json(json!([]))
@@ -4481,9 +4529,12 @@ async fn vfo_rds(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoRes
     let count = (status.sample_rate as f64 * 0.5) as usize;
     match s.0.device.read_iq(count) {
         Ok(iq) if iq.len() > 4096 => {
-            use crate::demod::{decode_rds, demodulate, Mode};
+            use crate::demod::{decode_rds, demodulate, mix_down, Mode};
             let mut previous = None;
-            let multiplex = demodulate(Mode::Wfm, &iq, &mut previous);
+            let mut phase = 0.0;
+            let offset = v.frequency_hz as f64 - status.center_freq_hz as f64;
+            let baseband = mix_down(&iq, offset, status.sample_rate, &mut phase);
+            let multiplex = demodulate(Mode::Wfm, &baseband, &mut previous);
             let audio_rate = status.sample_rate as f32;
             match decode_rds(&multiplex, audio_rate) {
                 Some(rds) if rds.groups_found > 0 => Json(json!({
@@ -4523,57 +4574,37 @@ async fn signal_events(State(s): State<ApiState>, Query(q): Query<LimitQ>) -> im
 
 async fn spectrum_occupancy(State(s): State<ApiState>) -> impl IntoResponse {
     let snapshot = s.0.scanner.read().as_ref().map(|h| h.state.lock().clone());
-    let Some(runtime) = snapshot else {
-        return Json(
-            serde_json::to_value(s.0.db.recent_occupancy(512).unwrap_or_default()).unwrap(),
-        );
-    };
-    let Some(range_name) = runtime.active_range else {
-        return Json(
-            serde_json::to_value(s.0.db.recent_occupancy(512).unwrap_or_default()).unwrap(),
-        );
-    };
-    let range =
-        s.0.config
-            .read()
-            .scan_ranges
-            .iter()
-            .find(|r| r.name == range_name)
-            .cloned();
-    let Some(range) = range else {
-        return Json(json!([]));
-    };
-    if runtime.latest_spectrum.is_empty() {
-        return Json(json!([]));
-    }
-    let bucket_count = runtime.latest_spectrum.len().min(128);
-    let chunk = (runtime.latest_spectrum.len() / bucket_count).max(1);
-    let span = range.end_hz.saturating_sub(range.start_hz);
-    let rows: Vec<crate::db::SpectrumOccupancy> = runtime
-        .latest_spectrum
-        .chunks(chunk)
-        .enumerate()
-        .map(|(i, bins)| {
-            let avg = bins.iter().sum::<f32>() / bins.len() as f32;
-            let peak = bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let freq = range
-                .start_hz
-                .saturating_add(span.saturating_mul(i as u64) / bucket_count as u64);
-            crate::db::SpectrumOccupancy {
-                frequency_bucket_hz: freq,
-                time_bucket_15min: crate::scanner::now_ms() / 900000,
-                avg_power_db: avg,
-                peak_power_db: peak,
-                avg_above_floor_db: avg + 120.0,
-                sample_count: bins.len() as i64,
-                noise_floor_db: -120.0,
+    if let Some(runtime) = snapshot {
+        if !runtime.latest_spectrum.is_empty() {
+            let status = s.0.device.status();
+            let rows = crate::scanner::occupancy_from_spectrum(
+                &runtime.latest_spectrum,
+                status.center_freq_hz.max(1),
+                status.sample_rate.max(1),
+                runtime.noise_floor_db,
+                crate::scanner::now_ms(),
+            );
+            for row in &rows {
+                let _ = s.0.db.upsert_occupancy(row);
             }
-        })
-        .collect();
-    for row in &rows {
-        let _ = s.0.db.upsert_occupancy(row);
+        }
     }
-    Json(serde_json::to_value(rows).unwrap())
+    let stored = s.0.db.recent_occupancy(512).unwrap_or_default();
+    Json(json!(stored
+        .iter()
+        .map(|row| {
+            json!({
+                "frequency_bucket_hz": row.frequency_bucket_hz,
+                "time_bucket_15min": row.time_bucket_15min,
+                "avg_power_db": row.avg_power_db,
+                "peak_power_db": row.peak_power_db,
+                "avg_above_floor_db": row.avg_above_floor_db,
+                "sample_count": row.sample_count,
+                "noise_floor_db": row.noise_floor_db,
+                "occupancy": crate::scanner::occupancy_fraction(row),
+            })
+        })
+        .collect::<Vec<_>>()))
 }
 
 #[derive(Deserialize)]

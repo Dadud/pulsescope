@@ -71,7 +71,7 @@
     <article class="card summary"><span>Receiver</span><strong>{stateLabel()}</strong><small>{device?.label ?? device?.name ?? device?.driver ?? 'No hardware label'}</small></article>
     <article class="card summary"><span>Active VFOs</span><strong>{vfos.length}</strong><small>{vfos.filter((v) => !v.muted).length} listening</small></article>
     <article class="card summary"><span>Recent signals</span><strong>{signals.length}</strong><small>latest {age(signals[0]?.timestamp_ms)}</small></article>
-    <article class="card summary"><span>Decoder jobs</span><strong>{jobs.length}</strong><small>{jobs.filter((j) => ['running','ready','active'].includes(String(j.status ?? j.state).toLowerCase())).length} active</small></article>
+    <article class="card summary"><span>Decoder processes</span><strong>{jobs.length}</strong><small>{jobs.filter((j) => ['running','ready','active'].includes(String(j.status ?? j.state).toLowerCase())).length} active · scheduled jobs are under More</small></article>
   </div>
 
   {#if error}<div class="callout" role="status">{error}</div>{/if}

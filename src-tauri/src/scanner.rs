@@ -74,6 +74,9 @@ pub struct ScannerRuntimeState {
     /// Smoothed median noise floor for the current FFT frame (dBFS).
     #[serde(default)]
     pub noise_floor_db: f32,
+    /// Live WFM de-emphasis applied by the audio worker (µs).
+    #[serde(default)]
+    pub wfm_deemphasis_us: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -314,6 +317,44 @@ fn stable_channel_frequency(range: &ScanRange, detected_hz: u64, fallback_step_h
         .clamp(range.start_hz, range.end_hz)
 }
 
+pub fn occupancy_from_spectrum(
+    bins: &[f32],
+    center_hz: u64,
+    sample_rate_hz: u32,
+    noise_floor_db: f32,
+    now_ms: i64,
+) -> Vec<crate::db::SpectrumOccupancy> {
+    if bins.is_empty() || sample_rate_hz == 0 {
+        return Vec::new();
+    }
+    let bucket_count = bins.len().clamp(1, 64);
+    let chunk = (bins.len() / bucket_count).max(1);
+    let start_hz = center_hz.saturating_sub(sample_rate_hz as u64 / 2);
+    bins.chunks(chunk)
+        .enumerate()
+        .map(|(index, chunk_bins)| {
+            let avg = chunk_bins.iter().sum::<f32>() / chunk_bins.len() as f32;
+            let peak = chunk_bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let freq = start_hz.saturating_add(
+                (sample_rate_hz as u64).saturating_mul(index as u64) / bucket_count as u64,
+            );
+            crate::db::SpectrumOccupancy {
+                frequency_bucket_hz: freq,
+                time_bucket_15min: now_ms / 900_000,
+                avg_power_db: avg,
+                peak_power_db: peak,
+                avg_above_floor_db: avg - noise_floor_db,
+                sample_count: chunk_bins.len() as i64,
+                noise_floor_db,
+            }
+        })
+        .collect()
+}
+
+pub fn occupancy_fraction(row: &crate::db::SpectrumOccupancy) -> f32 {
+    ((row.avg_power_db - row.noise_floor_db) / 40.0).clamp(0.0, 1.0)
+}
+
 /// Dedicated audio consumer; keeps demodulation and CPAL feeding off the FFT loop.
 struct AudioWorker {
     stop: Arc<AtomicBool>,
@@ -337,6 +378,8 @@ impl AudioWorker {
             let mut deemphasis_states = Vec::<f32>::new();
             let mut dc_states = Vec::<f32>::new();
             let mut agc_gains = Vec::<f32>::new();
+            let mut sam_phases = Vec::<f64>::new();
+            let mut cw_phases = Vec::<f64>::new();
             let mut resampler = SincResampler::default();
             let mut stereo_left_resampler = SincResampler::default();
             let mut stereo_right_resampler = SincResampler::default();
@@ -351,7 +394,15 @@ impl AudioWorker {
                     std::thread::sleep(Duration::from_millis(1));
                     continue;
                 };
-                let vfos = state.lock().vfo_states.clone();
+                let (vfos, deemph_us) = {
+                    let runtime = state.lock();
+                    let us = if runtime.wfm_deemphasis_us == 0 {
+                        wfm_deemphasis_us
+                    } else {
+                        runtime.wfm_deemphasis_us
+                    };
+                    (runtime.vfo_states.clone(), us)
+                };
                 if previous.len() != vfos.len() {
                     previous = vec![None; vfos.len()];
                     phases = vec![0.0; vfos.len()];
@@ -360,6 +411,8 @@ impl AudioWorker {
                     deemphasis_states = vec![0.0; vfos.len()];
                     dc_states = vec![0.0; vfos.len()];
                     agc_gains = vec![1.0; vfos.len()];
+                    sam_phases = vec![0.0; vfos.len()];
+                    cw_phases = vec![0.0; vfos.len()];
                     stereo_states = vec![WfmStereoState::default(); vfos.len()];
                 }
                 let predecimation = (sample_rate / 500_000).max(1) as usize;
@@ -380,6 +433,7 @@ impl AudioWorker {
                     let cutoff_hz = match mode {
                         Mode::Wfm => 100_000.0,
                         Mode::Nfm => 12_500.0,
+                        Mode::Cw => 800.0,
                         _ => 5_000.0,
                     };
                     let baseband = low_pass_complex(
@@ -389,12 +443,21 @@ impl AudioWorker {
                         &mut filter_states[idx],
                     );
                     let baseband = decimate_complex_average(&baseband, predecimation);
-                    let multiplex = demodulate(mode, &baseband, &mut previous[idx]);
+                    let multiplex = match mode {
+                        Mode::Sam => crate::demod::demodulate_sam(&baseband, &mut sam_phases[idx]),
+                        Mode::Cw => crate::demod::demodulate_cw(
+                            &baseband,
+                            effective_rate,
+                            700.0,
+                            &mut cw_phases[idx],
+                        ),
+                        other => demodulate(other, &baseband, &mut previous[idx]),
+                    };
                     if mode == Mode::Wfm {
                         stereo_candidate = Some(decode_wfm_stereo(
                             &multiplex,
                             effective_rate,
-                            wfm_deemphasis_us as f32,
+                            deemph_us as f32,
                             &mut stereo_states[idx],
                         ));
                     }
@@ -402,6 +465,7 @@ impl AudioWorker {
                     let audio_cutoff_hz = match mode {
                         Mode::Wfm => 15_000.0,
                         Mode::Nfm => 5_000.0,
+                        Mode::Cw => 1_200.0,
                         _ => 3_400.0,
                     };
                     pcm = low_pass_real(
@@ -414,7 +478,7 @@ impl AudioWorker {
                         deemphasis(
                             &mut pcm,
                             effective_rate,
-                            wfm_deemphasis_us as f32,
+                            deemph_us as f32,
                             &mut deemphasis_states[idx],
                         );
                     }
@@ -595,6 +659,10 @@ async fn scanner_loop(
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
     let mut force_sweep = false;
+    let mut last_occupancy_at = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(Instant::now);
+    state.lock().wfm_deemphasis_us = wfm_deemphasis_us;
 
     loop {
         // Drain commands
@@ -616,6 +684,7 @@ async fn scanner_loop(
                         runtime.scan_locked = false;
                         runtime.holding = false;
                         runtime.started_ms = now_ms();
+                        runtime.wfm_deemphasis_us = wfm_deemphasis_us;
                     }
                     next_sweep_at = Instant::now() + settle_dwell(&range);
                     active_range = Some(range);
@@ -1065,6 +1134,19 @@ async fn scanner_loop(
             bins_dbfs: bins.clone(),
         });
         let _ = events_tx.send(ScannerEvent::VfoStates(state.lock().vfo_states.clone()));
+        if last_occupancy_at.elapsed() >= Duration::from_secs(2) {
+            let rows = occupancy_from_spectrum(
+                &bins,
+                status.center_freq_hz,
+                status.sample_rate,
+                noise_floor,
+                now_ms(),
+            );
+            for row in &rows {
+                let _ = db.upsert_occupancy(row);
+            }
+            last_occupancy_at = Instant::now();
+        }
         let _ = events_tx.send(ScannerEvent::Spectrum {
             range: range_name,
             bins,
@@ -1760,6 +1842,16 @@ mod scan_window_tests {
     }
 
     #[test]
+    fn occupancy_buckets_use_the_capture_window_not_the_whole_bank() {
+        let bins = vec![-90.0f32; 64];
+        let rows = occupancy_from_spectrum(&bins, 100_000_000, 2_000_000, -100.0, 1_800_000);
+        assert!(!rows.is_empty());
+        assert!(rows[0].frequency_bucket_hz >= 99_000_000);
+        assert!(rows[0].frequency_bucket_hz < 100_000_000);
+        assert!((occupancy_fraction(&rows[0]) - 0.25).abs() < 0.01);
+    }
+
+    #[test]
     fn api_documents_scan_operator_routes() {
         let docs = include_str!("../../docs/API.md");
         for route in [
@@ -1769,6 +1861,8 @@ mod scan_window_tests {
             "/scan/unlock",
             "/scan/skip",
             "/scan/lockout",
+            "/vfo/:id/rds",
+            "/scan/ctcss",
         ] {
             assert!(docs.contains(route), "API.md must document {route}");
         }

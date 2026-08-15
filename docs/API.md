@@ -114,7 +114,9 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | POST   | `/vfo/:id/volume`          | `{ id, value }`   |
 | POST   | `/vfo/:id/audio_agc`       | `{ id, on }`      |
 | POST   | `/vfo/:id/identify`        | — signal-ID       |
+| GET    | `/vfo/:id/rds`             | — PI/PS for a WFM VFO |
 | GET    | `/vfo/diagnostics`         | — per-VFO stats   |
+| GET    | `/scan/ctcss`              | — CTCSS/DCS on the active VFO |
 
 ## Spectrum / signal ID
 
@@ -210,10 +212,10 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET    | `/iq_recording/status`            |
 | GET    | `/recordings/annotations`         |
 | POST   | `/recordings/annotations`         |
-| POST   | `/transcription/start`            |
-| POST   | `/transcription/stop`             |
-| GET    | `/transcription/status`           |
-| GET    | `/transcription/transcripts`      |
+| POST   | `/transcription/start`            | not implemented — returns `available: false` |
+| POST   | `/transcription/stop`             | —                            |
+| GET    | `/transcription/status`           | `available: false` until a transport exists |
+| GET    | `/transcription/transcripts`      | —                            |
 
 ## Cases
 

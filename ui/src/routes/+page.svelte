@@ -121,6 +121,7 @@
   let scanWorkspaceOpen = $state(true);
   let scanLocked = $state(false);
   let scanHolding = $state(false);
+  let vfoIdentity = $state<Record<number, string>>({});
 
   const VOICE_STARTER_BANDS = [
     'FM Broadcast',
@@ -1125,10 +1126,26 @@
 
   async function identifyVfo(id: number) {
     try {
-      const result = await Api.vfoIdentify(id);
-      notice = result?.available === false ? result.reason : `VFO ${id} identification requested`;
+      const result: any = await Api.vfoIdentify(id);
+      if (result?.result === 'unknown' || result?.error) {
+        notice = result.error ?? 'VFO not found';
+      } else {
+        const family = String(result.family || result.classification || 'unknown');
+        const decoder = String(result.decoder || 'none');
+        const confidence = Number(result.confidence ?? 0);
+        const summary = String(result.decode_summary || result.action || '').trim();
+        const features = Array.isArray(result.features) ? result.features.filter(Boolean).slice(0, 3).join(' · ') : '';
+        const line = `${family} · ${decoder}${confidence ? ` (${Math.round(confidence * 100)}%)` : ''}${summary ? ` · ${summary}` : ''}${features ? ` · ${features}` : ''}`;
+        vfoIdentity = { ...vfoIdentity, [id]: line };
+        notice = `VFO ${id}: ${line}`;
+      }
     } catch (e) { notice = String(e); }
-    setTimeout(() => (notice = ''), 3500);
+    setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 5000);
+  }
+
+  function rdsForVfo(vfo: VfoState) {
+    const bandwidth = 150_000;
+    return messages.find((message) => message.protocol.toLowerCase() === 'rds' && Math.abs(Number(message.frequency_hz) - vfo.frequency_hz) <= bandwidth);
   }
 
   function exportMessages() {
@@ -1660,10 +1677,16 @@
           <div class="vfo-controls">
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
             <select aria-label="VFO {v.id} mode" value={v.mode} onchange={(e) => setVfoMode(v.id, e)}>
-              <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="lsb">LSB</option><option value="usb">USB</option>
+              <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="sam">SAM</option><option value="lsb">LSB</option><option value="usb">USB</option><option value="cw">CW</option>
             </select>
           </div>
           <div class="vfo-mode">{v.mode.toUpperCase()} · VFO {v.id}</div>
+          {#if rdsForVfo(v)}
+            <div class="vfo-meta">RDS {rdsForVfo(v)?.address || 'PI'} · {rdsForVfo(v)?.content || 'PS pending'}</div>
+          {/if}
+          {#if vfoIdentity[v.id]}
+            <div class="vfo-meta">{vfoIdentity[v.id]}</div>
+          {/if}
           <div class="vfo-signal-head">
             <span class="signal-dot" class:on={v.squelch_open}></span>
             <span class="squelch-badge" class:open={v.squelch_open}>{v.squelch_open ? 'VOICE' : 'quiet'}</span>
@@ -1709,7 +1732,7 @@
       <button class="dock-tab" class:active={dockFilter === 'sensor'} onclick={() => (dockFilter = 'sensor')}>Sensors</button>
       <button class="dock-tab" class:active={dockFilter === 'air'} onclick={() => (dockFilter = 'air')}>Aircraft</button>
       <button class="dock-tab" class:active={dockFilter === 'ais'} onclick={() => (dockFilter = 'ais')}>AIS</button>
-      <button class="dock-tab" class:active={dockFilter === 'aprs'} onclick={() => (dockFilter = 'aprs')}>APRS</button>
+      <button class="dock-tab" class:active={dockFilter === 'rds'} onclick={() => (dockFilter = 'rds')}>RDS</button>
       <button class="dock-tab" class:active={dockFilter === 'lora'} onclick={() => (dockFilter = 'lora')}>LoRa</button>
     </div>
     <div class="dock-toolbar"><input bind:value={messageSearch} placeholder="Search decoded messages…" /><span class="dock-count">{visibleMessages.length} shown</span><button onclick={exportMessages} disabled={visibleMessages.length === 0}>Export CSV</button><button onclick={() => (messages = [])}>Clear</button></div>
@@ -2025,6 +2048,7 @@
   .vfo-offset { color:var(--fg-dim); font:9px var(--mono); }
   .vfo-lock { align-self:flex-start; padding:2px 5px; border:1px solid var(--ok); border-radius:3px; color:var(--ok); background:rgb(34 197 94 / 10%); font:700 9px var(--mono); }
   .vfo-mode { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .vfo-meta { font: 11px var(--mono); color: var(--accent-2); line-height: 1.35; }
   .vfo-controls { display: flex; gap: 4px; }
   .vfo-actions { display: flex; gap: 3px; flex-wrap: wrap; }
   .vfo-signal-head { display: flex; align-items: center; gap: 5px; color: var(--fg-dim); font: 10px var(--mono); }

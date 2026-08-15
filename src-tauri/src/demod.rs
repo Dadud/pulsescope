@@ -10,19 +10,23 @@ use std::f32::consts::TAU;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Am,
+    Sam,
     Nfm,
     Wfm,
     Usb,
     Lsb,
+    Cw,
 }
 
 impl Mode {
     pub fn parse(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
             "am" => Self::Am,
+            "sam" => Self::Sam,
             "wfm" => Self::Wfm,
             "usb" => Self::Usb,
             "lsb" => Self::Lsb,
+            "cw" => Self::Cw,
             _ => Self::Nfm,
         }
     }
@@ -60,13 +64,13 @@ pub fn demodulate(
     }
     let mut out = Vec::with_capacity(iq.len());
     match mode {
-        Mode::Am => {
+        Mode::Am | Mode::Sam => {
             let mean = iq.iter().map(|s| s.norm()).sum::<f32>() / iq.len() as f32;
             for s in iq {
                 out.push((s.norm() - mean) * 4.0);
             }
         }
-        Mode::Usb => {
+        Mode::Usb | Mode::Cw => {
             for s in iq {
                 out.push((s.re + s.im) * std::f32::consts::FRAC_1_SQRT_2);
             }
@@ -108,6 +112,48 @@ pub fn discriminator_samples(iq: &[Complex<f32>], previous: &mut Option<Complex<
         prev = *s;
     }
     *previous = Some(prev);
+    out
+}
+
+/// Synchronous AM: a Costas-style PLL tracks the carrier and the in-phase
+/// arm is the audio. Envelope AM remains available as [`Mode::Am`].
+pub fn demodulate_sam(iq: &[Complex<f32>], pll_phase: &mut f64) -> Vec<f32> {
+    if iq.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(iq.len());
+    let mut phase = *pll_phase;
+    for sample in iq {
+        let (sin, cos) = phase.sin_cos();
+        let i = sample.re * cos as f32 + sample.im * sin as f32;
+        let q = -sample.re * sin as f32 + sample.im * cos as f32;
+        phase += (i * q) as f64 * 0.04;
+        out.push(i);
+    }
+    *pll_phase = phase.rem_euclid(std::f64::consts::TAU);
+    soft_limit(&mut out);
+    out
+}
+
+/// CW listen path: beat a baseband carrier against a 700 Hz BFO so Morse is
+/// audible after the audio-worker resampler.
+pub fn demodulate_cw(
+    iq: &[Complex<f32>],
+    sample_rate: u32,
+    bfo_hz: f32,
+    phase: &mut f64,
+) -> Vec<f32> {
+    if iq.is_empty() || sample_rate == 0 {
+        return Vec::new();
+    }
+    let step = std::f64::consts::TAU * bfo_hz.max(1.0) as f64 / sample_rate as f64;
+    let mut out = Vec::with_capacity(iq.len());
+    for sample in iq {
+        let (sin, cos) = phase.sin_cos();
+        out.push(sample.re * cos as f32 - sample.im * sin as f32);
+        *phase = (*phase + step).rem_euclid(std::f64::consts::TAU);
+    }
+    soft_limit(&mut out);
     out
 }
 
@@ -1555,6 +1601,54 @@ mod tests {
         let usb = demodulate(Mode::Usb, &iq, &mut p);
         let lsb = demodulate(Mode::Lsb, &iq, &mut p);
         assert_ne!(usb, lsb);
+    }
+
+    #[test]
+    fn mode_parse_keeps_sam_and_cw_distinct_from_nfm() {
+        assert_eq!(Mode::parse("sam"), Mode::Sam);
+        assert_eq!(Mode::parse("cw"), Mode::Cw);
+        assert_eq!(Mode::parse("nfm"), Mode::Nfm);
+    }
+
+    #[test]
+    fn sam_pll_recovers_am_on_an_offset_carrier() {
+        let sample_rate = 48_000.0;
+        let n = 48_000usize;
+        let iq: Vec<_> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                let envelope = 1.0 + 0.6 * (TAU * 1_000.0 * t).cos();
+                Complex::from_polar(envelope, TAU * 180.0 * t)
+            })
+            .collect();
+        let mut phase = 0.0;
+        let audio = demodulate_sam(&iq, &mut phase);
+        let settled = &audio[n / 4..];
+        let mean = settled.iter().sum::<f32>() / settled.len() as f32;
+        let ac: Vec<f32> = settled.iter().map(|v| v - mean).collect();
+        let energy = ac.iter().map(|v| v * v).sum::<f32>() / ac.len() as f32;
+        assert!(energy > 0.01, "SAM audio energy too low: {energy}");
+        assert!(phase.abs() > 0.0);
+    }
+
+    #[test]
+    fn cw_bfo_beats_a_baseband_carrier_to_700_hz() {
+        let sample_rate = 8_000u32;
+        let iq = vec![Complex::new(0.8, 0.0); sample_rate as usize];
+        let mut phase = 0.0;
+        let audio = demodulate_cw(&iq, sample_rate, 700.0, &mut phase);
+        let settled = &audio[200..];
+        let mut crossings = 0usize;
+        for pair in settled.windows(2) {
+            if pair[0] <= 0.0 && pair[1] > 0.0 {
+                crossings += 1;
+            }
+        }
+        let expected = 700.0 * settled.len() as f32 / sample_rate as f32;
+        assert!(
+            (crossings as f32 - expected).abs() < 25.0,
+            "expected ~{expected:.0} Hz beat, got {crossings} crossings"
+        );
     }
 
     #[test]
