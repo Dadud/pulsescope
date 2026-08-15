@@ -276,6 +276,21 @@ pub fn decode_cw_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedMessa
         .collect()
 }
 
+pub fn decode_ble_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMessage> {
+    crate::ble::decode_iq(iq, sample_rate_hz)
+        .into_iter()
+        .filter(|adv| adv.crc_valid)
+        .map(|adv| adv.to_decoded(2_402_000_000))
+        .collect()
+}
+
+pub fn decode_lora_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMessage> {
+    crate::lora::decode_iq(iq, sample_rate_hz)
+        .into_iter()
+        .map(|packet| packet.to_decoded(915_000_000))
+        .collect()
+}
+
 pub fn decode_uat_bits(bits: &[u8]) -> Vec<DecodedMessage> {
     let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
     let mut decoder = crate::aviation::UatDecoder::new();
@@ -378,6 +393,8 @@ pub fn run_recorded_fixture(
                     let pairs: Vec<(f32, f32)> = artifact.iq.iter().map(|p| (p[0], p[1])).collect();
                     decode_ais_iq(&pairs, artifact.sample_rate_hz)
                 }
+                "ble" => decode_ble_iq(&iq, artifact.sample_rate_hz),
+                "meshtastic" | "lora" => decode_lora_iq(&iq, artifact.sample_rate_hz),
                 _ => anyhow::bail!("unsupported IQ protocol {}", entry.protocol),
             })
         }
@@ -586,6 +603,26 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
     std::fs::write(&cw_path, serde_json::to_string_pretty(&cw_artifact)?)?;
     let cw_sha = hex::encode(Sha256::digest(std::fs::read(&cw_path)?));
 
+    let ble_rate = crate::ble::BLE_FIXTURE_SAMPLE_RATE_HZ;
+    let ble_iq = crate::ble::synthesize_pulse_advert_iq(ble_rate);
+    let ble_artifact = RecordedIqArtifact {
+        sample_rate_hz: ble_rate,
+        iq: ble_iq.iter().map(|c| [c.re, c.im]).collect(),
+    };
+    let ble_path = root.join("ble-pulse-advert.iq.json");
+    std::fs::write(&ble_path, serde_json::to_string_pretty(&ble_artifact)?)?;
+    let ble_sha = hex::encode(Sha256::digest(std::fs::read(&ble_path)?));
+
+    let lora_rate = crate::lora::LORA_FIXTURE_SAMPLE_RATE_HZ;
+    let lora_iq = crate::lora::synthesize_meshtastic_hello_iq(lora_rate);
+    let lora_artifact = RecordedIqArtifact {
+        sample_rate_hz: lora_rate,
+        iq: lora_iq.iter().map(|c| [c.re, c.im]).collect(),
+    };
+    let lora_path = root.join("lora-meshtastic-hello.iq.json");
+    std::fs::write(&lora_path, serde_json::to_string_pretty(&lora_artifact)?)?;
+    let lora_sha = hex::encode(Sha256::digest(std::fs::read(&lora_path)?));
+
     let manifest = RecordedFixtureManifest {
         schema: "pulsescope.recorded-iq-fixture".into(),
         version: 1,
@@ -755,6 +792,36 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                 },
                 sha256: cw_sha,
             },
+            RecordedFixtureEntry {
+                id: "ble-pulse-advert".into(),
+                protocol: "ble".into(),
+                file: "ble-pulse-advert.iq.json".into(),
+                kind: "iq".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "ble".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: Some("AA:BB:CC:DD:EE:FF".into()),
+                    info_contains: Some("PULSE".into()),
+                },
+                sha256: ble_sha,
+            },
+            RecordedFixtureEntry {
+                id: "lora-meshtastic-hello".into(),
+                protocol: "meshtastic".into(),
+                file: "lora-meshtastic-hello.iq.json".into(),
+                kind: "iq".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "meshtastic".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: Some("00abcdef".into()),
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: lora_sha,
+            },
         ],
     };
     std::fs::write(
@@ -836,5 +903,22 @@ mod tests {
         let cw = decode_cw_audio(&crate::demod::synthesize_cw_sos(8_000.0, 700.0), 8_000.0);
         assert!(cw.iter().any(|m| m.content.contains('S')));
         assert!(cw.iter().any(|m| m.content.contains('O')));
+    }
+
+    #[test]
+    fn ble_and_lora_iq_fixtures_decode_to_normalized_events() {
+        let ble = decode_ble_iq(
+            &crate::ble::synthesize_pulse_advert_iq(crate::ble::BLE_FIXTURE_SAMPLE_RATE_HZ),
+            crate::ble::BLE_FIXTURE_SAMPLE_RATE_HZ,
+        );
+        assert!(ble.iter().any(|m| m.address == "AA:BB:CC:DD:EE:FF"));
+        assert!(ble.iter().any(|m| m.content.contains("PULSE")));
+
+        let lora = decode_lora_iq(
+            &crate::lora::synthesize_meshtastic_hello_iq(crate::lora::LORA_FIXTURE_SAMPLE_RATE_HZ),
+            crate::lora::LORA_FIXTURE_SAMPLE_RATE_HZ,
+        );
+        assert!(lora.iter().any(|m| m.protocol == "meshtastic"));
+        assert!(lora.iter().any(|m| m.content.contains("HELLO")));
     }
 }

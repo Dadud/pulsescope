@@ -42,6 +42,7 @@ pub struct AppState {
     /// receiver lease controls hardware-window retunes.
     pub listener_sessions: RwLock<HashMap<String, ListenerSession>>,
     pub trunking: RwLock<TrunkingRuntime>,
+    pub transcription: Mutex<crate::transcription::TranscriptionRuntime>,
     pub sidecars: SidecarRegistry,
     pub decoder_scheduler: DecoderScheduler,
     /// Native ham decoder tasks are explicitly tied to their selected narrow
@@ -96,6 +97,7 @@ impl AppState {
             command_results: Mutex::new(HashMap::new()),
             listener_sessions: RwLock::new(HashMap::new()),
             trunking: RwLock::new(TrunkingRuntime::default()),
+            transcription: Mutex::new(crate::transcription::TranscriptionRuntime::default()),
             sidecars: SidecarRegistry::new(),
             decoder_scheduler,
             ham_decoder_tasks: Mutex::new(HashMap::new()),
@@ -560,7 +562,9 @@ impl ReceiverSession {
 pub struct TrunkingRuntime {
     pub running: bool,
     pub locked: bool,
+    pub available: bool,
     pub system: Option<String>,
+    pub protocol: Option<String>,
     pub control_channel_hz: Option<u64>,
     pub active_talkgroup: Option<String>,
     pub voice_channels: Vec<u64>,
@@ -569,6 +573,7 @@ pub struct TrunkingRuntime {
     pub discovery_results: Vec<serde_json::Value>,
     pub zones: Vec<serde_json::Value>,
     pub log: Vec<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]

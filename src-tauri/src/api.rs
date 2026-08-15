@@ -1494,7 +1494,7 @@ async fn media_capabilities_v2() -> impl IntoResponse {
         "preferred": "pcm-websocket",
         "transports": [
             {"id":"pcm-websocket","available":true,"path":"/audio/stream","frame_ms":20,"sample_rate_hz":48000,"channels":[1,2],"status":"fixture_verified"},
-            {"id":"webrtc-opus","available":false,"status":"planned","missing_gate":"Opus/WebRTC negotiation, loss recovery, and two-hour LAN acceptance run"}
+            {"id":"webrtc-opus","available":false,"status":"development","payload_type":111,"clock_rate_hz":48000,"frame_ms":20,"timestamp_step":960,"fec":true,"dtx":false,"sdp": crate::webrtc::sdp_offer_fragment(), "missing_gate":"ICE/DTLS transport, libopus encode, loss recovery, and two-hour LAN acceptance run"}
         ]
     }))
 }
@@ -1504,9 +1504,17 @@ async fn media_session_v2() -> impl IntoResponse {
         StatusCode::NOT_IMPLEMENTED,
         Json(json!({
             "ok": false,
-            "error": "WebRTC media sessions are not available in this build",
+            "error": "WebRTC ICE/DTLS media sessions are not available in this build",
             "fallback": {"transport":"pcm-websocket","path":"/audio/stream"},
-            "missing_gate": "Opus/WebRTC negotiation, loss recovery, and two-hour LAN acceptance run"
+            "contract": {
+                "status": "development",
+                "payload_type": crate::webrtc::OPUS_PAYLOAD_TYPE,
+                "clock_rate_hz": crate::webrtc::OPUS_CLOCK_RATE_HZ,
+                "frame_ms": crate::webrtc::OPUS_FRAME_MS,
+                "timestamp_step": crate::webrtc::OPUS_TIMESTAMP_STEP,
+                "sdp": crate::webrtc::sdp_offer_fragment()
+            },
+            "missing_gate": "ICE/DTLS transport, libopus encode, loss recovery, and two-hour LAN acceptance run"
         })),
     )
 }
@@ -1533,6 +1541,9 @@ async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
         decoder_development_entry("dstar", "D-Star", "discriminator", "planned_sidecar"),
         decoder_development_entry("ysf", "YSF", "discriminator", "planned_sidecar"),
         decoder_development_entry("m17", "M17", "discriminator", "planned_sidecar"),
+        decoder_fixture_verified_entry("ble", "BLE advertising", "iq", "live"),
+        decoder_fixture_verified_entry("lora", "LoRa mesh / Modbus", "iq", "live"),
+        decoder_development_entry("hd_radio", "HD Radio / NRSC-5", "iq", "planned_sidecar"),
     ];
     for decoder in
         s.0.sidecars
@@ -2674,13 +2685,57 @@ async fn talkgroup_delete_system(
     Json(json!({"ok": s.0.db.delete_talkgroup_system(&req.system_name).is_ok()}))
 }
 
-async fn trunking_start(
-    State(_s): State<ApiState>,
-    _req: Option<Json<Value>>,
-) -> impl IntoResponse {
-    Json(
-        json!({"ok":false,"available":false,"error":"trunking requires a verified controller decoder; no mock system is exposed"}),
-    )
+async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> impl IntoResponse {
+    let control_hz = req.and_then(|Json(v)| v.get("control_channel_hz").and_then(|x| x.as_u64()));
+    let status = s.0.device.status();
+    let mut grants = Vec::new();
+    let mut reason = "P25 TSBK observer is armed; waiting for control-channel IQ".to_string();
+    if status.connected {
+        let count = (status.sample_rate as usize / 5).clamp(8_192, 480_000);
+        if let Ok(iq) = live_iq_snapshot(&s, count) {
+            let tune = control_hz.unwrap_or(status.center_freq_hz);
+            let channel = crate::demod::channelize_iq(
+                &iq,
+                tune as f64 - status.center_freq_hz as f64,
+                status.sample_rate,
+                crate::demod::Mode::Nfm,
+            );
+            grants = crate::trunking::decode_tsbk_from_iq(&channel, status.sample_rate);
+            reason = if grants.is_empty() {
+                "no TSBK recovered from the current IQ snapshot".into()
+            } else {
+                format!("observed {} TSBK grant(s)", grants.len())
+            };
+        }
+    }
+    let mut t = s.0.trunking.write();
+    t.running = true;
+    t.available = false;
+    t.protocol = Some("p25".into());
+    if control_hz.is_some() {
+        t.control_channel_hz = control_hz;
+    }
+    t.reason = Some(reason.clone());
+    for grant in &grants {
+        let freq = t.control_channel_hz.unwrap_or(status.center_freq_hz);
+        t.active_talkgroup = Some(grant.talkgroup.clone());
+        t.calls.push(crate::trunking::grant_to_call(grant, freq));
+        t.log.push(format!(
+            "TSBK grant TG {} src {} enc={}",
+            grant.talkgroup, grant.source, grant.encrypted
+        ));
+    }
+    Json(json!({
+        "ok": true,
+        "available": false,
+        "running": true,
+        "native": true,
+        "p25_fir": true,
+        "grants": grants,
+        "reason": reason,
+        "missing_gate": "live control-channel recorded-IQ and hardware verification",
+        "status": &*t
+    }))
 }
 async fn trunking_stop(State(s): State<ApiState>) -> impl IntoResponse {
     let mut t = s.0.trunking.write();
@@ -2975,51 +3030,123 @@ async fn hd_radio_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> imp
     let mut c = s.0.config.write();
     c.hd_radio.enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
     let _ = c.save(&s.0.data_dir);
-    Json(
-        json!({"ok":true,"enabled":c.hd_radio.enabled,"available":false,"reason":"HD Radio decoder sidecar not configured"}),
-    )
+    let nrsc5 = crate::hd_radio::find_nrsc5();
+    Json(json!({
+        "ok": true,
+        "enabled": c.hd_radio.enabled,
+        "available": false,
+        "nrsc5": nrsc5.as_ref().map(|p| p.display().to_string()),
+        "reason": if nrsc5.is_some() {
+            "nrsc5 is installed; OFDM recorded-IQ end-to-end has not passed"
+        } else {
+            "HD Radio decoder sidecar (nrsc5) is not installed"
+        }
+    }))
 }
 async fn hd_radio_check(State(s): State<ApiState>) -> impl IntoResponse {
     let c = s.0.config.read();
-    Json(
-        json!({"ok":true,"available":false,"configured":c.hd_radio.enabled,"program":c.hd_radio.program,"stations":c.hd_radio.stations,"reason":"HD Radio decoder sidecar not configured"}),
-    )
+    let nrsc5 = crate::hd_radio::find_nrsc5();
+    Json(json!({
+        "ok": true,
+        "available": false,
+        "configured": c.hd_radio.enabled,
+        "program": c.hd_radio.program,
+        "stations": c.hd_radio.stations,
+        "nrsc5": nrsc5.as_ref().map(|p| p.display().to_string()),
+        "reason": if nrsc5.is_some() {
+            "nrsc5 is installed; SIS parser is unit-tested; OFDM IQ e2e remains open"
+        } else {
+            "HD Radio decoder sidecar (nrsc5) is not installed"
+        }
+    }))
 }
-async fn hd_radio_messages() -> impl IntoResponse {
-    Json(json!([]))
+async fn hd_radio_messages(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(json!(s
+        .0
+        .db
+        .messages_by_protocol(Some("hd_radio"), 50)
+        .unwrap_or_default()))
 }
 async fn hd_radio_status(State(s): State<ApiState>) -> impl IntoResponse {
     let c = s.0.config.read();
-    Json(
-        json!({"enabled":c.hd_radio.enabled,"auto_on_fm_lock":c.hd_radio.auto_on_fm_lock,"program":c.hd_radio.program,"stations":c.hd_radio.stations}),
-    )
+    let nrsc5 = crate::hd_radio::find_nrsc5();
+    Json(json!({
+        "enabled": c.hd_radio.enabled,
+        "available": false,
+        "auto_on_fm_lock": c.hd_radio.auto_on_fm_lock,
+        "program": c.hd_radio.program,
+        "stations": c.hd_radio.stations,
+        "nrsc5": nrsc5.as_ref().map(|p| p.display().to_string()),
+        "missing_gate": "nrsc5 OFDM recorded-IQ end-to-end fixture"
+    }))
 }
 async fn hd_radio_aas(Path(_filename): Path<String>) -> impl IntoResponse {
     Json(json!({}))
 }
 
-async fn ble_devices(State(_s): State<ApiState>) -> Json<Value> {
-    Json(json!([]))
+async fn ble_devices(State(s): State<ApiState>) -> Json<Value> {
+    let messages =
+        s.0.db
+            .messages_by_protocol(Some("ble"), 200)
+            .unwrap_or_default();
+    let mut devices = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for message in messages {
+        if seen.insert(message.address.clone()) {
+            devices.push(json!({
+                "address": message.address,
+                "address_type": message.function_code,
+                "pdu_type": message.message_type,
+                "name": message.content,
+                "frequency_hz": message.frequency_hz,
+                "timestamp_ms": message.timestamp_ms,
+                "raw": message.raw,
+            }));
+        }
+    }
+    Json(json!(devices))
 }
-async fn ble_status(State(_s): State<ApiState>) -> impl IntoResponse {
-    Json(
-        json!({"available":false,"enabled":false,"running":false,"device_count":0,"source":"none","reason":"BLE capture backend is not installed"}),
-    )
+async fn ble_status(State(s): State<ApiState>) -> impl IntoResponse {
+    let enabled = s.0.config.read().ble.enabled;
+    let device_count =
+        s.0.db
+            .messages_by_protocol(Some("ble"), 200)
+            .map(|m| {
+                m.iter()
+                    .map(|row| row.address.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            })
+            .unwrap_or(0);
+    let status = s.0.device.status();
+    Json(json!({
+        "available": true,
+        "native": true,
+        "enabled": enabled,
+        "running": enabled && status.connected,
+        "device_count": device_count,
+        "source": "native_gfsk",
+        "required_sample_rate_hz": 4_000_000,
+        "reason": "Native BLE advertising decoder; RTL-SDR-class tuners cannot cover 2.4 GHz"
+    }))
 }
 async fn ble_file() -> impl IntoResponse {
     Json(json!(null))
 }
-async fn ble_clear() -> impl IntoResponse {
+async fn ble_clear(State(s): State<ApiState>) -> impl IntoResponse {
+    let _ = s.0.db.delete_messages_by_protocol("ble");
     Json(json!({"ok": true}))
 }
 
-async fn lora_messages() -> impl IntoResponse {
-    Json(json!([]))
+async fn lora_messages(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(json!(s
+        .0
+        .db
+        .messages_by_protocols(crate::lora::LORA_PROTOCOLS, 100)
+        .unwrap_or_default()))
 }
 async fn lora_regions() -> impl IntoResponse {
-    Json(json!([
-        "US915", "EU868", "EU433", "AS923", "IN865", "AU915", "KR920"
-    ]))
+    Json(json!(crate::lora::regional_plans()))
 }
 
 async fn scan_lock(State(s): State<ApiState>) -> impl IntoResponse {
@@ -3450,12 +3577,88 @@ async fn scan_aero(State(s): State<ApiState>) -> Json<Value> {
     scan_acars(State(s)).await
 }
 async fn scan_ble(State(s): State<ApiState>) -> Json<Value> {
-    ble_devices(State(s)).await
+    let status = s.0.device.status();
+    if !status.connected {
+        return Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocol(Some("ble"), 50).unwrap_or_default(),
+            "reason": "no device connected — BLE advertising needs a 2.4 GHz-capable SDR"
+        }));
+    }
+    if status.sample_rate < crate::ble::BLE_SYMBOL_RATE {
+        return Json(json!({
+            "available": true,
+            "native": true,
+            "messages": [],
+            "reason": format!("sample rate {} Hz is below 1 Msym/s BLE advertising", status.sample_rate)
+        }));
+    }
+    let count = (status.sample_rate as usize / 5).clamp(8_192, 800_000);
+    match live_iq_snapshot(&s, count) {
+        Ok(iq) => {
+            let ads = crate::ble::decode_iq(&iq, status.sample_rate);
+            for adv in &ads {
+                if adv.crc_valid {
+                    let _ =
+                        s.0.db
+                            .insert_decoded_message(&adv.to_decoded(status.center_freq_hz));
+                }
+            }
+            Json(json!({
+                "available": true,
+                "native": true,
+                "sample_rate_hz": status.sample_rate,
+                "samples": iq.len(),
+                "message_count": ads.len(),
+                "messages": ads,
+            }))
+        }
+        Err(e) => Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocol(Some("ble"), 50).unwrap_or_default(),
+            "error": e
+        })),
+    }
 }
-async fn scan_lora(State(_s): State<ApiState>) -> Json<Value> {
-    Json(
-        json!({"available":false,"messages":[],"reason":"LoRa decoder transport is not implemented"}),
-    )
+async fn scan_lora(State(s): State<ApiState>) -> Json<Value> {
+    let status = s.0.device.status();
+    if !status.connected {
+        return Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocols(crate::lora::LORA_PROTOCOLS, 50).unwrap_or_default(),
+            "reason": "no device connected — tune an ISM LoRa channel and retry"
+        }));
+    }
+    let count = (status.sample_rate as usize / 4).clamp(16_384, 1_000_000);
+    match live_iq_snapshot(&s, count) {
+        Ok(iq) => {
+            let packets = crate::lora::decode_iq(&iq, status.sample_rate);
+            for packet in &packets {
+                let _ =
+                    s.0.db
+                        .insert_decoded_message(&packet.to_decoded(status.center_freq_hz));
+            }
+            Json(json!({
+                "available": true,
+                "native": true,
+                "families": ["meshtastic", "meshcore", "reticulum", "modbus-lora", "lorawan"],
+                "sample_rate_hz": status.sample_rate,
+                "samples": iq.len(),
+                "message_count": packets.len(),
+                "messages": packets,
+                "note": "Encrypted MeshCore/Meshtastic/Reticulum/LoRaWAN payloads are identified only"
+            }))
+        }
+        Err(e) => Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocols(crate::lora::LORA_PROTOCOLS, 50).unwrap_or_default(),
+            "error": e
+        })),
+    }
 }
 
 #[derive(Deserialize)]
@@ -3597,9 +3800,10 @@ async fn scan_digital_voice(State(s): State<ApiState>, Json(req): Json<Value>) -
                 sample_rate,
                 Mode::Nfm,
             );
+            let (filtered, fir_rate) = crate::trunking::apply_p25_vfo_fir(&channel, sample_rate);
             let mut previous = None;
-            let discriminator = discriminator_samples(&channel, &mut previous);
-            let resampled = crate::sidecar::resample_audio(&discriminator, sample_rate, 48_000);
+            let discriminator = discriminator_samples(&filtered, &mut previous);
+            let resampled = crate::sidecar::resample_audio(&discriminator, fir_rate, 48_000);
             let result = voice_decoder::decode_digital_voice_discriminator(&resampled, mode);
             Json(json!({
                 "available": result.available,
@@ -3613,6 +3817,7 @@ async fn scan_digital_voice(State(s): State<ApiState>, Json(req): Json<Value>) -
                 "raw_output": result.raw_output,
                 "error": result.error_message,
                 "input": "discriminator",
+                "p25_fir": {"taps": crate::trunking::P25_FIR_TAPS, "cutoff_hz": crate::trunking::P25_FIR_CUTOFF_HZ, "rate_hz": fir_rate},
                 "frequency_hz": tune_hz,
                 "discriminator_samples": resampled.len(),
             }))
@@ -3927,16 +4132,71 @@ async fn iq_rec_status(State(s): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn transcription_start(State(s): State<ApiState>) -> impl IntoResponse {
-    let c = s.0.config.read();
+    let engine = crate::transcription::find_engine();
+    let (model, language) = {
+        let c = s.0.config.read();
+        (
+            c.transcription.model.clone(),
+            c.transcription.language.clone(),
+        )
+    };
+    if !engine.available {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "ok": false,
+                "available": false,
+                "running": false,
+                "engine": engine.kind,
+                "model": model,
+                "error": engine.install_hint,
+            })),
+        );
+    }
+    let status = s.0.device.status();
+    let mut last_error = None;
+    let mut segments = Vec::new();
+    if status.connected {
+        let count = (status.sample_rate as usize / 5).clamp(8_192, 480_000);
+        match live_iq_snapshot(&s, count) {
+            Ok(iq) if iq.len() > 1024 => {
+                let pcm = crate::demod::channelize_demod(
+                    &iq,
+                    0.0,
+                    status.sample_rate,
+                    crate::demod::Mode::Nfm,
+                );
+                match crate::transcription::transcribe_pcm(&pcm, status.sample_rate, &model) {
+                    Ok(found) => segments = found,
+                    Err(e) => last_error = Some(e),
+                }
+            }
+            Ok(_) => last_error = Some("insufficient samples".into()),
+            Err(e) => last_error = Some(e),
+        }
+    } else {
+        last_error = Some("no device connected; engine is armed".into());
+    }
+    let mut runtime = s.0.transcription.lock();
+    runtime.running = true;
+    runtime.last_error = last_error.clone();
+    runtime.transcripts.extend(segments.iter().cloned());
+    if runtime.transcripts.len() > 64 {
+        let extra = runtime.transcripts.len() - 64;
+        runtime.transcripts.drain(..extra);
+    }
+    let _ = language;
     (
-        StatusCode::NOT_IMPLEMENTED,
+        StatusCode::OK,
         Json(json!({
-            "ok": false,
-            "available": false,
-            "running": false,
-            "engine": c.transcription.engine,
-            "model": c.transcription.model,
-            "error": "transcription transport is not implemented",
+            "ok": true,
+            "available": true,
+            "running": true,
+            "engine": engine.kind,
+            "path": engine.path,
+            "model": model,
+            "segments": segments,
+            "error": last_error,
         })),
     )
 }
@@ -3944,22 +4204,32 @@ async fn transcription_stop(State(s): State<ApiState>) -> impl IntoResponse {
     let mut c = s.0.config.write();
     c.transcription.enabled = false;
     let _ = c.save(&s.0.data_dir);
+    s.0.transcription.lock().running = false;
     Json(json!({"ok":true,"running":false}))
 }
 async fn transcription_status(State(s): State<ApiState>) -> impl IntoResponse {
     let c = s.0.config.read();
+    let engine = crate::transcription::find_engine();
+    let runtime = s.0.transcription.lock();
     Json(json!({
-        "available": false,
-        "running": false,
-        "enabled": false,
-        "engine": c.transcription.engine,
+        "available": engine.available,
+        "running": runtime.running,
+        "enabled": c.transcription.enabled,
+        "engine": engine.kind,
+        "path": engine.path,
         "model": c.transcription.model,
-        "status": "planned",
-        "missing_gate": "Speech transcription transport is not implemented"
+        "status": if engine.available { "development" } else { "planned" },
+        "install_hint": engine.install_hint,
+        "last_error": runtime.last_error,
+        "missing_gate": if engine.available {
+            "hardware live verification of 16 kHz PCM through whisper.cpp"
+        } else {
+            "whisper.cpp / whisper-cli is not installed"
+        }
     }))
 }
-async fn transcription_list() -> impl IntoResponse {
-    Json(json!([]))
+async fn transcription_list(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(json!(s.0.transcription.lock().transcripts.clone()))
 }
 
 #[derive(Deserialize)]
@@ -4753,9 +5023,15 @@ async fn debug_rtl433_stderr(State(s): State<ApiState>) -> impl IntoResponse {
     Json(s.0.sidecars.stderr("rtl_433"))
 }
 async fn debug_p25_use_vfo_fir() -> impl IntoResponse {
-    Json(
-        json!({"enabled":false,"supported":false,"reason":"P25 VFO FIR path is not implemented without a digital decoder backend"}),
-    )
+    Json(json!({
+        "enabled": true,
+        "supported": true,
+        "taps": crate::trunking::P25_FIR_TAPS,
+        "cutoff_hz": crate::trunking::P25_FIR_CUTOFF_HZ,
+        "rate_hz": crate::trunking::P25_FIR_RATE_HZ,
+        "window": "hamming",
+        "reason": "P25 VFO FIR runs on IQ before the discriminator; it is not a P25 voice decoder"
+    }))
 }
 async fn debug_per_cc_stats(State(s): State<ApiState>) -> impl IntoResponse {
     let t = s.0.trunking.read();
@@ -4921,6 +5197,7 @@ mod readiness_tests {
     fn recorded_iq_e2e_catalog_ids_are_available() {
         for id in [
             "adsb", "ais", "aprs", "pocsag", "rtty", "navtex", "uat", "acars", "vdl2", "rds", "cw",
+            "ble", "lora",
         ] {
             let decoder = decoder_fixture_verified_entry(id, id, "iq", "live");
             assert_eq!(decoder["id"], *id);

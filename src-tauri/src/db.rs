@@ -419,6 +419,27 @@ impl Db {
         Ok(out)
     }
 
+    pub fn messages_by_protocols(
+        &self,
+        protocols: &[&str],
+        limit: u32,
+    ) -> anyhow::Result<Vec<DecodedMessage>> {
+        let mut all = Vec::new();
+        for protocol in protocols {
+            all.extend(self.messages_by_protocol(Some(protocol), limit)?);
+        }
+        all.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms).then(b.id.cmp(&a.id)));
+        all.truncate(limit as usize);
+        Ok(all)
+    }
+
+    pub fn delete_messages_by_protocol(&self, protocol: &str) -> anyhow::Result<usize> {
+        Ok(self.conn().execute(
+            "DELETE FROM decoded_messages WHERE protocol=?1",
+            rusqlite::params![protocol],
+        )?)
+    }
+
     pub fn recent_decoded_messages(&self, limit: u32) -> anyhow::Result<Vec<DecodedMessage>> {
         let c = self.conn();
         let mut stmt = c.prepare(

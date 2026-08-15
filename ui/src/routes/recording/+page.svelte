@@ -53,7 +53,7 @@
 <svelte:head><title>Recordings · PulseScope</title></svelte:head>
 <div class="page">
   <h1>Recording</h1>
-  <p class="muted">Capture bounded CF32 IQ from the live receiver. Speech transcription is not available yet.</p>
+  <p class="muted">Capture bounded CF32 IQ from the live receiver. Speech transcription uses a local whisper.cpp engine when installed.</p>
   {#if error}<p class="error">{error}</p>{/if}
   <div class="grid">
     <section class="card">
@@ -70,9 +70,15 @@
     </section>
     <section class="card beta">
       <h2>Transcription <span>Beta</span></h2>
-      <p class="muted">{transcription.missing_gate ?? 'Speech transcription transport is not implemented.'}</p>
-      <p>Status: unavailable</p>
-      <button disabled title="Transcription is not implemented">Start transcription</button>
+      <p class="muted">{transcription.missing_gate ?? transcription.install_hint ?? 'Local whisper.cpp engine is optional.'}</p>
+      <p>Status: {transcription.available ? (transcription.running ? 'running' : 'ready') : 'unavailable'}</p>
+      {#if transcription.available}
+        <button class="primary" disabled={busy} onclick={async () => { busy = true; try { if (transcription.running) await Api.transcriptionStop(); else await Api.transcriptionStart(); await load(); } catch (e) { error = String(e); } finally { busy = false; } }}>
+          {transcription.running ? 'Stop transcription' : 'Start transcription'}
+        </button>
+      {:else}
+        <button disabled title={transcription.install_hint ?? 'whisper.cpp is not installed'}>Start transcription</button>
+      {/if}
     </section>
   </div>
   <button onclick={load}>Refresh</button>
@@ -94,7 +100,7 @@
   h2{font-size:14px;margin-top:0;display:flex;gap:8px;align-items:center}
   h2 span{font:10px var(--mono);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}
   .ok{color:var(--ok)}
-  .beta button{opacity:.55;cursor:not-allowed}
+  .beta button:disabled{opacity:.55;cursor:not-allowed}
   button{background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:7px 11px;border-radius:5px}
   .primary{color:var(--accent);border-color:var(--accent)}
   dl{display:grid;gap:6px;margin:10px 0;font:12px var(--mono)}

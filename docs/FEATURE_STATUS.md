@@ -34,8 +34,9 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Bounded binary spectrum stream | Fixture verified | normal | yes | Sequence-numbered latest-frame stream remains below 500 ms frame age on LAN. |
-| WebRTC Opus audio | Planned | hidden | yes | 20 ms Opus, FEC, no DTX, p95 start below 2 s, two-hour underrun-free LAN run. |
+| WebRTC Opus audio | Beta | expert | yes | 20 ms Opus, FEC, no DTX, p95 start below 2 s, two-hour underrun-free LAN run. |
 | PCM WebSocket audio fallback | Fixture verified | normal | yes | User-gesture start, advancing timestamps, bounded buffering, and automatic reconnect. |
+| Speech transcription | Beta | expert | no | 16 kHz PCM through whisper.cpp when installed; otherwise honest unavailable status. |
 
 ## Dsp
 
@@ -44,6 +45,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | AM, USB, LSB and NFM demodulation | Fixture verified | normal | yes | Deterministic fixtures meet frequency, bandwidth, level, and distortion limits. |
 | SAM and CW demodulation | Beta | normal | yes | Recorded-IQ fixtures verify lock, pitch, passband, and recovery. |
 | WFM stereo and RDS | Beta | normal | yes | THD+N below 1%, stereo separation above 30 dB, correct 50/75 us de-emphasis and RDS fixture. |
+| P25 VFO FIR | Beta | expert | no | 63-tap Hamming sinc at 6 kHz on IQ before the discriminator; not a P25 voice decoder. |
 
 ## Client
 
@@ -65,6 +67,10 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | ADS-B, AIS and APRS | Fixture verified | normal | yes | Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads. |
 | Broadcast RDS | Fixture verified | normal | yes | RDS recovered from the same stereo multiplex fixture and verified live on broadcast FM. |
 | DMR, P25, NXDN, D-Star, YSF and M17 | Beta | normal | yes | Continuous discriminator feed and per-mode recorded-IQ fixtures; encrypted calls only labeled. |
+| P25 TSBK observer | Beta | expert | no | Group-voice-grant TSBK recovered from C4FM IQ; encrypted calls labeled only; no invented talkgroups. |
+| LoRa MeshCore, Meshtastic, Reticulum and Modbus | Fixture verified | normal | no | Recorded CSS IQ recovers MeshCore/Meshtastic/Reticulum/Modbus payloads; encrypted bodies stay opaque. |
+| BLE advertising | Fixture verified | normal | no | Recorded GFSK IQ recovers advertising address, name, and CRC-24. |
+| HD Radio through nrsc5 | Beta | expert | no | nrsc5 OFDM recorded-IQ fixture plus SIS/ID3 events. Parser unit tests do not satisfy availability. |
 | rtl_433, ACARS, VDL2, paging and UAT | Beta | normal | no | Per-protocol recorded-IQ fixtures and normalized events. |
 | FT8, WSPR, JS8, CW, RTTY, NAVTEX, SSTV and WEFAX | Beta | normal | no | Per-protocol recorded-IQ/audio fixtures and normalized events. |
 

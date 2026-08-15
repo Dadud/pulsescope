@@ -317,6 +317,58 @@ pub fn mix_down(
     out
 }
 
+/// Hamming-windowed sinc low-pass. Used by the P25 VFO FIR (63 taps, ~6 kHz).
+pub fn hamming_sinc_lowpass(taps: usize, cutoff_hz: f32, sample_rate_hz: u32) -> Vec<f32> {
+    if taps == 0 || sample_rate_hz == 0 {
+        return Vec::new();
+    }
+    let fc = (cutoff_hz / sample_rate_hz as f32).clamp(0.001, 0.45);
+    let mid = (taps.saturating_sub(1)) as f32 / 2.0;
+    let mut coeffs = Vec::with_capacity(taps);
+    let mut sum = 0.0f32;
+    for n in 0..taps {
+        let x = n as f32 - mid;
+        let sinc = if x.abs() < 1e-6 {
+            2.0 * fc
+        } else {
+            (TAU * fc * x).sin() / (std::f32::consts::PI * x)
+        };
+        let window = if taps == 1 {
+            1.0
+        } else {
+            0.54 - 0.46 * (TAU * n as f32 / (taps - 1) as f32).cos()
+        };
+        let value = sinc * window;
+        sum += value;
+        coeffs.push(value);
+    }
+    if sum.abs() > 1e-9 {
+        for coeff in &mut coeffs {
+            *coeff /= sum;
+        }
+    }
+    coeffs
+}
+
+pub fn apply_fir_complex(input: &[Complex<f32>], taps: &[f32]) -> Vec<Complex<f32>> {
+    if input.is_empty() || taps.is_empty() {
+        return Vec::new();
+    }
+    let delay = taps.len() / 2;
+    let mut out = vec![Complex::new(0.0, 0.0); input.len()];
+    for (i, sample) in out.iter_mut().enumerate() {
+        let mut acc = Complex::new(0.0, 0.0);
+        for (k, &tap) in taps.iter().enumerate() {
+            let j = i as i32 + delay as i32 - k as i32;
+            if j >= 0 && (j as usize) < input.len() {
+                acc += input[j as usize] * tap;
+            }
+        }
+        *sample = acc;
+    }
+    out
+}
+
 /// Boxcar low-pass plus decimation for the wideband-to-audio boundary.
 pub fn decimate_complex_average(input: &[Complex<f32>], factor: usize) -> Vec<Complex<f32>> {
     if factor <= 1 {

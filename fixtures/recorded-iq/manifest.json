@@ -166,6 +166,36 @@
         "info_contains": "S"
       },
       "sha256": "83819eec178a6ff37878edd1361b1fba5d12b0619ea82c2cd6f3ad243a60df4b"
+    },
+    {
+      "id": "ble-pulse-advert",
+      "protocol": "ble",
+      "file": "ble-pulse-advert.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "ble",
+        "icao": null,
+        "mmsi": null,
+        "source": "AA:BB:CC:DD:EE:FF",
+        "info_contains": "PULSE"
+      },
+      "sha256": "496262a65e480ac45611fbdd7f01c61e48f080c17484064da2c7c47e69d4e4c9"
+    },
+    {
+      "id": "lora-meshtastic-hello",
+      "protocol": "meshtastic",
+      "file": "lora-meshtastic-hello.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "meshtastic",
+        "icao": null,
+        "mmsi": null,
+        "source": "00abcdef",
+        "info_contains": "HELLO"
+      },
+      "sha256": "6c8d771abff4d59a2d623d099d1fa9707817eefeff7803c7647ab639916ccea3"
     }
   ]
 }

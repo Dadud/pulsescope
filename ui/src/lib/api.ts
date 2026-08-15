@@ -369,6 +369,8 @@ export const Api = {
   bleClear: () => postJson('/ble/clear'),
   loraMessages: () => getJson<any[]>('/lora/messages'),
   loraRegions: () => getJson<any[]>('/lora/regions'),
+  scanLora: () => getJson('/scan/lora'),
+  scanBle: () => getJson('/scan/ble'),
 
   signalFingerprints: () => getJson<any[]>('/signal_id/fingerprints'),
   signalSegmentBursts: () => postJson('/signal_id/segment_bursts'),

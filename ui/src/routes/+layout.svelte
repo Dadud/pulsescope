@@ -23,6 +23,7 @@
   const moreLinks = [
     ['#/signal-id', 'Signal identification'], ['#/occupancy', 'Band occupancy'],
     ['#/profiles', 'Profiles & bookmarks'],
+    ['#/lora', 'LoRa'], ['#/ble', 'Bluetooth LE'], ['#/hd-radio', 'HD Radio'], ['#/trunking', 'Trunking'],
     ['#/jobs', 'Scheduled jobs'], ['#/cases', 'Cases'],
     ['#/feature-packs', 'Decoder setup'], ['#/blacklist', 'Frequency exclusions'],
     ['#/debug', 'Diagnostics']

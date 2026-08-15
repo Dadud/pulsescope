@@ -1302,6 +1302,8 @@ struct NativeRangeDecoders {
     last_hf_text: String,
     rds_mpx: Vec<f32>,
     last_rds_pi: Option<u16>,
+    lora_iq: Vec<Complex<f32>>,
+    ble_iq: Vec<Complex<f32>>,
     sample_rate: u32,
 }
 
@@ -1326,6 +1328,8 @@ impl NativeRangeDecoders {
             last_hf_text: String::new(),
             rds_mpx: Vec::new(),
             last_rds_pi: None,
+            lora_iq: Vec::new(),
+            ble_iq: Vec::new(),
             sample_rate,
         }
     }
@@ -1718,6 +1722,51 @@ impl NativeRangeDecoders {
             }
         } else {
             self.hf_audio.clear();
+        }
+
+        let lora_band = range_name_matches(name, &["ism 433", "ism 915", "33cm", "lora", "70cm"]);
+        let ble_band = range_name_matches(name, &["ism 2.4", "bluetooth", "ble"]);
+        if lora_band {
+            self.lora_iq.extend_from_slice(iq);
+            const LORA_CAP: usize = 400_000;
+            if self.lora_iq.len() > LORA_CAP {
+                let drain = self.lora_iq.len() - LORA_CAP;
+                self.lora_iq.drain(..drain);
+            }
+            if self.lora_iq.len() >= 32_768 {
+                for packet in crate::lora::decode_iq(&self.lora_iq, sample_rate) {
+                    publish_decoded(db, events_tx, packet.to_decoded(center_hz));
+                    self.lora_iq.clear();
+                }
+                if self.lora_iq.len() >= LORA_CAP / 2 {
+                    let drain = self.lora_iq.len() / 2;
+                    self.lora_iq.drain(..drain);
+                }
+            }
+        } else {
+            self.lora_iq.clear();
+        }
+        if ble_band {
+            self.ble_iq.extend_from_slice(iq);
+            const BLE_CAP: usize = 200_000;
+            if self.ble_iq.len() > BLE_CAP {
+                let drain = self.ble_iq.len() - BLE_CAP;
+                self.ble_iq.drain(..drain);
+            }
+            if self.ble_iq.len() >= 8_192 {
+                for adv in crate::ble::decode_iq(&self.ble_iq, sample_rate) {
+                    if adv.crc_valid {
+                        publish_decoded(db, events_tx, adv.to_decoded(center_hz));
+                        self.ble_iq.clear();
+                    }
+                }
+                if self.ble_iq.len() >= BLE_CAP / 2 {
+                    let drain = self.ble_iq.len() / 2;
+                    self.ble_iq.drain(..drain);
+                }
+            }
+        } else {
+            self.ble_iq.clear();
         }
     }
 }

@@ -44,7 +44,7 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET | `/api/v2/decoder-jobs` | Isolated decoder-process state |
 | GET | `/api/v2/recordings` | Active recording and persisted files |
 | GET | `/api/v2/media/capabilities` | Truthful media transports and acceptance status |
-| POST | `/api/v2/media/sessions` | WebRTC negotiation (HTTP 501 with PCM fallback until the Opus gate passes) |
+| POST | `/api/v2/media/sessions` | WebRTC negotiation (HTTP 501 with PCM fallback). Response includes the Opus SDP/RTP contract (PT 111, 20 ms, timestamp += 960) while ICE/DTLS remains unimplemented. |
 
 ### Binary spectrum stream v3
 
@@ -144,7 +144,7 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | Method | Path                                     |
 |--------|------------------------------------------|
 | GET    | `/trunking/status`                       |
-| POST   | `/trunking/start`                        |
+| POST   | `/trunking/start`                        | Native P25 TSBK observer with VFO FIR. `available: false` until a live control-channel gate passes. Does not invent talkgroups. |
 | POST   | `/trunking/stop`                         |
 | POST   | `/trunking/lock`                         |
 | GET    | `/trunking/calls`                        |
@@ -188,19 +188,22 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET    | `/glonass/status`          |
 | POST   | `/goes_lrit/enable`        |
 | GET    | `/goes_lrit/status`        |
-| GET    | `/hd_radio/check`          |
-| GET    | `/hd_radio/messages`       |
+| GET    | `/hd_radio/check`          | POST also accepted; reports nrsc5 path. `available: false` until OFDM IQ e2e |
+| GET    | `/hd_radio/messages`       | persisted `hd_radio` events |
+| GET    | `/hd_radio/status`         | enabled/config plus install state |
+| POST   | `/hd_radio/enable`         | persist enable flag; does not claim OFDM decode |
 
 ## BLE / LoRa / sensors
 
 | Method | Path                |
 |--------|---------------------|
-| GET    | `/ble/devices`      |
-| GET    | `/ble/status`       |
-| GET    | `/lora/messages`    |
-| GET    | `/lora/regions`     |
-| GET    | `/scan/ble`         |
-| GET    | `/scan/lora`        |
+| GET    | `/ble/devices`      | unique advertising addresses from native GFSK decode |
+| GET    | `/ble/status`       | native decoder status; RTL-SDR cannot cover 2.4 GHz |
+| POST   | `/ble/clear`        | delete persisted BLE advertisements |
+| GET    | `/lora/messages`    | MeshCore / Meshtastic / Reticulum / Modbus / LoRaWAN identifications |
+| GET    | `/lora/regions`     | documented regional plans, not discovered radios |
+| GET    | `/scan/ble`         | snapshot GFSK decode on the live IQ ring |
+| GET    | `/scan/lora`        | snapshot CSS decode + payload classify; encrypted bodies stay opaque |
 
 ## Recording / streaming / transcription
 
@@ -213,10 +216,10 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET    | `/iq_recording/status`            |
 | GET    | `/recordings/annotations`         |
 | POST   | `/recordings/annotations`         |
-| POST   | `/transcription/start`            | not implemented — returns `available: false` |
+| POST   | `/transcription/start`            | local whisper.cpp transport when installed; otherwise `available: false` |
 | POST   | `/transcription/stop`             | —                            |
-| GET    | `/transcription/status`           | `available: false` until a transport exists |
-| GET    | `/transcription/transcripts`      | —                            |
+| GET    | `/transcription/status`           | `available` follows whisper-cli presence; catalog stays development |
+| GET    | `/transcription/transcripts`      | in-memory segments from the last start |
 
 ## Cases
 
