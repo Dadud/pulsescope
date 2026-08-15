@@ -25,9 +25,9 @@ use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
 use crate::db::Db;
 use crate::demod::{
-    channelize_iq, dc_block, decimate_complex_average, decode_wfm_stereo, deemphasis, demodulate,
-    discriminator_samples, low_pass_complex, low_pass_real, mix_down, Mode, SincResampler,
-    WfmStereoState,
+    channelize_demod, channelize_iq, dc_block, decimate_complex_average, decode_wfm_stereo,
+    deemphasis, demodulate, discriminator_samples, low_pass_complex, low_pass_real, mix_down, Mode,
+    SincResampler, WfmStereoState,
 };
 use crate::device::DeviceLayer;
 use crate::sidecar::SidecarRegistry;
@@ -867,7 +867,6 @@ async fn scanner_loop(
             native_decoders.feed(
                 range,
                 &iq,
-                &discriminator,
                 device.status().sample_rate,
                 device.status().center_freq_hz,
                 tune_hz,
@@ -1346,7 +1345,6 @@ impl NativeRangeDecoders {
         &mut self,
         range: &ScanRange,
         iq: &[Complex<f32>],
-        discriminator: &[f32],
         sample_rate: u32,
         center_hz: u64,
         tune_hz: u64,
@@ -1638,7 +1636,9 @@ impl NativeRangeDecoders {
         }
 
         if rtty || navtex || cw {
-            let audio_8k = crate::sidecar::resample_audio(discriminator, sample_rate, 8_000);
+            let mode = if cw { Mode::Cw } else { Mode::Usb };
+            let audio = channelize_demod(iq, offset_hz, sample_rate, mode);
+            let audio_8k = crate::sidecar::resample_audio(&audio, sample_rate, 8_000);
             self.hf_audio.extend_from_slice(&audio_8k);
             const HF_WINDOW: usize = 16_000;
             if self.hf_audio.len() >= HF_WINDOW {
@@ -1653,7 +1653,7 @@ impl NativeRangeDecoders {
                                 events_tx,
                                 crate::db::DecodedMessage {
                                     id: None,
-                                    frequency_hz: center_hz,
+                                    frequency_hz: tune_hz,
                                     protocol: "rtty".into(),
                                     message_type: "text".into(),
                                     address: String::new(),
@@ -1676,7 +1676,7 @@ impl NativeRangeDecoders {
                                 events_tx,
                                 crate::db::DecodedMessage {
                                     id: None,
-                                    frequency_hz: center_hz,
+                                    frequency_hz: tune_hz,
                                     protocol: "navtex".into(),
                                     message_type: "text".into(),
                                     address: String::new(),
@@ -1699,7 +1699,7 @@ impl NativeRangeDecoders {
                                 events_tx,
                                 crate::db::DecodedMessage {
                                     id: None,
-                                    frequency_hz: center_hz,
+                                    frequency_hz: tune_hz,
                                     protocol: "cw".into(),
                                     message_type: "morse".into(),
                                     address: String::new(),

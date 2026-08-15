@@ -334,7 +334,16 @@ impl Db {
     }
 
     pub fn upsert_occupancy(&self, o: &SpectrumOccupancy) -> anyhow::Result<()> {
-        self.conn().execute("INSERT INTO spectrum_occupancy (frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(frequency_bucket_hz,time_bucket_15min) DO UPDATE SET avg_power_db=excluded.avg_power_db,peak_power_db=excluded.peak_power_db,avg_above_floor_db=excluded.avg_above_floor_db,sample_count=excluded.sample_count,noise_floor_db=excluded.noise_floor_db", rusqlite::params![o.frequency_bucket_hz as i64,o.time_bucket_15min,o.avg_power_db,o.peak_power_db,o.avg_above_floor_db,o.sample_count,o.noise_floor_db])?;
+        self.conn().execute(
+            "INSERT INTO spectrum_occupancy (frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db) VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(frequency_bucket_hz,time_bucket_15min) DO UPDATE SET
+               avg_power_db=(spectrum_occupancy.avg_power_db * spectrum_occupancy.sample_count + excluded.avg_power_db * excluded.sample_count) / (spectrum_occupancy.sample_count + excluded.sample_count),
+               peak_power_db=MAX(spectrum_occupancy.peak_power_db, excluded.peak_power_db),
+               avg_above_floor_db=(spectrum_occupancy.avg_above_floor_db * spectrum_occupancy.sample_count + excluded.avg_above_floor_db * excluded.sample_count) / (spectrum_occupancy.sample_count + excluded.sample_count),
+               sample_count=spectrum_occupancy.sample_count + excluded.sample_count,
+               noise_floor_db=(spectrum_occupancy.noise_floor_db * spectrum_occupancy.sample_count + excluded.noise_floor_db * excluded.sample_count) / (spectrum_occupancy.sample_count + excluded.sample_count)",
+            rusqlite::params![o.frequency_bucket_hz as i64, o.time_bucket_15min, o.avg_power_db, o.peak_power_db, o.avg_above_floor_db, o.sample_count, o.noise_floor_db],
+        )?;
         Ok(())
     }
 
@@ -765,6 +774,44 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn occupancy_upsert_averages_within_the_same_15min_bucket() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-occupancy-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let first = super::SpectrumOccupancy {
+            frequency_bucket_hz: 100_000_000,
+            time_bucket_15min: 1,
+            avg_power_db: -80.0,
+            peak_power_db: -70.0,
+            avg_above_floor_db: 10.0,
+            sample_count: 1,
+            noise_floor_db: -90.0,
+        };
+        let second = super::SpectrumOccupancy {
+            avg_power_db: -60.0,
+            peak_power_db: -50.0,
+            avg_above_floor_db: 30.0,
+            sample_count: 1,
+            noise_floor_db: -90.0,
+            ..first
+        };
+        db.upsert_occupancy(&first).unwrap();
+        db.upsert_occupancy(&second).unwrap();
+        let rows = db.recent_occupancy(8).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].avg_power_db + 70.0).abs() < 0.01);
+        assert!((rows[0].peak_power_db + 50.0).abs() < 0.01);
+        assert_eq!(rows[0].sample_count, 2);
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 }

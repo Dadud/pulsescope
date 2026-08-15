@@ -308,7 +308,8 @@ export const Api = {
   scanUnlock: () => postJson('/scan/unlock'),
   scanStatus: () => getJson<{ running: boolean; locked: boolean; holding?: boolean; range?: string | null }>('/scan/status'),
   vfoStates: () => getJson<VfoState[]>('/vfo/states'),
-  vfoMute: (id: number, on: boolean) => postJson(`/vfo/${id}/mute`, { id, on }),
+  /** `muted: true` is sent as `{ on: true }` — the wire flag means muted, not listen. */
+  vfoMute: (id: number, muted: boolean) => postJson(`/vfo/${id}/mute`, { id, on: muted }),
   vfoVolume: (id: number, value: number) => postJson(`/vfo/${id}/volume`, { id, value }),
   vfoFrequency: (id: number, frequency_hz: number) => postJson(`/vfo/${id}/frequency`, { frequency_hz }),
   vfoMode: (id: number, mode: string) => postJson(`/vfo/${id}/mode`, { mode }),

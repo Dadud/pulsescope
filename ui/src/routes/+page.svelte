@@ -143,6 +143,8 @@
   );
 
   const enabledVoiceBanks = $derived(banks.filter((bank) => bank.enabled));
+  const enabledBookmarks = $derived(bookmarks.filter((bookmark) => bookmark.enabled !== false));
+  const listeningVfos = $derived(vfos.filter((vfo) => !vfo.muted));
   const groupedBanks = $derived(
     ['HF', 'VHF', 'UHF', 'Microwave', 'Broadcast', 'Satellite', 'ISM', 'Other']
       .map((group) => ({ group, banks: filteredBanks.filter((bank) => bandGroup(bank) === group) }))
@@ -820,9 +822,8 @@
   }
 
   async function startBookmarkScan() {
-    const enabledBookmarks = bookmarks.filter((bookmark) => bookmark.enabled !== false);
     if (!enabledBookmarks.length) {
-      notice = 'Save at least one frequency before scanning bookmarks.';
+      notice = 'Enable at least one saved frequency before scanning bookmarks.';
       return;
     }
     activeRange = 'Bookmarks';
@@ -1352,7 +1353,7 @@
               <button type="button" onclick={startEnabledBanks} disabled={!enabledVoiceBanks.length}>
                 Scan enabled ({enabledVoiceBanks.length})
               </button>
-              <button type="button" onclick={startBookmarkScan} disabled={!bookmarks.length}>
+              <button type="button" onclick={startBookmarkScan} disabled={!enabledBookmarks.length}>
                 Scan bookmarks
               </button>
             </div>
@@ -1475,7 +1476,7 @@
         </label>
       {/if}
       <div class="device-meta">
-        <span class="vfo-summary">{vfos.length} listening VFO{vfos.length === 1 ? '' : 's'}</span>
+        <span class="vfo-summary">{listeningVfos.length} listening VFO{listeningVfos.length === 1 ? '' : 's'}</span>
         <span class="audio-status" class:on={audioState === 'playing'}>Audio: {audioState}</span>
       </div>
     </div>

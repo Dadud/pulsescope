@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Api, type DecodedMessage, type VfoState } from '$lib/api';
+  import { BrowserAudio } from '$lib/browser-audio';
 
   let vfos = $state<VfoState[]>([]);
   let messages = $state<DecodedMessage[]>([]);
@@ -11,6 +12,8 @@
   let updatedAt = $state(0);
   let error = $state('');
   let loading = $state(true);
+  let audioError = $state('');
+  let browserAudio: BrowserAudio | null = null;
 
   function fmtHz(hz = 0) {
     if (hz >= 1e9) return `${(hz / 1e9).toFixed(6)} GHz`;
@@ -46,15 +49,31 @@
     loading = false;
   }
   async function listen(vfo: VfoState) {
+    audioError = '';
+    if (vfo.muted) {
+      try {
+        await browserAudio?.start();
+        await Api.vfoFrequency(vfo.id, vfo.frequency_hz);
+      } catch (e) {
+        audioError = `Browser audio could not start: ${String(e)}`;
+        return;
+      }
+    }
     await Api.vfoMute(vfo.id, !vfo.muted);
+    if (!vfo.muted) browserAudio?.stop();
     await refresh();
   }
   onMount(() => {
+    browserAudio = new BrowserAudio(() => {});
     void refresh();
     const timer = window.setInterval(() => void refresh(), 1500);
     const visible = () => { if (!document.hidden) void refresh(); };
     document.addEventListener('visibilitychange', visible);
-    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
+    return () => {
+      browserAudio?.stop();
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', visible);
+    };
   });
 </script>
 
@@ -75,6 +94,7 @@
   </div>
 
   {#if error}<div class="callout" role="status">{error}</div>{/if}
+  {#if audioError}<div class="callout" role="status">{audioError}</div>{/if}
 
   <div class="workspace-grid">
     <section class="card panel vfo-panel">

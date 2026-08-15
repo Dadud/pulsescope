@@ -110,7 +110,7 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | Method | Path                       | Body              |
 |--------|----------------------------|-------------------|
 | GET    | `/vfo/states`              | —                 |
-| POST   | `/vfo/:id/mute`            | `{ id, on }`      |
+| POST   | `/vfo/:id/mute`            | `{ id, on }` `on: true` **mutes** the VFO |
 | POST   | `/vfo/:id/volume`          | `{ id, value }`   |
 | POST   | `/vfo/:id/audio_agc`       | `{ id, on }`      |
 | POST   | `/vfo/:id/identify`        | — signal-ID on a snapshot of live IQ mixed to this VFO |

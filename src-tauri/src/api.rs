@@ -1217,8 +1217,19 @@ async fn profile_apply_v2(State(s): State<ApiState>, Path(id): Path<String>) -> 
     };
     let original = s.0.device.status();
     let apply = (|| -> anyhow::Result<()> {
-        s.0.device.set_sample_rate(profile.sample_rate_hz)?;
-        s.0.device.set_bandwidth(profile.bandwidth_hz)?;
+        if profile.bandwidth_hz > profile.sample_rate_hz {
+            anyhow::bail!("bandwidth_hz must not exceed sample_rate_hz");
+        }
+        let analog_hz = s.0.device.set_sample_contract(profile.sample_rate_hz)?;
+        if profile.bandwidth_hz > analog_hz {
+            anyhow::bail!(
+                "bandwidth_hz {} exceeds analog contract {analog_hz} Hz",
+                profile.bandwidth_hz
+            );
+        }
+        if profile.bandwidth_hz > 0 && profile.bandwidth_hz != analog_hz {
+            s.0.device.set_bandwidth(profile.bandwidth_hz)?;
+        }
         s.0.device.set_frequency(profile.center_frequency_hz)?;
         Ok(())
     })();
@@ -4450,7 +4461,13 @@ async fn vfo_identify(State(s): State<ApiState>, Path(id): Path<i64>) -> impl In
             .as_ref()
             .and_then(|h| h.state.lock().active_range.clone())
             .unwrap_or_default();
-    let snr_db = if v.squelch_open { 18.0 } else { 8.0 };
+    let snr_db = if v.snr_db.abs() > 0.01 {
+        v.snr_db
+    } else if v.squelch_open {
+        18.0
+    } else {
+        8.0
+    };
     let status = s.0.device.status();
 
     let classification = if status.connected {
@@ -4803,15 +4820,14 @@ fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
     }
 }
 
-/// Copy live IQ from the capture snapshot ring. Falls back to a direct device
-/// read only when the scanner is not running, so waterfall/audio keep their samples.
+/// Copy live IQ from the capture snapshot ring. Never reads the hardware
+/// stream while the scanner owns it — that would steal waterfall/audio samples.
 fn live_iq_snapshot(s: &ApiState, count: usize) -> Result<Vec<Complex<f32>>, String> {
     if let Some(handle) = s.0.scanner.read().as_ref() {
-        if let Some(iq) = handle.snapshot_iq(count) {
-            if iq.len() > 2048 {
-                return Ok(iq);
-            }
-        }
+        return handle
+            .snapshot_iq(count)
+            .filter(|iq| !iq.is_empty())
+            .ok_or_else(|| "live IQ snapshot is empty; wait for capture".to_string());
     }
     s.0.device
         .read_iq(count.max(4096))
