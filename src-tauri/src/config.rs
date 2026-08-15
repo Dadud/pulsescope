@@ -1138,6 +1138,9 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             "RTTY 20m", 14_079_000, 14_082_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
+            "CW 20m", 14_020_000, 14_040_000, "usb", 500, 1, 125_000, Off,
+        ),
+        range(
             "WSPR 20m", 14_095_600, 14_097_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
@@ -1759,6 +1762,7 @@ mod tests {
             "Pagers",
             "NAVTEX 518",
             "RTTY 20m",
+            "CW 20m",
             "WSPR 20m",
             "WSPR 40m",
             "Radiosonde",

@@ -180,9 +180,12 @@
     },
     {
       "id": "decoder-rds", "name": "Broadcast RDS", "group": "decoder",
-      "status": "development", "visibility": "normal", "required": true,
+      "status": "fixture_verified", "visibility": "normal", "required": true,
       "acceptance_gate": "RDS recovered from the same stereo multiplex fixture and verified live on broadcast FM.",
-      "evidence": [{"type": "test", "ref": "native RDS unit tests; recorded-IQ gate remains open"}]
+      "evidence": [
+        {"type": "test", "ref": "demod::tests::rds_hello_multiplex_recovers_pi_and_ps"},
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"}
+      ]
     },
     {
       "id": "decoder-digital-voice", "name": "DMR, P25, NXDN, D-Star, YSF and M17", "group": "decoder",
@@ -204,7 +207,7 @@
       "acceptance_gate": "Per-protocol recorded-IQ/audio fixtures and normalized events.",
       "evidence": [
         {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
-        {"type": "test", "ref": "native RTTY/NAVTEX recorded-audio fixtures; FT8/WSPR/SSTV remain scan-profile or native"}
+        {"type": "test", "ref": "native RTTY/NAVTEX/CW recorded-audio fixtures; FT8/WSPR/SSTV remain scan-profile or native"}
       ]
     },
     {

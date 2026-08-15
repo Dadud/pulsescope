@@ -446,7 +446,8 @@ async fn scanner_loop(
                                 || range.name.starts_with("FT8 ")
                                 || range.name.starts_with("WSPR ")
                                 || range.name.starts_with("RTTY ")
-                                || range.name.starts_with("NAVTEX ")),
+                                || range.name.starts_with("NAVTEX ")
+                                || range.name.starts_with("CW ")),
                             volume: 0.7,
                             audio_agc: true,
                             squelch_open: false,
@@ -875,6 +876,8 @@ struct NativeRangeDecoders {
     vdl2: Option<crate::aviation::Vdl2IqDecoder>,
     hf_audio: Vec<f32>,
     last_hf_text: String,
+    rds_mpx: Vec<f32>,
+    last_rds_pi: Option<u16>,
     sample_rate: u32,
 }
 
@@ -897,6 +900,8 @@ impl NativeRangeDecoders {
             vdl2: Some(crate::aviation::Vdl2IqDecoder::new(sample_rate)),
             hf_audio: Vec::new(),
             last_hf_text: String::new(),
+            rds_mpx: Vec::new(),
+            last_rds_pi: None,
             sample_rate,
         }
     }
@@ -935,6 +940,9 @@ impl NativeRangeDecoders {
         let pocsag = range_name_matches(name, &["pocsag", "pager"]);
         let rtty = range_name_matches(name, &["rtty"]);
         let navtex = range_name_matches(name, &["navtex"]);
+        let cw = range_name_matches(name, &["cw"]);
+        let rds =
+            range.mode.eq_ignore_ascii_case("wfm") || range_name_matches(name, &["fm broadcast"]);
 
         if mode_s {
             if self.adsb.is_none() {
@@ -1150,7 +1158,49 @@ impl NativeRangeDecoders {
             }
         }
 
-        if rtty || navtex {
+        if rds {
+            let mpx = crate::sidecar::resample_audio(discriminator, sample_rate, 190_000);
+            self.rds_mpx.extend_from_slice(&mpx);
+            const RDS_WINDOW: usize = 76_000;
+            if self.rds_mpx.len() >= RDS_WINDOW {
+                if let Some(result) = crate::demod::decode_rds(&self.rds_mpx, 190_000.0) {
+                    if result.groups_found > 0 {
+                        if let Some(pi) = result.pi_code {
+                            if self.last_rds_pi != Some(pi) {
+                                self.last_rds_pi = Some(pi);
+                                let ps = result.program_service.clone().unwrap_or_default();
+                                publish_decoded(
+                                    db,
+                                    events_tx,
+                                    crate::db::DecodedMessage {
+                                        id: None,
+                                        frequency_hz: center_hz,
+                                        protocol: "rds".into(),
+                                        message_type: "group".into(),
+                                        address: format!("{pi:04X}"),
+                                        function_code: result
+                                            .pty
+                                            .map(|pty| format!("PTY{pty}"))
+                                            .unwrap_or_default(),
+                                        content: ps.clone(),
+                                        raw: ps,
+                                        encryption: "none".into(),
+                                        timestamp_ms: now_ms(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                let drain = self.rds_mpx.len() / 2;
+                self.rds_mpx.drain(..drain);
+            }
+        } else {
+            self.rds_mpx.clear();
+            self.last_rds_pi = None;
+        }
+
+        if rtty || navtex || cw {
             let audio_8k = crate::sidecar::resample_audio(discriminator, sample_rate, 8_000);
             self.hf_audio.extend_from_slice(&audio_8k);
             const HF_WINDOW: usize = 16_000;
@@ -1192,6 +1242,29 @@ impl NativeRangeDecoders {
                                     frequency_hz: center_hz,
                                     protocol: "navtex".into(),
                                     message_type: "text".into(),
+                                    address: String::new(),
+                                    function_code: String::new(),
+                                    content: text.clone(),
+                                    raw: text,
+                                    encryption: "none".into(),
+                                    timestamp_ms: now_ms(),
+                                },
+                            );
+                        }
+                    }
+                }
+                if cw {
+                    if let Some(text) = crate::demod::decode_cw(&self.hf_audio, 8_000.0, 700.0) {
+                        if !text.is_empty() && text != self.last_hf_text {
+                            self.last_hf_text = text.clone();
+                            publish_decoded(
+                                db,
+                                events_tx,
+                                crate::db::DecodedMessage {
+                                    id: None,
+                                    frequency_hz: center_hz,
+                                    protocol: "cw".into(),
+                                    message_type: "morse".into(),
                                     address: String::new(),
                                     function_code: String::new(),
                                     content: text.clone(),
@@ -1280,6 +1353,8 @@ mod scan_window_tests {
         assert!(range_name_matches("VDL2", &["vdl"]));
         assert!(range_name_matches("NAVTEX 518", &["navtex"]));
         assert!(range_name_matches("RTTY 20m", &["rtty"]));
+        assert!(range_name_matches("CW 20m", &["cw"]));
+        assert!(range_name_matches("FM Broadcast", &["fm broadcast"]));
         assert!(range_name_matches("Pagers", &["pocsag", "pager"]));
         assert!(!range_name_matches("Aircraft AM", &["ais", "acars", "vdl"]));
         assert!(!range_name_matches("2m Amateur", &["aprs"]));

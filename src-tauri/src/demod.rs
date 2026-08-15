@@ -1028,15 +1028,10 @@ pub fn decode_navtex(samples: &[f32], sample_rate: f32) -> Option<String> {
 // ── CTCSS / DCS ────────────────────────────────────────────────────────────
 
 /// Downconvert and decode RDS from a WFM-demodulated multiplex signal.
-/// RDS sits on a 57 kHz suppressed-carrier AM/PM subcarrier with ±2 kHz
-/// deviation. Data rate is 1187.5 bps, differentially encoded (BPSK).
-/// This decoder performs:
-///   1. Quadrature downconvert from 57 kHz
-///   2. Low-pass to isolate the 1.1875 kHz baseband
-///   3. Clock recovery via zero crossings
-///   4. Differential decoding
 ///
-/// Returns decoded groups as a JSON-serializable struct.
+/// RDS is 1187.5 bit/s differential biphase on a 57 kHz subcarrier. Blocks are
+/// 26 bits (16 data + 10 check) identified by IEC 62106 offset words. Sample
+/// rate must be above 114 kHz so the 57 kHz carrier is not aliased.
 pub struct RdsResult {
     pub bits_decoded: usize,
     pub groups_found: usize,
@@ -1046,68 +1041,158 @@ pub struct RdsResult {
     pub pi_code: Option<u16>,
 }
 
-/// Decode RDS from demodulated WFM audio (multiplex).
-/// `sample_rate` must be the audio rate (typically 96 kHz after resampling).
-/// Returns None if no RDS subcarrier is present.
-pub fn decode_rds(multiplex: &[f32], sample_rate: f32) -> Option<RdsResult> {
-    const RDS_CARRIER: f32 = 57_000.0;
-    const BIT_RATE: f32 = 1187.5;
-    const RDS_BW: f32 = 2_500.0;
+const RDS_CARRIER_HZ: f32 = 57_000.0;
+const RDS_BIT_RATE: f32 = 1187.5;
+const RDS_OFFSET_A: u16 = 0x0FC;
+const RDS_OFFSET_B: u16 = 0x198;
+const RDS_OFFSET_C: u16 = 0x168;
+const RDS_OFFSET_CP: u16 = 0x350;
+const RDS_OFFSET_D: u16 = 0x1B4;
+const RDS_POLY11: u32 = 0x5B9; // x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
 
-    // Need at least 0.5 seconds for meaningful RDS decode
-    if multiplex.len() < (sample_rate * 0.5) as usize {
+fn rds_mod(bits: u32, bit_count: u8) -> u16 {
+    let mut value = bits;
+    for i in (10..bit_count).rev() {
+        if ((value >> i) & 1) == 1 {
+            value ^= RDS_POLY11 << (i - 10);
+        }
+    }
+    (value & 0x3FF) as u16
+}
+
+fn rds_checkword(data: u16) -> u16 {
+    rds_mod(u32::from(data) << 10, 26)
+}
+
+fn rds_encode_block(data: u16, offset: u16) -> u32 {
+    ((u32::from(data)) << 10) | u32::from(rds_checkword(data) ^ offset)
+}
+
+fn rds_syndrome(block: u32) -> u16 {
+    rds_mod(block, 26)
+}
+
+fn rds_block_offset(syndrome: u16) -> Option<char> {
+    match syndrome {
+        RDS_OFFSET_A => Some('A'),
+        RDS_OFFSET_B => Some('B'),
+        RDS_OFFSET_C | RDS_OFFSET_CP => Some('C'),
+        RDS_OFFSET_D => Some('D'),
+        _ => None,
+    }
+}
+
+fn rds_bits_of_block(block: u32) -> [u8; 26] {
+    let mut bits = [0u8; 26];
+    for (index, bit) in bits.iter_mut().enumerate() {
+        *bit = ((block >> (25 - index)) & 1) as u8;
+    }
+    bits
+}
+
+fn rds_word_from_bits(bits: &[u8]) -> u32 {
+    bits.iter()
+        .take(26)
+        .fold(0u32, |acc, bit| (acc << 1) | u32::from(*bit))
+}
+
+fn rds_differential_encode(bits: &[u8]) -> Vec<u8> {
+    let mut previous = 0u8;
+    bits.iter()
+        .map(|&bit| {
+            previous ^= bit;
+            previous
+        })
+        .collect()
+}
+
+fn rds_differential_decode(bits: &[u8]) -> Vec<u8> {
+    bits.windows(2).map(|pair| pair[0] ^ pair[1]).collect()
+}
+
+fn rds_group_0a_bits(pi: u16, pty: u8, segment: u8, chars: [u8; 2]) -> Vec<u8> {
+    let block_b = (u16::from(pty & 0x1F) << 5) | u16::from(segment & 0x03);
+    let block_c = 0xE0E0;
+    let block_d = u16::from(chars[0]) << 8 | u16::from(chars[1]);
+    let mut bits = Vec::with_capacity(104);
+    for (data, offset) in [
+        (pi, RDS_OFFSET_A),
+        (block_b, RDS_OFFSET_B),
+        (block_c, RDS_OFFSET_C),
+        (block_d, RDS_OFFSET_D),
+    ] {
+        bits.extend(rds_bits_of_block(rds_encode_block(data, offset)));
+    }
+    bits
+}
+
+/// 57 kHz multiplex carrying PI `0xBEEF` and PS `HELLO`.
+pub fn synthesize_rds_hello_multiplex(sample_rate: f32) -> Vec<f32> {
+    let ps = b"HELLO   ";
+    let mut payload = Vec::new();
+    for _ in 0..2 {
+        for segment in 0..4u8 {
+            let at = (segment as usize) * 2;
+            payload.extend(rds_group_0a_bits(0xBEEF, 10, segment, [ps[at], ps[at + 1]]));
+        }
+    }
+    let encoded = rds_differential_encode(&payload);
+    let samples_per_chip = sample_rate / (RDS_BIT_RATE * 2.0);
+    let mut samples = Vec::new();
+    let mut phase = 0.0f32;
+    let carrier_step = TAU * RDS_CARRIER_HZ / sample_rate;
+    for bit in encoded {
+        let first = if bit != 0 { 1.0 } else { -1.0 };
+        for chip in [first, -first] {
+            let mut consumed = 0.0;
+            while consumed + 0.5 < samples_per_chip {
+                samples.push(chip * 0.2 * phase.cos());
+                phase = (phase + carrier_step).rem_euclid(TAU);
+                consumed += 1.0;
+            }
+        }
+    }
+    samples
+}
+
+/// Decode RDS from demodulated WFM multiplex audio.
+/// Returns None if the 57 kHz subcarrier is absent.
+pub fn decode_rds(multiplex: &[f32], sample_rate: f32) -> Option<RdsResult> {
+    if sample_rate < 114_000.0 || multiplex.len() < (sample_rate * 0.25) as usize {
         return None;
     }
 
-    // 1. Quadrature mix-down from 57 kHz
-    let mut baseband_i = Vec::with_capacity(multiplex.len());
-    let mut baseband_q = Vec::with_capacity(multiplex.len());
-    for (n, &sample) in multiplex.iter().enumerate() {
-        let phase = TAU * RDS_CARRIER * n as f32 / sample_rate;
-        baseband_i.push(sample * phase.cos());
-        baseband_q.push(sample * -phase.sin());
-    }
-
-    // 2. One-pole low-pass at ~2.5 kHz to isolate baseband RDS
-    let alpha = 1.0 - (-TAU * RDS_BW / sample_rate).exp();
+    let alpha = 1.0 - (-TAU * 4_000.0 / sample_rate).exp();
     let mut lp_i = 0.0f32;
-    let mut lp_q = 0.0f32;
-    let filtered: Vec<f32> = baseband_i
+    let baseband: Vec<f32> = multiplex
         .iter()
-        .zip(baseband_q.iter())
-        .map(|(&i, &q)| {
-            lp_i += (i - lp_i) * alpha;
-            lp_q += (q - lp_q) * alpha;
-            (lp_i * lp_i + lp_q * lp_q).sqrt()
+        .enumerate()
+        .map(|(index, &sample)| {
+            let phase = TAU * RDS_CARRIER_HZ * index as f32 / sample_rate;
+            let mixed = sample * phase.cos();
+            lp_i += (mixed - lp_i) * alpha;
+            lp_i
         })
         .collect();
 
-    // 3. Check signal presence: RMS of the filtered signal
-    let rms = filtered.iter().map(|x| x * x).sum::<f32>() / filtered.len() as f32;
-    if rms < 1e-8 {
+    let rms = baseband.iter().map(|x| x * x).sum::<f32>() / baseband.len() as f32;
+    if rms < 1e-10 {
         return None;
     }
 
-    // 4. Clock recovery via zero-crossing on the shaped signal
-    // Average and threshold to get bipolar data
-    let dc = filtered.iter().sum::<f32>() / filtered.len() as f32;
-    let bipolar: Vec<f32> = filtered.iter().map(|x| x - dc).collect();
-
-    let samples_per_bit = sample_rate / BIT_RATE;
-    let mut bits: Vec<u8> = Vec::new();
+    let samples_per_chip = sample_rate / (RDS_BIT_RATE * 2.0);
+    let mut chips = Vec::new();
     let mut pos = 0.0f32;
-    while (pos as usize + samples_per_bit as usize / 2) < bipolar.len() {
-        let idx = pos as usize;
-        let center = idx + (samples_per_bit / 2.0) as usize;
-        if center < bipolar.len() {
-            bits.push(if bipolar[center] >= 0.0 { 1 } else { 0 });
+    while (pos as usize + (samples_per_chip as usize / 2)) < baseband.len() {
+        let center = pos as usize + (samples_per_chip / 2.0) as usize;
+        if center < baseband.len() {
+            chips.push(if baseband[center] >= 0.0 { 1u8 } else { 0 });
         }
-        pos += samples_per_bit;
+        pos += samples_per_chip;
     }
-
-    if bits.len() < 104 {
+    if chips.len() < 8 {
         return Some(RdsResult {
-            bits_decoded: bits.len(),
+            bits_decoded: 0,
             groups_found: 0,
             program_service: None,
             radio_text: None,
@@ -1116,84 +1201,135 @@ pub fn decode_rds(multiplex: &[f32], sample_rate: f32) -> Option<RdsResult> {
         });
     }
 
-    // 5. Differential decode
-    let diff_bits: Vec<u8> = bits.windows(2).map(|w| w[0] ^ w[1]).collect();
+    let mut best = RdsResult {
+        bits_decoded: 0,
+        groups_found: 0,
+        program_service: None,
+        radio_text: None,
+        pty: None,
+        pi_code: None,
+    };
+    for offset in 0..2 {
+        if chips.len() <= offset + 1 {
+            continue;
+        }
+        let manchester: Vec<u8> = chips[offset..]
+            .chunks_exact(2)
+            .map(|pair| u8::from(pair[0] != pair[1] && pair[0] == 1))
+            .collect();
+        let inverted: Vec<u8> = manchester.iter().map(|bit| 1 - bit).collect();
+        for stream in [manchester, inverted] {
+            let candidate = decode_rds_bitstream(&stream);
+            if candidate.groups_found > best.groups_found {
+                best = candidate;
+            }
+        }
+    }
+    Some(best)
+}
 
-    // 6. Search for RDS sync word (block A offset word: 0b00111111000 = 0x3D8)
-    // After differential decoding, we look for the known sync pattern.
-    // We scan for block alignment by checking the 10-bit offset word.
+fn decode_rds_bitstream(manchester_bits: &[u8]) -> RdsResult {
+    let data_bits = rds_differential_decode(manchester_bits);
     let mut groups = Vec::new();
-    let sync_pattern: [u8; 10] = [0, 0, 1, 1, 1, 1, 1, 1, 0, 0];
-
+    let mut ps = [None; 8];
     let mut i = 0;
-    while i + 104 <= diff_bits.len() {
-        // Check for sync pattern at this position
-        let matches: usize = (0..10)
-            .map(|j| {
-                if diff_bits[i + j] == sync_pattern[j] {
-                    1
-                } else {
-                    0
-                }
-            })
-            .sum();
-        if matches >= 8 {
-            // Extract 26-bit words for each of the 4 blocks
-            let extract_word = |start: usize| -> u32 {
-                diff_bits[start..start.min(diff_bits.len())]
-                    .iter()
-                    .take(26)
-                    .fold(0u32, |acc, &b| (acc << 1) | b as u32)
-            };
-            let word_a = extract_word(i);
-            // PI code is the first 16 bits of block A
-            let pi = (word_a >> 10) as u16;
-            // PTY is bits 15-19 of block B
-            let word_b = extract_word(i + 26);
-            let pty = ((word_b >> 5) & 0x1F) as u8;
-            groups.push((pi, pty, i));
-            i += 104;
-        } else {
+    while i + 104 <= data_bits.len() {
+        let a = rds_word_from_bits(&data_bits[i..]);
+        if rds_block_offset(rds_syndrome(a)) != Some('A') {
             i += 1;
+            continue;
         }
+        let b = rds_word_from_bits(&data_bits[i + 26..]);
+        let c = rds_word_from_bits(&data_bits[i + 52..]);
+        let d = rds_word_from_bits(&data_bits[i + 78..]);
+        if rds_block_offset(rds_syndrome(b)) != Some('B')
+            || rds_block_offset(rds_syndrome(c)) != Some('C')
+            || rds_block_offset(rds_syndrome(d)) != Some('D')
+        {
+            i += 1;
+            continue;
+        }
+        let pi = (a >> 10) as u16;
+        let block_b = (b >> 10) as u16;
+        let pty = ((block_b >> 5) & 0x1F) as u8;
+        let group_type = block_b >> 12;
+        if group_type == 0 {
+            let segment = (block_b & 0x03) as usize;
+            let chars = (d >> 10) as u16;
+            ps[segment * 2] = Some((chars >> 8) as u8);
+            ps[segment * 2 + 1] = Some(chars as u8);
+        }
+        groups.push((pi, pty));
+        i += 104;
     }
 
-    if groups.is_empty() {
-        return Some(RdsResult {
-            bits_decoded: diff_bits.len(),
-            groups_found: 0,
-            program_service: None,
-            radio_text: None,
-            pty: None,
-            pi_code: None,
-        });
-    }
-
-    // Aggregate the most common PI and PTY
     use std::collections::HashMap;
     let mut pi_counts: HashMap<u16, usize> = HashMap::new();
     let mut pty_counts: HashMap<u8, usize> = HashMap::new();
-    for (pi, pty, _) in &groups {
+    for (pi, pty) in &groups {
         *pi_counts.entry(*pi).or_default() += 1;
         *pty_counts.entry(*pty).or_default() += 1;
     }
-    let pi_code = pi_counts
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(k, _)| k);
-    let pty = pty_counts
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(k, _)| k);
+    let program_service = if ps.iter().all(Option::is_some) {
+        Some(
+            ps.iter()
+                .filter_map(|ch| *ch)
+                .map(|ch| {
+                    if (0x20..=0x7e).contains(&ch) {
+                        ch as char
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
-    Some(RdsResult {
-        bits_decoded: diff_bits.len(),
+    RdsResult {
+        bits_decoded: data_bits.len(),
         groups_found: groups.len(),
-        program_service: None, // Requires full block-by-block PS decoding (8-char display, sent over 4 groups)
+        program_service: program_service.filter(|text| !text.is_empty()),
         radio_text: None,
-        pty,
-        pi_code,
-    })
+        pty: pty_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(k, _)| k),
+        pi_code: pi_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(k, _)| k),
+    }
+}
+
+/// 700 Hz Morse "SOS" for recorded-audio fixtures.
+pub fn synthesize_cw_sos(sample_rate: f32, tone_hz: f32) -> Vec<f32> {
+    let dit = (sample_rate * 0.1) as usize;
+    let dah = dit * 3;
+    let gap = dit;
+    let letter_gap = dit * 3;
+    let mut samples = Vec::new();
+    let key = |samples: &mut Vec<f32>, duration: usize| {
+        for i in 0..duration {
+            samples.push((TAU * tone_hz * i as f32 / sample_rate).sin() * 0.5);
+        }
+        samples.extend(std::iter::repeat_n(0.0, gap));
+    };
+    for _ in 0..3 {
+        key(&mut samples, dit);
+    }
+    samples.extend(std::iter::repeat_n(0.0, letter_gap));
+    for _ in 0..3 {
+        key(&mut samples, dah);
+    }
+    samples.extend(std::iter::repeat_n(0.0, letter_gap));
+    for _ in 0..3 {
+        key(&mut samples, dit);
+    }
+    samples
 }
 
 /// Standard CTCSS tones (EIA) in Hz.
@@ -1563,31 +1699,7 @@ mod tests {
     fn cw_decodes_sos() {
         let sample_rate = 8000.0;
         let tone_hz = 700.0;
-        let dit_samples = (sample_rate * 0.1) as usize; // 100ms per dit
-        let dah_samples = dit_samples * 3;
-        let gap_samples = dit_samples;
-        let letter_gap = dit_samples * 3;
-        let mut samples: Vec<f32> = Vec::new();
-        let key = |samples: &mut Vec<f32>, dur: usize| {
-            for i in 0..dur {
-                samples.push((TAU * tone_hz * i as f32 / sample_rate).sin() * 0.5);
-            }
-            samples.extend(std::iter::repeat_n(0.0, gap_samples));
-        };
-        // S = ...
-        key(&mut samples, dit_samples);
-        key(&mut samples, dit_samples);
-        key(&mut samples, dit_samples);
-        samples.extend(std::iter::repeat_n(0.0, letter_gap));
-        // O = ---
-        key(&mut samples, dah_samples);
-        key(&mut samples, dah_samples);
-        key(&mut samples, dah_samples);
-        samples.extend(std::iter::repeat_n(0.0, letter_gap));
-        // S = ...
-        key(&mut samples, dit_samples);
-        key(&mut samples, dit_samples);
-        key(&mut samples, dit_samples);
+        let samples = synthesize_cw_sos(sample_rate, tone_hz);
         let result = decode_cw(&samples, sample_rate, tone_hz).expect("should decode CW");
         assert!(result.contains('S'), "expected S, got '{result}'");
         assert!(result.contains('O'), "expected O, got '{result}'");
@@ -1603,25 +1715,47 @@ mod tests {
     fn rds_rejects_silence() {
         let samples = vec![0.0f32; 48_000];
         assert!(decode_rds(&samples, 96_000.0).is_none());
+        assert!(decode_rds(&samples, 190_000.0).is_none());
+    }
+
+    #[test]
+    fn rds_block_crc_identifies_offset_words() {
+        for offset in [RDS_OFFSET_A, RDS_OFFSET_B, RDS_OFFSET_C, RDS_OFFSET_D] {
+            let block = rds_encode_block(0xBEEF, offset);
+            assert_eq!(
+                rds_block_offset(rds_syndrome(block)),
+                rds_block_offset(offset)
+            );
+        }
+    }
+
+    #[test]
+    fn rds_hello_multiplex_recovers_pi_and_ps() {
+        let sample_rate = 190_000.0;
+        let samples = synthesize_rds_hello_multiplex(sample_rate);
+        let result = decode_rds(&samples, sample_rate).expect("RDS subcarrier");
+        assert!(result.groups_found >= 4, "groups={}", result.groups_found);
+        assert_eq!(result.pi_code, Some(0xBEEF));
+        assert_eq!(result.pty, Some(10));
+        let ps = result.program_service.unwrap_or_default();
+        assert!(ps.contains("HELLO"), "ps={ps}");
     }
 
     #[test]
     fn rds_downconverts_57khz_subcarrier() {
-        // Generate a 57 kHz tone (simulates RDS subcarrier presence)
-        let sample_rate = 96_000.0f32;
-        let n = (sample_rate * 0.5) as usize;
+        let sample_rate = 190_000.0f32;
+        let n = (sample_rate * 0.3) as usize;
         let samples: Vec<f32> = (0..n)
             .map(|i| (TAU * 57_000.0 * i as f32 / sample_rate).sin() * 0.1)
             .collect();
         let result = decode_rds(&samples, sample_rate);
-        // Should detect energy at 57 kHz but won't find valid groups from a pure tone
-        // It should at least not return None (signal present)
         assert!(
             result.is_some(),
             "RDS decoder should detect 57 kHz subcarrier energy"
         );
         let r = result.unwrap();
-        assert!(r.bits_decoded > 0, "should have decoded some bits");
+        assert_eq!(r.groups_found, 0, "a pure tone is not a valid RDS group");
+        assert!(r.pi_code.is_none());
     }
 
     #[test]

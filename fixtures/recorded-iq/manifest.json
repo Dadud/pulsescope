@@ -136,6 +136,36 @@
         "info_contains": "HELLO"
       },
       "sha256": "8e500277a04ebec795961a0bf28bb568f610572251561b4db88d39f433d0aa01"
+    },
+    {
+      "id": "rds-beef-hello",
+      "protocol": "rds",
+      "file": "rds-beef-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "rds",
+        "icao": null,
+        "mmsi": null,
+        "source": "BEEF",
+        "info_contains": "HELLO"
+      },
+      "sha256": "f11f082999688e46d41e0de30d9cfe1f1f9dfe9e8343365dbc43e2c10227b098"
+    },
+    {
+      "id": "cw-sos",
+      "protocol": "cw",
+      "file": "cw-sos.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "cw",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "S"
+      },
+      "sha256": "83819eec178a6ff37878edd1361b1fba5d12b0619ea82c2cd6f3ad243a60df4b"
     }
   ]
 }

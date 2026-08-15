@@ -393,10 +393,10 @@ const ADAPTATION_TEMPLATES: &[AdaptationTemplate] = &[
         catalog_id: "rds",
         name: "Broadcast RDS",
         integration: "native_wfm",
-        readiness: "on_demand",
+        readiness: "live",
         native_rust: true,
         depmanager_name: None,
-        notes: "RDS parsed from the WFM multiplex in demod.rs.",
+        notes: "Native RDS recovers PI/PS from a 57 kHz multiplex fixture and runs on WFM ranges.",
     },
     AdaptationTemplate {
         catalog_id: "uat",
@@ -469,6 +469,15 @@ const ADAPTATION_TEMPLATES: &[AdaptationTemplate] = &[
         native_rust: true,
         depmanager_name: None,
         notes: "Native NAVTEX demod runs on the NAVTEX 518 scan range.",
+    },
+    AdaptationTemplate {
+        catalog_id: "cw",
+        name: "CW / Morse",
+        integration: "native_audio",
+        readiness: "live",
+        native_rust: true,
+        depmanager_name: None,
+        notes: "Native CW demod runs on CW-named scan ranges.",
     },
     AdaptationTemplate {
         catalog_id: "dmr",

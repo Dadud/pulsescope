@@ -1468,7 +1468,7 @@ async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
         decoder_fixture_verified_entry("ais", "AIS", "discriminator", "live"),
         decoder_fixture_verified_entry("aprs", "APRS / AX.25", "audio", "live"),
         decoder_fixture_verified_entry("pocsag", "POCSAG", "audio", "live"),
-        decoder_development_entry("rds", "Broadcast RDS", "wfm_multiplex", "on_demand"),
+        decoder_fixture_verified_entry("rds", "Broadcast RDS", "wfm_multiplex", "live"),
         decoder_fixture_verified_entry("uat", "978 UAT", "bits", "live"),
         decoder_fixture_verified_entry("acars", "ACARS", "bits", "live"),
         decoder_fixture_verified_entry("vdl2", "VDL Mode 2", "bits", "live"),
@@ -1477,6 +1477,7 @@ async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
         decoder_development_entry("wspr", "WSPR", "audio", "managed_sidecar"),
         decoder_fixture_verified_entry("rtty", "RTTY / FSK", "audio", "live"),
         decoder_fixture_verified_entry("navtex", "NAVTEX", "audio", "live"),
+        decoder_fixture_verified_entry("cw", "CW / Morse", "audio", "live"),
         decoder_development_entry("dmr", "DMR", "discriminator", "managed_sidecar"),
         decoder_development_entry("p25", "P25", "discriminator", "managed_sidecar"),
         decoder_development_entry("nxdn", "NXDN", "discriminator", "managed_sidecar"),
@@ -1996,6 +1997,9 @@ async fn start_configured_sidecars(s: &ApiState) {
             args.push("--raw-stdin".into());
         }
         jobs.push(("dump978", cfg.dump978.path, args));
+    }
+    if cfg.radiosonde.enabled && !s.0.sidecars.is_running("rs41mod") {
+        jobs.push(("rs41mod", cfg.radiosonde.path, Vec::new()));
     }
 
     for (name, path, args) in jobs {
@@ -4699,7 +4703,7 @@ mod readiness_tests {
     #[test]
     fn required_catalog_decoders_stay_unavailable_until_recorded_iq_e2e() {
         let remaining = [
-            "rds", "rtl433", "ft8", "wspr", "dmr", "p25", "nxdn", "dstar", "ysf", "m17",
+            "rtl433", "ft8", "wspr", "dmr", "p25", "nxdn", "dstar", "ysf", "m17",
         ];
         for id in remaining {
             let decoder = decoder_development_entry(id, id, "iq", "live");
@@ -4717,7 +4721,7 @@ mod readiness_tests {
     #[test]
     fn recorded_iq_e2e_catalog_ids_are_available() {
         for id in [
-            "adsb", "ais", "aprs", "pocsag", "rtty", "navtex", "uat", "acars", "vdl2",
+            "adsb", "ais", "aprs", "pocsag", "rtty", "navtex", "uat", "acars", "vdl2", "rds", "cw",
         ] {
             let decoder = decoder_fixture_verified_entry(id, id, "iq", "live");
             assert_eq!(decoder["id"], *id);

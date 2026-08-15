@@ -25,7 +25,7 @@ const IO_TIMEOUT: Duration = Duration::from_millis(750);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESTARTS: u8 = 3;
 const IQ_SIDECARS: &[&str] = &["rtl_433", "dump978"];
-const AUDIO_SIDECARS: &[&str] = &["multimon-ng", "direwolf", "dsd-fme"];
+const AUDIO_SIDECARS: &[&str] = &["multimon-ng", "direwolf", "dsd-fme", "rs41mod"];
 const MULTIMON_RATE_HZ: u32 = 22_050;
 const AUDIO_SIDECAR_RATE_HZ: u32 = 48_000;
 
@@ -65,6 +65,25 @@ pub fn encode_s16le_audio(samples: &[f32]) -> Vec<u8> {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     bytes
+}
+
+pub fn streaming_wav_header_s16le_mono(sample_rate_hz: u32) -> Vec<u8> {
+    let byte_rate = sample_rate_hz.saturating_mul(2);
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&sample_rate_hz.to_le_bytes());
+    header.extend_from_slice(&byte_rate.to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    header
 }
 
 pub fn resample_audio(samples: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
@@ -232,6 +251,14 @@ impl SidecarRegistry {
             },
         );
         self.spawn_supervisor(name.to_string());
+        if name == "rs41mod" {
+            use tokio::io::AsyncWriteExt;
+            let header = streaming_wav_header_s16le_mono(AUDIO_SIDECAR_RATE_HZ);
+            if let Some(handle) = self.inputs.lock().await.get(name).cloned() {
+                let mut stdin = handle.lock().await;
+                let _ = stdin.write_all(&header).await;
+            }
+        }
         Ok(())
     }
 
@@ -323,8 +350,12 @@ impl SidecarRegistry {
         let audio_22k = resample_audio(samples, sample_rate_hz, MULTIMON_RATE_HZ);
         let bytes_48k = encode_s16le_audio(&audio_48k);
         let bytes_22k = encode_s16le_audio(&audio_22k);
-        self.feed_stdin(&["direwolf", "dsd-fme"], &bytes_48k, audio_48k.len() as u64)
-            .await;
+        self.feed_stdin(
+            &["direwolf", "dsd-fme", "rs41mod"],
+            &bytes_48k,
+            audio_48k.len() as u64,
+        )
+        .await;
         self.feed_stdin(&["multimon-ng"], &bytes_22k, audio_22k.len() as u64)
             .await;
     }
@@ -680,6 +711,11 @@ mod tests {
         assert!(super::consumes_audio("multimon-ng"));
         assert!(super::consumes_audio("direwolf"));
         assert!(super::consumes_audio("dsd-fme"));
+        assert!(super::consumes_audio("rs41mod"));
+        let header = super::streaming_wav_header_s16le_mono(48_000);
+        assert_eq!(header.len(), 44);
+        assert_eq!(&header[..4], b"RIFF");
+        assert_eq!(&header[8..12], b"WAVE");
     }
 
     #[test]

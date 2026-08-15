@@ -239,6 +239,43 @@ pub fn decode_navtex_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedM
         .collect()
 }
 
+pub fn decode_rds_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedMessage> {
+    crate::demod::decode_rds(samples, sample_rate_hz)
+        .filter(|r| r.pi_code.is_some() && r.groups_found > 0)
+        .into_iter()
+        .map(|r| DecodedMessage {
+            id: None,
+            frequency_hz: 100_700_000,
+            protocol: "rds".into(),
+            message_type: "group".into(),
+            address: r.pi_code.map(|pi| format!("{pi:04X}")).unwrap_or_default(),
+            function_code: r.pty.map(|pty| format!("PTY{pty}")).unwrap_or_default(),
+            content: r.program_service.clone().unwrap_or_default(),
+            raw: r.program_service.unwrap_or_default(),
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
+pub fn decode_cw_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedMessage> {
+    crate::demod::decode_cw(samples, sample_rate_hz, 700.0)
+        .into_iter()
+        .map(|text| DecodedMessage {
+            id: None,
+            frequency_hz: 14_020_000,
+            protocol: "cw".into(),
+            message_type: "morse".into(),
+            address: String::new(),
+            function_code: String::new(),
+            content: text.clone(),
+            raw: text,
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
 pub fn decode_uat_bits(bits: &[u8]) -> Vec<DecodedMessage> {
     let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
     let mut decoder = crate::aviation::UatDecoder::new();
@@ -351,6 +388,8 @@ pub fn run_recorded_fixture(
                 "pocsag" => decode_pocsag_audio(&artifact.samples, artifact.sample_rate_hz),
                 "rtty" => decode_rtty_audio(&artifact.samples, artifact.sample_rate_hz as f32),
                 "navtex" => decode_navtex_audio(&artifact.samples, artifact.sample_rate_hz as f32),
+                "rds" => decode_rds_audio(&artifact.samples, artifact.sample_rate_hz as f32),
+                "cw" => decode_cw_audio(&artifact.samples, artifact.sample_rate_hz as f32),
                 _ => anyhow::bail!("unsupported audio protocol {}", entry.protocol),
             })
         }
@@ -531,6 +570,22 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
     )?;
     let vdl2_sha = hex::encode(Sha256::digest(std::fs::read(&vdl2_path)?));
 
+    let rds_artifact = RecordedAudioArtifact {
+        sample_rate_hz: 190_000,
+        samples: crate::demod::synthesize_rds_hello_multiplex(190_000.0),
+    };
+    let rds_path = root.join("rds-beef-hello.audio.json");
+    std::fs::write(&rds_path, serde_json::to_string_pretty(&rds_artifact)?)?;
+    let rds_sha = hex::encode(Sha256::digest(std::fs::read(&rds_path)?));
+
+    let cw_artifact = RecordedAudioArtifact {
+        sample_rate_hz: 8_000,
+        samples: crate::demod::synthesize_cw_sos(8_000.0, 700.0),
+    };
+    let cw_path = root.join("cw-sos.audio.json");
+    std::fs::write(&cw_path, serde_json::to_string_pretty(&cw_artifact)?)?;
+    let cw_sha = hex::encode(Sha256::digest(std::fs::read(&cw_path)?));
+
     let manifest = RecordedFixtureManifest {
         schema: "pulsescope.recorded-iq-fixture".into(),
         version: 1,
@@ -670,6 +725,36 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                 },
                 sha256: vdl2_sha,
             },
+            RecordedFixtureEntry {
+                id: "rds-beef-hello".into(),
+                protocol: "rds".into(),
+                file: "rds-beef-hello.audio.json".into(),
+                kind: "audio".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "rds".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: Some("BEEF".into()),
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: rds_sha,
+            },
+            RecordedFixtureEntry {
+                id: "cw-sos".into(),
+                protocol: "cw".into(),
+                file: "cw-sos.audio.json".into(),
+                kind: "audio".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "cw".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: None,
+                    info_contains: Some("S".into()),
+                },
+                sha256: cw_sha,
+            },
         ],
     };
     std::fs::write(
@@ -737,5 +822,19 @@ mod tests {
 
         let vdl2 = decode_vdl2_bits(&crate::aviation::synthesize_vdl2_hello_bits());
         assert!(vdl2.iter().any(|m| m.content.contains("HELLO")));
+    }
+
+    #[test]
+    fn rds_and_cw_audio_fixtures_decode_to_normalized_events() {
+        let rds = decode_rds_audio(
+            &crate::demod::synthesize_rds_hello_multiplex(190_000.0),
+            190_000.0,
+        );
+        assert!(rds.iter().any(|m| m.address == "BEEF"));
+        assert!(rds.iter().any(|m| m.content.contains("HELLO")));
+
+        let cw = decode_cw_audio(&crate::demod::synthesize_cw_sos(8_000.0, 700.0), 8_000.0);
+        assert!(cw.iter().any(|m| m.content.contains('S')));
+        assert!(cw.iter().any(|m| m.content.contains('O')));
     }
 }
