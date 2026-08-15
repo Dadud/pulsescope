@@ -1820,7 +1820,7 @@ mod scan_window_tests {
             Some(1)
         );
         assert_eq!(
-            selected_vfo(&[muted_locked.clone()]).map(|vfo| vfo.frequency_hz),
+            selected_vfo(std::slice::from_ref(&muted_locked)).map(|vfo| vfo.frequency_hz),
             Some(162_400_000)
         );
     }

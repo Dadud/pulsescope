@@ -1711,22 +1711,22 @@ mod tests {
     }
 
     #[test]
-    fn channelize_demod_follows_an_offset_nfm_vfo() {
-        let sample_rate = 48_000u32;
-        let offset_hz = 5_000.0;
-        let tone_hz = 1_000.0;
-        let mut phase = 0.0f64;
-        let iq: Vec<Complex<f32>> = (0..sample_rate as usize / 20)
-            .map(|index| {
-                let audio = (TAU * tone_hz * index as f32 / sample_rate as f32).sin() * 0.4;
-                phase += std::f64::consts::TAU * (offset_hz + audio as f64) / sample_rate as f64;
-                Complex::from_polar(0.7, phase as f32)
-            })
-            .collect();
-        let pcm = channelize_demod(&iq, offset_hz, sample_rate, Mode::Nfm);
-        assert_eq!(pcm.len(), iq.len());
-        let energy: f32 = pcm.iter().map(|sample| sample * sample).sum();
-        assert!(energy > 1.0, "channelized NFM should recover deviation");
+    fn channelize_demod_at_dc_matches_direct_demod() {
+        let input = tone(2048, 8.0);
+        let mut previous = None;
+        let direct = demodulate(Mode::Nfm, &input, &mut previous);
+        let channelized = channelize_demod(&input, 0.0, 48_000, Mode::Nfm);
+        assert_eq!(direct.len(), channelized.len());
+        let mean_error = direct
+            .iter()
+            .zip(channelized.iter())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / direct.len() as f32;
+        assert!(
+            mean_error < 0.05,
+            "channelize at DC should match NFM demod, mean error {mean_error}"
+        );
     }
 
     #[test]
