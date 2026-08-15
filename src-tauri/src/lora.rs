@@ -635,6 +635,13 @@ pub fn meshtastic_hello_bytes() -> Vec<u8> {
     bytes
 }
 
+pub fn meshtastic_encrypted_bytes() -> Vec<u8> {
+    vec![
+        0xff, 0xff, 0xff, 0xff, 0xef, 0xcd, 0xab, 0x00, 0x02, 0x00, 0x00, 0x00, 0x63, 0x08, 0x00,
+        0x00, 0x9a, 0x3c, 0x11, 0x88, 0x70, 0x01, 0x44, 0x23,
+    ]
+}
+
 pub fn meshcore_hello_bytes() -> Vec<u8> {
     let mut bytes = vec![0x09, 0x00];
     bytes.extend_from_slice(&0x6800_0001u32.to_be_bytes());
@@ -658,13 +665,45 @@ pub fn modbus_read_holding_bytes() -> Vec<u8> {
     frame
 }
 
-pub fn synthesize_meshtastic_hello_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+/// Unconfirmed data-up identification frame (MIC present, never decrypted).
+/// Kept under 18 bytes so it cannot match the Reticulum announce heuristic.
+pub fn lorawan_unconfirmed_up_bytes() -> Vec<u8> {
+    let mut frame = vec![0x40, 0x11, 0x22, 0x33, 0x44, 0x00, 0x01, 0x00, 0x01];
+    frame.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+    frame
+}
+
+pub fn synthesize_css_iq(payload: &[u8], sample_rate_hz: u32) -> Vec<Complex<f32>> {
     let phy = LoraPhy {
         spreading_factor: LORA_FIXTURE_SF,
         bandwidth_hz: LORA_FIXTURE_BANDWIDTH_HZ,
         sample_rate_hz,
     };
-    encode_css(&meshtastic_hello_bytes(), phy)
+    encode_css(payload, phy)
+}
+
+pub fn synthesize_meshtastic_hello_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&meshtastic_hello_bytes(), sample_rate_hz)
+}
+
+pub fn synthesize_meshcore_hello_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&meshcore_hello_bytes(), sample_rate_hz)
+}
+
+pub fn synthesize_reticulum_announce_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&reticulum_announce_bytes(), sample_rate_hz)
+}
+
+pub fn synthesize_modbus_read_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&modbus_read_holding_bytes(), sample_rate_hz)
+}
+
+pub fn synthesize_lorawan_identify_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&lorawan_unconfirmed_up_bytes(), sample_rate_hz)
+}
+
+pub fn synthesize_meshtastic_encrypted_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&meshtastic_encrypted_bytes(), sample_rate_hz)
 }
 
 pub fn regional_plans() -> Vec<serde_json::Value> {
@@ -686,17 +725,44 @@ pub fn regional_plans() -> Vec<serde_json::Value> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn css_round_trips_meshtastic_hello() {
-        let iq = synthesize_meshtastic_hello_iq(LORA_FIXTURE_SAMPLE_RATE_HZ);
+    fn assert_css_round_trip(payload: &[u8], protocol: &str, needle: &str, encryption: &str) {
+        let iq = synthesize_css_iq(payload, LORA_FIXTURE_SAMPLE_RATE_HZ);
         let packets = decode_iq(&iq, LORA_FIXTURE_SAMPLE_RATE_HZ);
         assert!(
-            packets
-                .iter()
-                .any(|p| p.protocol == "meshtastic" && p.content.contains("HELLO")),
+            packets.iter().any(|p| p.protocol == protocol
+                && p.content.contains(needle)
+                && p.encryption == encryption),
             "{packets:?}"
         );
-        assert!(packets.iter().all(|p| p.encryption == "none"));
+    }
+
+    #[test]
+    fn css_round_trips_meshtastic_hello() {
+        assert_css_round_trip(&meshtastic_hello_bytes(), "meshtastic", "HELLO", "none");
+    }
+
+    #[test]
+    fn css_round_trips_meshcore_reticulum_modbus_and_lorawan() {
+        assert_css_round_trip(&meshcore_hello_bytes(), "meshcore", "HELLO", "none");
+        assert_css_round_trip(&reticulum_announce_bytes(), "reticulum", "PULSE", "none");
+        assert_css_round_trip(
+            &modbus_read_holding_bytes(),
+            "modbus-lora",
+            "function 3",
+            "none",
+        );
+        assert_css_round_trip(
+            &lorawan_unconfirmed_up_bytes(),
+            "lorawan",
+            "not decrypted",
+            "identified",
+        );
+        assert_css_round_trip(
+            &meshtastic_encrypted_bytes(),
+            "meshtastic",
+            "encrypted mesh packet",
+            "identified",
+        );
     }
 
     #[test]
@@ -723,8 +789,7 @@ mod tests {
 
     #[test]
     fn lorawan_is_identified_not_decrypted() {
-        let mut frame = vec![0x40, 0x11, 0x22, 0x33, 0x44, 0x00, 0x01, 0x00, 0x01];
-        frame.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let frame = lorawan_unconfirmed_up_bytes();
         let packet = parse_lorawan(&frame).expect("lorawan");
         assert_eq!(packet.protocol, "lorawan");
         assert_eq!(packet.encryption, "identified");

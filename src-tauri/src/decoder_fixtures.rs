@@ -291,6 +291,14 @@ pub fn decode_lora_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMe
         .collect()
 }
 
+pub fn decode_tsbk_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMessage> {
+    crate::trunking::observe_control_channel(iq, sample_rate_hz)
+        .grants
+        .into_iter()
+        .map(|grant| crate::trunking::grant_to_decoded(&grant, 851_012_500))
+        .collect()
+}
+
 pub fn decode_uat_bits(bits: &[u8]) -> Vec<DecodedMessage> {
     let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
     let mut decoder = crate::aviation::UatDecoder::new();
@@ -394,7 +402,10 @@ pub fn run_recorded_fixture(
                     decode_ais_iq(&pairs, artifact.sample_rate_hz)
                 }
                 "ble" => decode_ble_iq(&iq, artifact.sample_rate_hz),
-                "meshtastic" | "lora" => decode_lora_iq(&iq, artifact.sample_rate_hz),
+                "meshtastic" | "meshcore" | "reticulum" | "modbus-lora" | "lorawan" | "lora" => {
+                    decode_lora_iq(&iq, artifact.sample_rate_hz)
+                }
+                "p25-tsbk" => decode_tsbk_iq(&iq, artifact.sample_rate_hz),
                 _ => anyhow::bail!("unsupported IQ protocol {}", entry.protocol),
             })
         }
@@ -471,6 +482,46 @@ pub fn assert_expectation(
         anyhow::bail!("protocol mismatch");
     }
     Ok(())
+}
+
+fn write_iq_artifact(
+    root: &Path,
+    file: &str,
+    sample_rate_hz: u32,
+    iq: &[Complex<f32>],
+) -> anyhow::Result<String> {
+    let artifact = RecordedIqArtifact {
+        sample_rate_hz,
+        iq: iq.iter().map(|c| [c.re, c.im]).collect(),
+    };
+    let path = root.join(file);
+    std::fs::write(&path, serde_json::to_string_pretty(&artifact)?)?;
+    Ok(hex::encode(Sha256::digest(std::fs::read(&path)?)))
+}
+
+fn iq_entry(
+    id: &str,
+    protocol: &str,
+    file: &str,
+    sha256: String,
+    source: Option<&str>,
+    info_contains: Option<&str>,
+) -> RecordedFixtureEntry {
+    RecordedFixtureEntry {
+        id: id.into(),
+        protocol: protocol.into(),
+        file: file.into(),
+        kind: "iq".into(),
+        expected: FixtureExpectation {
+            message_count_min: 1,
+            protocol: protocol.into(),
+            icao: None,
+            mmsi: None,
+            source: source.map(str::to_owned),
+            info_contains: info_contains.map(str::to_owned),
+        },
+        sha256,
+    }
 }
 
 pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
@@ -604,24 +655,58 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
     let cw_sha = hex::encode(Sha256::digest(std::fs::read(&cw_path)?));
 
     let ble_rate = crate::ble::BLE_FIXTURE_SAMPLE_RATE_HZ;
-    let ble_iq = crate::ble::synthesize_pulse_advert_iq(ble_rate);
-    let ble_artifact = RecordedIqArtifact {
-        sample_rate_hz: ble_rate,
-        iq: ble_iq.iter().map(|c| [c.re, c.im]).collect(),
-    };
-    let ble_path = root.join("ble-pulse-advert.iq.json");
-    std::fs::write(&ble_path, serde_json::to_string_pretty(&ble_artifact)?)?;
-    let ble_sha = hex::encode(Sha256::digest(std::fs::read(&ble_path)?));
+    let ble_sha = write_iq_artifact(
+        root,
+        "ble-pulse-advert.iq.json",
+        ble_rate,
+        &crate::ble::synthesize_pulse_advert_iq(ble_rate),
+    )?;
 
     let lora_rate = crate::lora::LORA_FIXTURE_SAMPLE_RATE_HZ;
-    let lora_iq = crate::lora::synthesize_meshtastic_hello_iq(lora_rate);
-    let lora_artifact = RecordedIqArtifact {
-        sample_rate_hz: lora_rate,
-        iq: lora_iq.iter().map(|c| [c.re, c.im]).collect(),
-    };
-    let lora_path = root.join("lora-meshtastic-hello.iq.json");
-    std::fs::write(&lora_path, serde_json::to_string_pretty(&lora_artifact)?)?;
-    let lora_sha = hex::encode(Sha256::digest(std::fs::read(&lora_path)?));
+    let lora_sha = write_iq_artifact(
+        root,
+        "lora-meshtastic-hello.iq.json",
+        lora_rate,
+        &crate::lora::synthesize_meshtastic_hello_iq(lora_rate),
+    )?;
+    let meshcore_sha = write_iq_artifact(
+        root,
+        "lora-meshcore-hello.iq.json",
+        lora_rate,
+        &crate::lora::synthesize_meshcore_hello_iq(lora_rate),
+    )?;
+    let reticulum_sha = write_iq_artifact(
+        root,
+        "lora-reticulum-announce.iq.json",
+        lora_rate,
+        &crate::lora::synthesize_reticulum_announce_iq(lora_rate),
+    )?;
+    let modbus_sha = write_iq_artifact(
+        root,
+        "lora-modbus-read.iq.json",
+        lora_rate,
+        &crate::lora::synthesize_modbus_read_iq(lora_rate),
+    )?;
+    let lorawan_sha = write_iq_artifact(
+        root,
+        "lora-lorawan-identify.iq.json",
+        lora_rate,
+        &crate::lora::synthesize_lorawan_identify_iq(lora_rate),
+    )?;
+    let lora_enc_sha = write_iq_artifact(
+        root,
+        "lora-meshtastic-encrypted.iq.json",
+        lora_rate,
+        &crate::lora::synthesize_meshtastic_encrypted_iq(lora_rate),
+    )?;
+
+    let tsbk_rate = crate::trunking::P25_FIR_RATE_HZ;
+    let tsbk_sha = write_iq_artifact(
+        root,
+        "p25-tsbk-group-grant.iq.json",
+        tsbk_rate,
+        &crate::trunking::synthesize_tsbk_control_iq(tsbk_rate),
+    )?;
 
     let manifest = RecordedFixtureManifest {
         schema: "pulsescope.recorded-iq-fixture".into(),
@@ -807,21 +892,62 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                 },
                 sha256: ble_sha,
             },
-            RecordedFixtureEntry {
-                id: "lora-meshtastic-hello".into(),
-                protocol: "meshtastic".into(),
-                file: "lora-meshtastic-hello.iq.json".into(),
-                kind: "iq".into(),
-                expected: FixtureExpectation {
-                    message_count_min: 1,
-                    protocol: "meshtastic".into(),
-                    icao: None,
-                    mmsi: None,
-                    source: Some("00abcdef".into()),
-                    info_contains: Some("HELLO".into()),
-                },
-                sha256: lora_sha,
-            },
+            iq_entry(
+                "lora-meshtastic-hello",
+                "meshtastic",
+                "lora-meshtastic-hello.iq.json",
+                lora_sha,
+                Some("00abcdef"),
+                Some("HELLO"),
+            ),
+            iq_entry(
+                "lora-meshcore-hello",
+                "meshcore",
+                "lora-meshcore-hello.iq.json",
+                meshcore_sha,
+                None,
+                Some("HELLO"),
+            ),
+            iq_entry(
+                "lora-reticulum-announce",
+                "reticulum",
+                "lora-reticulum-announce.iq.json",
+                reticulum_sha,
+                None,
+                Some("PULSE"),
+            ),
+            iq_entry(
+                "lora-modbus-read",
+                "modbus-lora",
+                "lora-modbus-read.iq.json",
+                modbus_sha,
+                Some("1"),
+                Some("function 3"),
+            ),
+            iq_entry(
+                "lora-lorawan-identify",
+                "lorawan",
+                "lora-lorawan-identify.iq.json",
+                lorawan_sha,
+                Some("44332211"),
+                Some("not decrypted"),
+            ),
+            iq_entry(
+                "lora-meshtastic-encrypted",
+                "meshtastic",
+                "lora-meshtastic-encrypted.iq.json",
+                lora_enc_sha,
+                Some("00abcdef"),
+                Some("encrypted mesh packet"),
+            ),
+            iq_entry(
+                "p25-tsbk-group-grant",
+                "p25-tsbk",
+                "p25-tsbk-group-grant.iq.json",
+                tsbk_sha,
+                Some("1234"),
+                Some("56789"),
+            ),
         ],
     };
     std::fs::write(

@@ -17,6 +17,7 @@ use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
 const MAX_QUEUE_SAMPLES: usize = 48_000 * 4;
+const MAX_TRANSCRIBE_SAMPLES: usize = 48_000 * 8;
 const REMOTE_FRAME_MILLIS: u32 = 20;
 
 #[derive(Clone, Debug)]
@@ -51,6 +52,7 @@ pub struct AudioSink {
     remote_frames: Arc<AtomicU64>,
     remote_lagged_frames: Arc<AtomicU64>,
     remote_last_frame_ms: Arc<AtomicI64>,
+    transcribe_ring: Arc<Mutex<VecDeque<f32>>>,
 }
 
 #[derive(Clone)]
@@ -96,6 +98,7 @@ impl AudioSink {
             remote_frames: Arc::new(AtomicU64::new(0)),
             remote_lagged_frames: Arc::new(AtomicU64::new(0)),
             remote_last_frame_ms: Arc::new(AtomicI64::new(0)),
+            transcribe_ring: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_TRANSCRIBE_SAMPLES))),
         }
     }
 
@@ -271,6 +274,7 @@ impl AudioSink {
         pending.extend(samples.iter().copied());
         while pending.len() >= frame_samples {
             let samples: Arc<[f32]> = pending.drain(..frame_samples).collect::<Vec<_>>().into();
+            self.record_transcribe_pcm(&samples, channels);
             let sequence = self.remote_sequence.fetch_add(1, Ordering::Relaxed);
             let captured_ms = crate::scanner::now_ms();
             let frame = AudioFrame {
@@ -289,6 +293,35 @@ impl AudioSink {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
         self.remote_tx.subscribe()
+    }
+
+    fn record_transcribe_pcm(&self, samples: &[f32], channels: u16) {
+        let channels = channels.max(1) as usize;
+        let mut ring = self.transcribe_ring.lock();
+        if channels == 1 {
+            for &sample in samples {
+                if ring.len() >= MAX_TRANSCRIBE_SAMPLES {
+                    ring.pop_front();
+                }
+                ring.push_back(sample);
+            }
+            return;
+        }
+        for frame in samples.chunks(channels) {
+            let mono = frame.iter().sum::<f32>() / channels as f32;
+            if ring.len() >= MAX_TRANSCRIBE_SAMPLES {
+                ring.pop_front();
+            }
+            ring.push_back(mono);
+        }
+    }
+
+    /// Bounded recent demod PCM for transcription (8 s at 48 kHz, mono).
+    pub fn recent_pcm(&self) -> (Vec<f32>, u32) {
+        (
+            self.transcribe_ring.lock().iter().copied().collect(),
+            self.sample_rate().max(1),
+        )
     }
     pub fn observe_remote_lag(&self, frames: u64) {
         self.remote_lagged_frames
@@ -514,5 +547,15 @@ mod tests {
         assert_eq!(frame.sample_rate, 48_000);
         assert_eq!(frame.channels, 2);
         assert_eq!(frame.samples.len(), 1_920);
+    }
+
+    #[test]
+    fn recent_pcm_ring_keeps_bounded_mono_history() {
+        let sink = AudioSink::new();
+        sink.push_remote(&vec![0.5; 1_920], 1);
+        let (pcm, rate) = sink.recent_pcm();
+        assert_eq!(rate, 48_000);
+        assert_eq!(pcm.len(), 1_920);
+        assert!(pcm.iter().all(|s| (*s - 0.5).abs() < f32::EPSILON));
     }
 }

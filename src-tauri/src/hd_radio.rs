@@ -27,6 +27,37 @@ pub fn find_nrsc5() -> Option<PathBuf> {
     which::which("nrsc5").ok()
 }
 
+/// nrsc5 reads CF32 from stdin when `-r -` is set. Frequency is MHz.
+pub fn nrsc5_stdin_args(frequency_hz: u64, program: u32) -> Vec<String> {
+    let mhz = frequency_hz as f64 / 1_000_000.0;
+    vec![
+        "-r".into(),
+        "-".into(),
+        format!("{mhz:.3}"),
+        program.to_string(),
+    ]
+}
+
+pub fn event_to_decoded(event: &HdRadioEvent, frequency_hz: u64) -> crate::db::DecodedMessage {
+    crate::db::DecodedMessage {
+        id: None,
+        frequency_hz,
+        protocol: "hd_radio".into(),
+        message_type: event.kind.clone(),
+        address: event.station.clone().unwrap_or_default(),
+        function_code: event.program.map(|p| p.to_string()).unwrap_or_default(),
+        content: event
+            .title
+            .clone()
+            .or_else(|| event.artist.clone())
+            .or_else(|| event.station.clone())
+            .unwrap_or_else(|| event.kind.clone()),
+        raw: event.raw.clone(),
+        encryption: "none".into(),
+        timestamp_ms: crate::scanner::now_ms(),
+    }
+}
+
 pub fn parse_nrsc5_line(line: &str) -> Option<HdRadioEvent> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -127,5 +158,11 @@ mod tests {
         let events = parse_nrsc5_output("Station name: KXYZ-FM\nTitle: HELLO\n");
         assert_eq!(events[0].kind, "sis");
         assert_eq!(events[1].title.as_deref(), Some("HELLO"));
+    }
+
+    #[test]
+    fn stdin_args_use_mhz_and_program() {
+        let args = nrsc5_stdin_args(88_500_000, 1);
+        assert_eq!(args, ["-r", "-", "88.500", "1"]);
     }
 }

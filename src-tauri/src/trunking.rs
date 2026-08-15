@@ -18,6 +18,10 @@ pub const P25_C4FM_SYMBOL_RATE: u32 = 4_800;
 
 /// Group Voice Channel Grant (explicit), TIA-102.AABC opcode 0x00.
 pub const TSBK_GROUP_VOICE_GRANT: u8 = 0x00;
+/// Group Voice Channel Grant Update, TIA-102.AABC opcode 0x02.
+pub const TSBK_GROUP_VOICE_GRANT_UPDT: u8 = 0x02;
+/// Identifier Update (VHF/UHF), TIA-102.AABC opcode 0x3D.
+pub const TSBK_IDEN_UP: u8 = 0x3D;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TsbkGrant {
@@ -27,6 +31,19 @@ pub struct TsbkGrant {
     pub channel: u16,
     pub encrypted: bool,
     pub last_block: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdenUp {
+    pub identifier: u8,
+    pub base_hz: u64,
+    pub spacing_hz: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlChannelObservation {
+    pub grants: Vec<TsbkGrant>,
+    pub idens: Vec<IdenUp>,
 }
 
 pub fn p25_fir_taps(sample_rate_hz: u32) -> Vec<f32> {
@@ -53,7 +70,7 @@ pub fn parse_tsbk(bytes: &[u8]) -> Option<TsbkGrant> {
     let last_block = opcode_byte & 0x80 != 0;
     let protected = opcode_byte & 0x40 != 0;
     let opcode = opcode_byte & 0x3F;
-    if opcode != TSBK_GROUP_VOICE_GRANT {
+    if opcode != TSBK_GROUP_VOICE_GRANT && opcode != TSBK_GROUP_VOICE_GRANT_UPDT {
         return None;
     }
     let service = bytes[1];
@@ -69,6 +86,55 @@ pub fn parse_tsbk(bytes: &[u8]) -> Option<TsbkGrant> {
         encrypted,
         last_block,
     })
+}
+
+pub fn parse_iden_up(bytes: &[u8]) -> Option<IdenUp> {
+    if bytes.len() < 12 {
+        return None;
+    }
+    let opcode = bytes[0] & 0x3F;
+    if opcode != TSBK_IDEN_UP {
+        return None;
+    }
+    let identifier = bytes[1] & 0x0F;
+    let base_units = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+    let spacing_hz = u16::from_be_bytes([bytes[6], bytes[7]]) as u32;
+    if spacing_hz == 0 || base_units == 0 {
+        return None;
+    }
+    Some(IdenUp {
+        identifier,
+        base_hz: u64::from(base_units).saturating_mul(5),
+        spacing_hz,
+    })
+}
+
+pub fn encode_iden_up(identifier: u8, base_hz: u64, spacing_hz: u32) -> [u8; 12] {
+    let mut bytes = [0u8; 12];
+    bytes[0] = TSBK_IDEN_UP;
+    bytes[1] = identifier & 0x0F;
+    let units = (base_hz / 5) as u32;
+    bytes[2..6].copy_from_slice(&units.to_be_bytes());
+    bytes[6..8].copy_from_slice(&(spacing_hz as u16).to_be_bytes());
+    bytes
+}
+
+pub fn voice_hz(iden: &IdenUp, channel: u16) -> u64 {
+    iden.base_hz
+        .saturating_add(u64::from(channel).saturating_mul(u64::from(iden.spacing_hz)))
+}
+
+/// Voice frequency for a recovered grant. Never invents a mapping: IDEN_UP
+/// from the same control channel, else an imported voice-channel table.
+pub fn follow_frequency(
+    observation: &ControlChannelObservation,
+    imported_voice_hz: &[u64],
+) -> Option<u64> {
+    let grant = observation.grants.first()?;
+    if let Some(iden) = observation.idens.first() {
+        return Some(voice_hz(iden, grant.channel));
+    }
+    imported_voice_hz.get(usize::from(grant.channel)).copied()
 }
 
 pub fn encode_group_voice_grant(
@@ -147,11 +213,27 @@ pub fn synthesize_c4fm_iq(bits: &[u8], sample_rate_hz: u32) -> Vec<Complex<f32>>
     iq
 }
 
-pub fn synthesize_tsbk_grant_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
-    let mut bits = Vec::new();
+fn append_sync(bits: &mut Vec<u8>) {
     for i in (0..48).rev() {
         bits.push(((SYNC >> i) & 1) as u8);
     }
+}
+
+pub fn synthesize_tsbk_grant_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    let mut bits = Vec::new();
+    append_sync(&mut bits);
+    bits.extend(bits_from_bytes(&encode_group_voice_grant(
+        1234, 56_789, 0x0A1, false,
+    )));
+    synthesize_c4fm_iq(&bits, sample_rate_hz)
+}
+
+/// Control-channel fixture: Identifier Update then Group Voice Grant.
+/// Base 851.0125 MHz, 6.25 kHz spacing, channel 0x0A1 → 852.01875 MHz.
+pub fn synthesize_tsbk_control_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    let mut bits = Vec::new();
+    append_sync(&mut bits);
+    bits.extend(bits_from_bytes(&encode_iden_up(0, 851_012_500, 6_250)));
     bits.extend(bits_from_bytes(&encode_group_voice_grant(
         1234, 56_789, 0x0A1, false,
     )));
@@ -188,20 +270,67 @@ fn find_sync(bits: &[u8]) -> Option<usize> {
     bits.windows(48).position(|w| w == pattern.as_slice())
 }
 
-pub fn decode_tsbk_from_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<TsbkGrant> {
+pub fn observe_control_channel(
+    iq: &[Complex<f32>],
+    sample_rate_hz: u32,
+) -> ControlChannelObservation {
     let (filtered, rate) = apply_p25_vfo_fir(iq, sample_rate_hz);
     let mut prev = None;
     let disc = discriminator_samples(&filtered, &mut prev);
     let bits = slice_dibit_bits(&disc, rate);
     let Some(at) = find_sync(&bits) else {
-        return Vec::new();
+        return ControlChannelObservation::default();
     };
-    let payload_bits = &bits[at + 48..];
-    if payload_bits.len() < 96 {
-        return Vec::new();
+    let mut observation = ControlChannelObservation::default();
+    let mut offset = at + 48;
+    while offset + 96 <= bits.len() {
+        let bytes = bytes_from_bits(&bits[offset..offset + 96]);
+        offset += 96;
+        if let Some(iden) = parse_iden_up(&bytes) {
+            let last = bytes[0] & 0x80 != 0;
+            observation.idens.push(iden);
+            if last {
+                break;
+            }
+            continue;
+        }
+        if let Some(grant) = parse_tsbk(&bytes) {
+            let last = grant.last_block;
+            observation.grants.push(grant);
+            if last {
+                break;
+            }
+            continue;
+        }
+        break;
     }
-    let bytes = bytes_from_bits(&payload_bits[..96]);
-    parse_tsbk(&bytes).into_iter().collect()
+    observation
+}
+
+pub fn decode_tsbk_from_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<TsbkGrant> {
+    observe_control_channel(iq, sample_rate_hz).grants
+}
+
+pub fn grant_to_decoded(grant: &TsbkGrant, frequency_hz: u64) -> crate::db::DecodedMessage {
+    crate::db::DecodedMessage {
+        id: None,
+        frequency_hz,
+        protocol: "p25-tsbk".into(),
+        message_type: "group_voice_grant".into(),
+        address: grant.talkgroup.clone(),
+        function_code: grant.source.clone(),
+        content: format!(
+            "TG {} src {} ch {:#05x} enc={}",
+            grant.talkgroup, grant.source, grant.channel, grant.encrypted
+        ),
+        raw: format!("opcode={:#04x}", grant.opcode),
+        encryption: if grant.encrypted {
+            "identified".into()
+        } else {
+            "none".into()
+        },
+        timestamp_ms: crate::scanner::now_ms(),
+    }
 }
 
 pub fn grant_to_call(grant: &TsbkGrant, frequency_hz: u64) -> TrunkingCall {
@@ -266,5 +395,51 @@ mod tests {
                 .any(|g| g.talkgroup == "1234" && g.source == "56789"),
             "{grants:?}"
         );
+    }
+
+    #[test]
+    fn c4fm_control_fixture_recovers_iden_and_follow_hz() {
+        let iq = synthesize_tsbk_control_iq(P25_FIR_RATE_HZ);
+        let observation = observe_control_channel(&iq, P25_FIR_RATE_HZ);
+        assert!(
+            observation
+                .grants
+                .iter()
+                .any(|g| g.talkgroup == "1234" && g.channel == 0x0A1),
+            "{observation:?}"
+        );
+        assert!(!observation.idens.is_empty(), "{observation:?}");
+        let hz = follow_frequency(&observation, &[]).expect("follow");
+        assert_eq!(hz, voice_hz(&observation.idens[0], 0x0A1));
+        assert_eq!(hz, 851_012_500 + 0x0A1 * 6_250);
+    }
+
+    #[test]
+    fn follow_uses_imported_table_without_iden() {
+        let observation = ControlChannelObservation {
+            grants: vec![TsbkGrant {
+                opcode: TSBK_GROUP_VOICE_GRANT,
+                talkgroup: "9".into(),
+                source: "1".into(),
+                channel: 1,
+                encrypted: false,
+                last_block: true,
+            }],
+            idens: Vec::new(),
+        };
+        assert_eq!(
+            follow_frequency(&observation, &[851_000_000, 851_012_500]),
+            Some(851_012_500)
+        );
+        assert_eq!(follow_frequency(&observation, &[]), None);
+    }
+
+    #[test]
+    fn grant_update_opcode_parses() {
+        let mut bytes = encode_group_voice_grant(77, 8, 3, false);
+        bytes[0] = TSBK_GROUP_VOICE_GRANT_UPDT | 0x80;
+        let grant = parse_tsbk(&bytes).expect("update");
+        assert_eq!(grant.opcode, TSBK_GROUP_VOICE_GRANT_UPDT);
+        assert_eq!(grant.talkgroup, "77");
     }
 }

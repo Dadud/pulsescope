@@ -24,7 +24,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const IO_TIMEOUT: Duration = Duration::from_millis(750);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESTARTS: u8 = 3;
-const IQ_SIDECARS: &[&str] = &["rtl_433", "dump978"];
+const IQ_SIDECARS: &[&str] = &["rtl_433", "dump978", "nrsc5"];
 const AUDIO_SIDECARS: &[&str] = &["multimon-ng", "direwolf", "dsd-fme", "rs41mod"];
 const MULTIMON_RATE_HZ: u32 = 22_050;
 const AUDIO_SIDECAR_RATE_HZ: u32 = 48_000;
@@ -514,6 +514,14 @@ pub fn parse_line(protocol: &str, line: &str) -> Option<crate::db::DecodedMessag
         return Some(msg);
     }
 
+    if p == "nrsc5" || p == "hd_radio" {
+        let event = crate::hd_radio::parse_nrsc5_line(line)?;
+        return Some(crate::hd_radio::event_to_decoded(
+            &event,
+            default_frequency("hd_radio"),
+        ));
+    }
+
     if p.contains("multimon") || p == "pocsag" {
         msg.protocol = "pocsag".into();
         msg.message_type = "pager".into();
@@ -594,6 +602,7 @@ fn default_frequency(protocol: &str) -> u64 {
         "dumpvdl2" | "vdl2" => 136_975_000,
         "direwolf" | "aprs" => 144_390_000,
         "rs41" | "radiosonde" => 402_500_000,
+        "nrsc5" | "hd_radio" => 88_500_000,
         _ => 0,
     }
 }
@@ -755,5 +764,9 @@ mod tests {
         let sonde = parse_line("rs41mod", "serial=RS41-001 lat=39.7").unwrap();
         assert_eq!(sonde.protocol, "rs41");
         assert_eq!(sonde.address, "RS41-001");
+        let hd = parse_line("nrsc5", r#"{"type":"sis","name":"KXYZ-FM"}"#).unwrap();
+        assert_eq!(hd.protocol, "hd_radio");
+        assert_eq!(hd.address, "KXYZ-FM");
+        assert!(super::consumes_iq("nrsc5"));
     }
 }

@@ -1494,7 +1494,7 @@ async fn media_capabilities_v2() -> impl IntoResponse {
         "preferred": "pcm-websocket",
         "transports": [
             {"id":"pcm-websocket","available":true,"path":"/audio/stream","frame_ms":20,"sample_rate_hz":48000,"channels":[1,2],"status":"fixture_verified"},
-            {"id":"webrtc-opus","available":false,"status":"development","payload_type":111,"clock_rate_hz":48000,"frame_ms":20,"timestamp_step":960,"fec":true,"dtx":false,"sdp": crate::webrtc::sdp_offer_fragment(), "missing_gate":"ICE/DTLS transport, libopus encode, loss recovery, and two-hour LAN acceptance run"}
+            {"id":"webrtc-opus","available":false,"status":"development","payload_type":111,"clock_rate_hz":48000,"frame_ms":20,"timestamp_step":960,"fec":true,"dtx":false,"ice_lite":true,"sdp": crate::webrtc::sdp_offer(), "missing_gate":"ICE/DTLS transport, libopus encode, loss recovery, and two-hour LAN acceptance run"}
         ]
     }))
 }
@@ -1512,7 +1512,9 @@ async fn media_session_v2() -> impl IntoResponse {
                 "clock_rate_hz": crate::webrtc::OPUS_CLOCK_RATE_HZ,
                 "frame_ms": crate::webrtc::OPUS_FRAME_MS,
                 "timestamp_step": crate::webrtc::OPUS_TIMESTAMP_STEP,
-                "sdp": crate::webrtc::sdp_offer_fragment()
+                "ice_lite": true,
+                "ice_ufrag": crate::webrtc::ICE_UFRAG,
+                "sdp": crate::webrtc::sdp_offer()
             },
             "missing_gate": "ICE/DTLS transport, libopus encode, loss recovery, and two-hour LAN acceptance run"
         })),
@@ -2150,6 +2152,16 @@ async fn start_configured_sidecars(s: &ApiState) {
     if cfg.radiosonde.enabled && !s.0.sidecars.is_running("rs41mod") {
         jobs.push(("rs41mod", cfg.radiosonde.path, Vec::new()));
     }
+    if cfg.hd_radio.enabled && !s.0.sidecars.is_running("nrsc5") {
+        if let Some(path) = crate::hd_radio::find_nrsc5() {
+            let freq = s.0.device.status().center_freq_hz.max(87_900_000);
+            jobs.push((
+                "nrsc5",
+                path.display().to_string(),
+                crate::hd_radio::nrsc5_stdin_args(freq, cfg.hd_radio.program),
+            ));
+        }
+    }
 
     for (name, path, args) in jobs {
         if path.trim().is_empty() || s.0.sidecars.is_running(name) {
@@ -2688,7 +2700,7 @@ async fn talkgroup_delete_system(
 async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> impl IntoResponse {
     let control_hz = req.and_then(|Json(v)| v.get("control_channel_hz").and_then(|x| x.as_u64()));
     let status = s.0.device.status();
-    let mut grants = Vec::new();
+    let mut observation = crate::trunking::ControlChannelObservation::default();
     let mut reason = "P25 TSBK observer is armed; waiting for control-channel IQ".to_string();
     if status.connected {
         let count = (status.sample_rate as usize / 5).clamp(8_192, 480_000);
@@ -2700,13 +2712,24 @@ async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> 
                 status.sample_rate,
                 crate::demod::Mode::Nfm,
             );
-            grants = crate::trunking::decode_tsbk_from_iq(&channel, status.sample_rate);
-            reason = if grants.is_empty() {
+            observation = crate::trunking::observe_control_channel(&channel, status.sample_rate);
+            reason = if observation.grants.is_empty() {
                 "no TSBK recovered from the current IQ snapshot".into()
             } else {
-                format!("observed {} TSBK grant(s)", grants.len())
+                format!("observed {} TSBK grant(s)", observation.grants.len())
             };
         }
+    }
+    let imported_voice = s.0.trunking.read().voice_channels.clone();
+    let follow_hz = crate::trunking::follow_frequency(&observation, &imported_voice);
+    if let Some(voice_hz) = follow_hz {
+        send_vfo(
+            &s,
+            crate::scanner::ScannerCommand::SetVfoFrequency {
+                id: 0,
+                frequency_hz: voice_hz,
+            },
+        );
     }
     let mut t = s.0.trunking.write();
     t.running = true;
@@ -2716,13 +2739,20 @@ async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> 
         t.control_channel_hz = control_hz;
     }
     t.reason = Some(reason.clone());
-    for grant in &grants {
-        let freq = t.control_channel_hz.unwrap_or(status.center_freq_hz);
+    for grant in &observation.grants {
+        let freq = follow_hz
+            .or(t.control_channel_hz)
+            .unwrap_or(status.center_freq_hz);
         t.active_talkgroup = Some(grant.talkgroup.clone());
         t.calls.push(crate::trunking::grant_to_call(grant, freq));
         t.log.push(format!(
-            "TSBK grant TG {} src {} enc={}",
-            grant.talkgroup, grant.source, grant.encrypted
+            "TSBK grant TG {} src {} enc={} follow={}",
+            grant.talkgroup,
+            grant.source,
+            grant.encrypted,
+            follow_hz
+                .map(|hz| hz.to_string())
+                .unwrap_or_else(|| "none".into())
         ));
     }
     Json(json!({
@@ -2731,9 +2761,11 @@ async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> 
         "running": true,
         "native": true,
         "p25_fir": true,
-        "grants": grants,
+        "grants": observation.grants,
+        "idens": observation.idens,
+        "follow_hz": follow_hz,
         "reason": reason,
-        "missing_gate": "live control-channel recorded-IQ and hardware verification",
+        "missing_gate": "live control-channel hardware verification",
         "status": &*t
     }))
 }
@@ -3027,16 +3059,29 @@ async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> 
 }
 
 async fn hd_radio_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
-    let mut c = s.0.config.write();
-    c.hd_radio.enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
-    let _ = c.save(&s.0.data_dir);
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    {
+        let mut c = s.0.config.write();
+        c.hd_radio.enabled = enabled;
+        if let Some(program) = v.get("program").and_then(|x| x.as_u64()) {
+            c.hd_radio.program = program as u32;
+        }
+        let _ = c.save(&s.0.data_dir);
+    }
+    if enabled {
+        start_configured_sidecars(&s).await;
+    }
     let nrsc5 = crate::hd_radio::find_nrsc5();
+    let running = s.0.sidecars.is_running("nrsc5");
     Json(json!({
         "ok": true,
-        "enabled": c.hd_radio.enabled,
+        "enabled": enabled,
         "available": false,
+        "running": running,
         "nrsc5": nrsc5.as_ref().map(|p| p.display().to_string()),
-        "reason": if nrsc5.is_some() {
+        "reason": if running {
+            "nrsc5 sidecar is running; OFDM recorded-IQ end-to-end has not passed"
+        } else if nrsc5.is_some() {
             "nrsc5 is installed; OFDM recorded-IQ end-to-end has not passed"
         } else {
             "HD Radio decoder sidecar (nrsc5) is not installed"
@@ -4156,7 +4201,13 @@ async fn transcription_start(State(s): State<ApiState>) -> impl IntoResponse {
     let status = s.0.device.status();
     let mut last_error = None;
     let mut segments = Vec::new();
-    if status.connected {
+    let (recent, recent_rate) = s.0.audio.recent_pcm();
+    if recent.len() > 1_600 {
+        match crate::transcription::transcribe_pcm(&recent, recent_rate, &model) {
+            Ok(found) => segments = found,
+            Err(e) => last_error = Some(e),
+        }
+    } else if status.connected {
         let count = (status.sample_rate as usize / 5).clamp(8_192, 480_000);
         match live_iq_snapshot(&s, count) {
             Ok(iq) if iq.len() > 1024 => {
@@ -4175,7 +4226,7 @@ async fn transcription_start(State(s): State<ApiState>) -> impl IntoResponse {
             Err(e) => last_error = Some(e),
         }
     } else {
-        last_error = Some("no device connected; engine is armed".into());
+        last_error = Some("no recent demod PCM and no device connected; engine is armed".into());
     }
     let mut runtime = s.0.transcription.lock();
     runtime.running = true;
@@ -4208,6 +4259,7 @@ async fn transcription_stop(State(s): State<ApiState>) -> impl IntoResponse {
     Json(json!({"ok":true,"running":false}))
 }
 async fn transcription_status(State(s): State<ApiState>) -> impl IntoResponse {
+    let pcm_ring_samples = s.0.audio.recent_pcm().0.len();
     let c = s.0.config.read();
     let engine = crate::transcription::find_engine();
     let runtime = s.0.transcription.lock();
@@ -4225,7 +4277,8 @@ async fn transcription_status(State(s): State<ApiState>) -> impl IntoResponse {
             "hardware live verification of 16 kHz PCM through whisper.cpp"
         } else {
             "whisper.cpp / whisper-cli is not installed"
-        }
+        },
+        "pcm_ring_samples": pcm_ring_samples,
     }))
 }
 async fn transcription_list(State(s): State<ApiState>) -> impl IntoResponse {

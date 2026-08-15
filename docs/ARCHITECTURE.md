@@ -27,7 +27,7 @@ Frequency, profile, rate, and bandwidth changes are atomic. Desired state is nev
 
 A `ListenerSession` owns independent VFOs, viewport, mode, filter, squelch, audio selection, and attached decoders. Sessions share IQ already present in the hardware window. Profile changes are shared operations and use a revisioned countdown event.
 
-Receiver pipelines consume timestamped IQ blocks and emit audio/discriminator/IQ taps plus level and quality metadata. WebRTC Opus is the target browser transport (SDP/RTP contract: PT 111, 20 ms, timestamp += 960); ICE/DTLS and libopus are not in this build, so timestamped 20 ms PCM WebSocket frames remain the working path.
+Receiver pipelines consume timestamped IQ blocks and emit audio/discriminator/IQ taps plus level and quality metadata. WebRTC Opus is the target browser transport (ICE-lite SDP/RTP contract: PT 111, 20 ms, timestamp += 960, ufrag/pwd, DTLS fingerprint placeholder); ICE/DTLS and libopus are not in this build, so timestamped 20 ms PCM WebSocket frames remain the working path. A bounded 8 s mono PCM ring on `AudioSink` feeds local whisper.cpp when that engine is installed.
 
 ## Spectrum and waterfall
 

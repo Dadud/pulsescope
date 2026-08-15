@@ -196,6 +196,96 @@
         "info_contains": "HELLO"
       },
       "sha256": "6c8d771abff4d59a2d623d099d1fa9707817eefeff7803c7647ab639916ccea3"
+    },
+    {
+      "id": "lora-meshcore-hello",
+      "protocol": "meshcore",
+      "file": "lora-meshcore-hello.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "meshcore",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "ec859cfe637ddf7a718227e66010983355cab6fd388639b447b2d5a431eef57e"
+    },
+    {
+      "id": "lora-reticulum-announce",
+      "protocol": "reticulum",
+      "file": "lora-reticulum-announce.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "reticulum",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "PULSE"
+      },
+      "sha256": "f3baac7ddeadec3968c3e47cf360250da0162e65abaf3a5a4ebe10c21f9f4529"
+    },
+    {
+      "id": "lora-modbus-read",
+      "protocol": "modbus-lora",
+      "file": "lora-modbus-read.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "modbus-lora",
+        "icao": null,
+        "mmsi": null,
+        "source": "1",
+        "info_contains": "function 3"
+      },
+      "sha256": "64a9cafa69ad6b7a74c5a66d26f940b8a2c90eb7117ce444975d7ac404317f0b"
+    },
+    {
+      "id": "lora-lorawan-identify",
+      "protocol": "lorawan",
+      "file": "lora-lorawan-identify.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "lorawan",
+        "icao": null,
+        "mmsi": null,
+        "source": "44332211",
+        "info_contains": "not decrypted"
+      },
+      "sha256": "a42577d928c25649b7a510cf141b3fdf0b7f396121245597e71735a3cb318ebd"
+    },
+    {
+      "id": "lora-meshtastic-encrypted",
+      "protocol": "meshtastic",
+      "file": "lora-meshtastic-encrypted.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "meshtastic",
+        "icao": null,
+        "mmsi": null,
+        "source": "00abcdef",
+        "info_contains": "encrypted mesh packet"
+      },
+      "sha256": "1f776e987d8a2ffbcda86da4d75bb8804aad5a3df1fade2ae021849e4799c932"
+    },
+    {
+      "id": "p25-tsbk-group-grant",
+      "protocol": "p25-tsbk",
+      "file": "p25-tsbk-group-grant.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "p25-tsbk",
+        "icao": null,
+        "mmsi": null,
+        "source": "1234",
+        "info_contains": "56789"
+      },
+      "sha256": "2c7100dba851c94fa011b41a3cbbc40fd62f324630430edda2bf0c7dd9dd9051"
     }
   ]
 }

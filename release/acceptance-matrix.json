@@ -84,7 +84,10 @@
       "id": "webrtc-opus", "name": "WebRTC Opus audio", "group": "media",
       "status": "development", "visibility": "expert", "required": true,
       "acceptance_gate": "20 ms Opus, FEC, no DTX, p95 start below 2 s, two-hour underrun-free LAN run.",
-      "evidence": [{"type": "test", "ref": "webrtc::tests::rtp_timestamps_advance_960"}]
+      "evidence": [
+        {"type": "test", "ref": "webrtc::tests::rtp_timestamps_advance_960"},
+        {"type": "test", "ref": "webrtc::tests::sdp_offer_locks_ice_lite_contract"}
+      ]
     },
     {
       "id": "pcm-audio-fallback", "name": "PCM WebSocket audio fallback", "group": "media",
@@ -196,21 +199,30 @@
     },
     {
       "id": "p25-vfo-fir", "name": "P25 VFO FIR", "group": "dsp",
-      "status": "development", "visibility": "expert", "required": false,
+      "status": "fixture_verified", "visibility": "expert", "required": false,
       "acceptance_gate": "63-tap Hamming sinc at 6 kHz on IQ before the discriminator; not a P25 voice decoder.",
-      "evidence": [{"type": "test", "ref": "trunking::tests::fir_dc_gain_near_unity_and_rejects_high_bin"}]
+      "evidence": [
+        {"type": "test", "ref": "trunking::tests::fir_dc_gain_near_unity_and_rejects_high_bin"},
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"}
+      ]
     },
     {
       "id": "trunking-p25-tsbk", "name": "P25 TSBK observer", "group": "decoder",
-      "status": "development", "visibility": "expert", "required": false,
+      "status": "fixture_verified", "visibility": "expert", "required": false,
       "acceptance_gate": "Group-voice-grant TSBK recovered from C4FM IQ; encrypted calls labeled only; no invented talkgroups.",
-      "evidence": [{"type": "test", "ref": "trunking::tests::c4fm_fixture_recovers_group_grant"}]
+      "evidence": [
+        {"type": "test", "ref": "trunking::tests::c4fm_control_fixture_recovers_iden_and_follow_hz"},
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"}
+      ]
     },
     {
       "id": "speech-transcription", "name": "Speech transcription", "group": "media",
       "status": "development", "visibility": "expert", "required": false,
       "acceptance_gate": "16 kHz PCM through whisper.cpp when installed; otherwise honest unavailable status.",
-      "evidence": [{"type": "test", "ref": "transcription::tests::parse_timestamped_whisper_line"}]
+      "evidence": [
+        {"type": "test", "ref": "transcription::tests::parse_timestamped_whisper_line"},
+        {"type": "test", "ref": "audio::tests::recent_pcm_ring_keeps_bounded_mono_history"}
+      ]
     },
     {
       "id": "decoder-lora-mesh", "name": "LoRa MeshCore, Meshtastic, Reticulum and Modbus", "group": "decoder",
@@ -221,14 +233,17 @@
     {
       "id": "decoder-ble", "name": "BLE advertising", "group": "decoder",
       "status": "fixture_verified", "visibility": "normal", "required": false,
-      "acceptance_gate": "Recorded GFSK IQ recovers advertising address, name, and CRC-24.",
+      "acceptance_gate": "Recorded GFSK IQ recovers advertising address, name, CRC-24, and RSSI.",
       "evidence": [{"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"}]
     },
     {
       "id": "decoder-hd-radio", "name": "HD Radio through nrsc5", "group": "decoder",
       "status": "development", "visibility": "expert", "required": false,
       "acceptance_gate": "nrsc5 OFDM recorded-IQ fixture plus SIS/ID3 events. Parser unit tests do not satisfy availability.",
-      "evidence": [{"type": "test", "ref": "hd_radio::tests::parses_json_sis_and_id3"}]
+      "evidence": [
+        {"type": "test", "ref": "hd_radio::tests::parses_json_sis_and_id3"},
+        {"type": "test", "ref": "sidecar::tests::parses_additional_decoder_protocols"}
+      ]
     },
     {
       "id": "decoder-utility", "name": "rtl_433, ACARS, VDL2, paging and UAT", "group": "decoder",

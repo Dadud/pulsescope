@@ -23,6 +23,7 @@ pub struct BleAdvertisement {
     pub name: Option<String>,
     pub ad_structures: Vec<String>,
     pub crc_valid: bool,
+    pub rssi_dbm: i16,
     pub raw_hex: String,
 }
 
@@ -34,7 +35,7 @@ impl BleAdvertisement {
             protocol: "ble".into(),
             message_type: self.pdu_type.clone(),
             address: self.address.clone(),
-            function_code: self.address_type.clone(),
+            function_code: format!("{} rssi={} dBm", self.address_type, self.rssi_dbm),
             content: self
                 .name
                 .clone()
@@ -147,8 +148,17 @@ pub fn parse_pdu(pdu: &[u8], channel: u8, crc_valid: bool) -> Option<BleAdvertis
         name,
         ad_structures,
         crc_valid,
+        rssi_dbm: -128,
         raw_hex: hex::encode(pdu),
     })
+}
+
+pub fn mean_rssi_dbm(iq: &[Complex<f32>]) -> i16 {
+    if iq.is_empty() {
+        return -128;
+    }
+    let power = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
+    (10.0 * power.max(1.0e-12).log10()).round() as i16
 }
 
 pub fn build_adv_ind(address: [u8; 6], name: &str, channel: u8) -> Vec<u8> {
@@ -298,12 +308,16 @@ pub fn decode_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<BleAdvertiseme
     };
     let disc = discriminator(&samples);
     let bits = slice_bits(&disc, rate);
+    let rssi = mean_rssi_dbm(&samples);
     let mut found = decode_bits(&bits, 37);
     if found.is_empty() {
         found = decode_bits(&bits, 38);
     }
     if found.is_empty() {
         found = decode_bits(&bits, 39);
+    }
+    for advert in &mut found {
+        advert.rssi_dbm = rssi;
     }
     found
 }
@@ -345,10 +359,19 @@ mod tests {
             "{ads:?}"
         );
         assert!(ads.iter().any(|a| a.address == "AA:BB:CC:DD:EE:FF"));
+        assert!(ads.iter().any(|a| a.rssi_dbm > -80));
     }
 
     #[test]
     fn parse_rejects_truncated_pdu() {
         assert!(parse_pdu(&[0x00, 0x10], 37, false).is_none());
+    }
+
+    #[test]
+    fn scan_rsp_pdu_type_is_named() {
+        let mut pdu = vec![0x04, 0x06, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+        pdu.extend_from_slice(&crc24(&pdu));
+        let parsed = parse_pdu(&pdu[..pdu.len() - 3], 37, true).expect("pdu");
+        assert_eq!(parsed.pdu_type, "SCAN_RSP");
     }
 }
