@@ -255,6 +255,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/scan/identify_protocol", post(identify_protocol))
         .route("/scan/lock", post(scan_lock))
         .route("/scan/unlock", post(scan_unlock))
+        .route("/scan/skip", post(scan_skip))
+        .route("/scan/lockout", post(scan_lockout))
         .route("/scan/start", post(scan_start_alt))
         .route("/scan/stop", post(scan_stop_alt))
         .route("/scan/status", get(scan_status))
@@ -1760,21 +1762,107 @@ async fn scan_config(State(s): State<ApiState>) -> impl IntoResponse {
 struct ScanStartReq {
     range_name: String,
 }
+
+fn bookmark_channel_range(
+    label: &str,
+    frequency_hz: u64,
+    mode: &str,
+    bandwidth_hz: u32,
+) -> crate::config::ScanRange {
+    crate::config::ScanRange {
+        name: format!("Bookmark {label}"),
+        start_hz: frequency_hz,
+        end_hz: frequency_hz,
+        mode: if mode.is_empty() {
+            "nfm".into()
+        } else {
+            mode.to_string()
+        },
+        channel_bw_hz: bandwidth_hz.max(1),
+        max_vfos: 1,
+        enabled: true,
+        dwell_ms: 400,
+        squelch_db: 15.0,
+        auto_squelch_mode: crate::config::AutoSquelchMode::Adaptive,
+        hold_ms: 1_500,
+        sample_rate_hz: 2_000_000,
+    }
+}
+
+fn enabled_scan_cycle(s: &ApiState) -> Vec<crate::config::ScanRange> {
+    s.0.config
+        .read()
+        .scan_ranges
+        .iter()
+        .filter(|range| range.enabled)
+        .cloned()
+        .collect()
+}
+
+fn bookmark_scan_cycle(s: &ApiState) -> Result<Vec<crate::config::ScanRange>, String> {
+    let conn = s.0.db.conn();
+    let mut statement = conn
+        .prepare(
+            "SELECT label,frequency_hz,mode,bandwidth_hz FROM receiver_bookmarks WHERE enabled=1 ORDER BY frequency_hz",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(bookmark_channel_range(
+                &row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                &row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u32,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn resolve_scan_target(
+    s: &ApiState,
+    range_name: &str,
+) -> Result<(crate::config::ScanRange, Vec<crate::config::ScanRange>), String> {
+    let needle = range_name.trim();
+    if needle.eq_ignore_ascii_case(crate::scanner::SCAN_ENABLED_BANKS) || needle == "*" {
+        let cycle = enabled_scan_cycle(s);
+        let range = cycle
+            .first()
+            .cloned()
+            .ok_or_else(|| "no enabled banks — enable banks in Settings".to_string())?;
+        return Ok((range, cycle));
+    }
+    if needle.eq_ignore_ascii_case(crate::scanner::SCAN_BOOKMARKS) {
+        let cycle = bookmark_scan_cycle(s)?;
+        let range = cycle
+            .first()
+            .cloned()
+            .ok_or_else(|| "no enabled bookmarks to scan".to_string())?;
+        return Ok((range, cycle));
+    }
+    s.0.config
+        .read()
+        .scan_ranges
+        .iter()
+        .find(|range| range.name == needle)
+        .cloned()
+        .map(|range| (range, Vec::new()))
+        .ok_or_else(|| "unknown range".into())
+}
+
 async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) -> Json<Value> {
     if let Err(error) = s.0.receiver_session.lock().claim("scanner", false) {
         return Json(
             json!({"ok":false,"error":error,"session":s.0.receiver_session.lock().clone()}),
         );
     }
-    let range = {
-        let cfg = s.0.config.read();
-        cfg.scan_ranges
-            .iter()
-            .find(|r| r.name == req.range_name)
-            .cloned()
-    };
-    let Some(range) = range else {
-        return Json(json!({"ok": false, "error": "unknown range"}));
+    let (range, cycle) = match resolve_scan_target(&s, &req.range_name) {
+        Ok(target) => target,
+        Err(error) => {
+            s.0.receiver_session.lock().release("scanner");
+            return Json(json!({"ok": false, "error": error}));
+        }
     };
     let requested_rate =
         s.0.config
@@ -1783,6 +1871,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
             .sample_rate
             .max(range.sample_rate_hz);
     if let Err(e) = s.0.device.set_sample_contract(requested_rate) {
+        s.0.receiver_session.lock().release("scanner");
         return Json(json!({"ok": false, "error": format!("failed to set sampled spectrum: {e}")}));
     }
     let status = s.0.device.status();
@@ -1791,6 +1880,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         .min((status.sample_rate as f64 * 0.9) as u32);
     let initial_center = crate::scanner::initial_scan_center(&range, usable_span);
     if let Err(e) = s.0.device.set_frequency(initial_center) {
+        s.0.receiver_session.lock().release("scanner");
         return Json(json!({"ok": false, "error": format!("failed to tune device: {e}")}));
     }
     // Lazily create the scanner if needed.
@@ -1805,7 +1895,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         start_configured_sidecars(&s).await;
         let _ = handle
             .cmd_tx
-            .send(crate::scanner::ScannerCommand::Start { range });
+            .send(crate::scanner::ScannerCommand::Start { range, cycle });
         return Json(json!({"ok": true}));
     }
     let cfg = s.0.config.read().scanner.clone();
@@ -1827,6 +1917,7 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     if let Some(handle) = s.0.scanner.read().as_ref() {
         let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start {
             range: range.clone(),
+            cycle,
         });
     }
     configure_ham_decoders(&s, &range);
@@ -2237,6 +2328,8 @@ async fn spectrum(State(s): State<ApiState>) -> impl IntoResponse {
         "bins": runtime.latest_spectrum,
         "range": runtime.active_range,
         "running": runtime.running,
+        "locked": runtime.scan_locked,
+        "holding": runtime.holding,
         "frame_sequence": runtime.frames_processed,
         "frame_timestamp_ms": runtime.latest_spectrum_ms,
         "noise_floor_db": runtime.noise_floor_db,
@@ -2888,9 +2981,27 @@ async fn scan_lock(State(s): State<ApiState>) -> impl IntoResponse {
 }
 async fn scan_unlock(State(s): State<ApiState>) -> impl IntoResponse {
     if let Some(h) = s.0.scanner.read().as_ref() {
-        h.state.lock().scan_locked = false;
+        let _ = h.cmd_tx.send(crate::scanner::ScannerCommand::Resume);
     }
     Json(json!({"ok":true,"locked":false}))
+}
+async fn scan_skip(State(s): State<ApiState>) -> impl IntoResponse {
+    if let Some(h) = s.0.scanner.read().as_ref() {
+        let _ = h
+            .cmd_tx
+            .send(crate::scanner::ScannerCommand::Skip { temporary: true });
+        return Json(json!({"ok":true,"temporary":true}));
+    }
+    Json(json!({"ok":false,"error":"scanner is not running"}))
+}
+async fn scan_lockout(State(s): State<ApiState>) -> impl IntoResponse {
+    if let Some(h) = s.0.scanner.read().as_ref() {
+        let _ = h
+            .cmd_tx
+            .send(crate::scanner::ScannerCommand::Skip { temporary: false });
+        return Json(json!({"ok":true,"temporary":false}));
+    }
+    Json(json!({"ok":false,"error":"scanner is not running"}))
 }
 async fn scan_start_alt(
     State(s): State<ApiState>,
@@ -2991,9 +3102,12 @@ async fn sidecars_start_all(State(s): State<ApiState>) -> impl IntoResponse {
 
 async fn scan_status(State(s): State<ApiState>) -> impl IntoResponse {
     let runtime = s.0.scanner.read().as_ref().map(|h| h.state.lock().clone());
-    Json(
-        json!({"running": runtime.as_ref().map(|v| v.running).unwrap_or(false), "locked": runtime.as_ref().map(|v| v.scan_locked).unwrap_or(false), "range": runtime.and_then(|v| v.active_range)}),
-    )
+    Json(json!({
+        "running": runtime.as_ref().map(|v| v.running).unwrap_or(false),
+        "locked": runtime.as_ref().map(|v| v.scan_locked).unwrap_or(false),
+        "holding": runtime.as_ref().map(|v| v.holding).unwrap_or(false),
+        "range": runtime.and_then(|v| v.active_range)
+    }))
 }
 
 async fn scan_adsb(State(s): State<ApiState>) -> Json<Value> {

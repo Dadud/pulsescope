@@ -183,6 +183,7 @@ impl AppState {
                 if command
                     .send(crate::scanner::ScannerCommand::Start {
                         range: range.clone(),
+                        cycle: Vec::new(),
                     })
                     .is_ok()
                 {
@@ -208,7 +209,10 @@ impl AppState {
         let handle = ScannerHandle::spawn(cfg, dependencies);
         handle
             .cmd_tx
-            .send(crate::scanner::ScannerCommand::Start { range })
+            .send(crate::scanner::ScannerCommand::Start {
+                range,
+                cycle: Vec::new(),
+            })
             .map_err(|_| "receiver task did not accept its startup command".to_string())?;
         *self.scanner.write() = Some(handle);
         if recovering {
@@ -465,9 +469,10 @@ impl AppState {
                 continue;
             }
             if let Some(handle) = self.scanner.read().as_ref() {
-                let _ = handle
-                    .cmd_tx
-                    .send(crate::scanner::ScannerCommand::Start { range });
+                let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start {
+                    range,
+                    cycle: Vec::new(),
+                });
             } else {
                 self.receiver_session.lock().release(&owner);
                 let _ = self.db.mark_scheduled_job(

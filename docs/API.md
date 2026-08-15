@@ -95,10 +95,15 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 |--------|-------------------------------|------------------------------|
 | GET    | `/channels/banks`             | — list scan-range presets    |
 | GET    | `/channels/scan-config`       | — FFT/squelch/max-VFO knobs  |
-| POST   | `/channels/scan/start`        | `{ range_name }`             |
+| POST   | `/channels/scan/start`        | `{ range_name }` — named bank, `enabled`, `*`, or `Bookmarks` |
 | POST   | `/channels/scan/stop`         | —                            |
 | POST   | `/channels/bank-scan-config`  | `{ bank_name, … }`           |
 | GET    | `/scanner/max-vfos`           | — license-free max-VFO count |
+| GET    | `/scan/status`                | — running / locked / holding |
+| POST   | `/scan/lock`                  | — hold on the current hit    |
+| POST   | `/scan/unlock`                | — resume after hold          |
+| POST   | `/scan/skip`                  | — temporary lockout + resume |
+| POST   | `/scan/lockout`               | — persistent lockout + resume |
 
 ## VFOs (virtual channels inside one captured span)
 

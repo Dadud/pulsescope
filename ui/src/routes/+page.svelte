@@ -119,6 +119,8 @@
   let voiceNoiseReject = $state(true);
   let showAllBands = $state(false);
   let scanWorkspaceOpen = $state(true);
+  let scanLocked = $state(false);
+  let scanHolding = $state(false);
 
   const VOICE_STARTER_BANDS = [
     'FM Broadcast',
@@ -139,6 +141,7 @@
       .filter((bank): bank is ScanRange => Boolean(bank)),
   );
 
+  const enabledVoiceBanks = $derived(banks.filter((bank) => bank.enabled));
   const groupedBanks = $derived(
     ['HF', 'VHF', 'UHF', 'Microwave', 'Broadcast', 'Satellite', 'ISM', 'Other']
       .map((group) => ({ group, banks: filteredBanks.filter((bank) => bandGroup(bank) === group) }))
@@ -205,6 +208,8 @@
       const spectrum = (event as CustomEvent).detail;
       activeRange = spectrum?.range ?? activeRange;
       scanRunning = Boolean(spectrum?.running);
+      scanLocked = Boolean(spectrum?.locked);
+      scanHolding = Boolean(spectrum?.holding);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length) {
         spectrumError = '';
         applySpectrum(spectrum.bins);
@@ -416,6 +421,8 @@
       // here as well so a dropped event socket cannot leave dead VFO/UI chrome.
       activeRange = spectrum?.range ?? activeRange;
       scanRunning = Boolean(spectrum?.running);
+      scanLocked = Boolean(spectrum?.locked);
+      scanHolding = Boolean(spectrum?.holding);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length > 0) {
         spectrumError = '';
         lastSpectrumSequence = Number(spectrum.frame_sequence ?? lastSpectrumSequence);
@@ -789,7 +796,83 @@
 
   async function stopScan() {
     scanRunning = false; activeRange = null;
+    scanLocked = false;
+    scanHolding = false;
     await Api.scanStop();
+  }
+
+  async function startEnabledBanks() {
+    if (!enabledVoiceBanks.length) {
+      notice = 'Enable at least one bank in Settings, then scan enabled banks.';
+      return;
+    }
+    activeRange = enabledVoiceBanks[0].name;
+    scanRunning = true;
+    try {
+      await Api.scanStart('enabled');
+      notice = `Scanning ${enabledVoiceBanks.length} enabled banks`;
+      window.setTimeout(() => { if (notice.startsWith('Scanning ')) notice = ''; }, 2500);
+    } catch (error) {
+      scanRunning = false;
+      notice = `Could not scan enabled banks: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  async function startBookmarkScan() {
+    const enabledBookmarks = bookmarks.filter((bookmark) => bookmark.enabled !== false);
+    if (!enabledBookmarks.length) {
+      notice = 'Save at least one frequency before scanning bookmarks.';
+      return;
+    }
+    activeRange = 'Bookmarks';
+    scanRunning = true;
+    try {
+      await Api.scanStart('Bookmarks');
+      notice = `Scanning ${enabledBookmarks.length} saved frequencies`;
+      window.setTimeout(() => { if (notice.startsWith('Scanning ')) notice = ''; }, 2500);
+    } catch (error) {
+      scanRunning = false;
+      notice = `Could not scan bookmarks: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  async function skipCurrentHit() {
+    try {
+      await Api.scanSkip();
+      scanLocked = false;
+      notice = 'Skipped this frequency for the rest of the survey';
+      window.setTimeout(() => { if (notice.startsWith('Skipped ')) notice = ''; }, 2000);
+    } catch (error) {
+      notice = `Could not skip: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  async function lockoutCurrentHit() {
+    try {
+      await Api.scanLockout();
+      scanLocked = false;
+      notice = 'Locked out this frequency until you remove it from the blacklist';
+      window.setTimeout(() => { if (notice.startsWith('Locked out ')) notice = ''; }, 2500);
+    } catch (error) {
+      notice = `Could not lock out: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  async function toggleScanHold() {
+    try {
+      if (scanLocked) {
+        await Api.scanUnlock();
+        scanLocked = false;
+        notice = 'Scan resumed';
+      } else {
+        await Api.scanLock();
+        scanLocked = true;
+        notice = 'Holding this channel until you resume';
+      }
+      window.setTimeout(() => { if (notice.startsWith('Scan resumed') || notice.startsWith('Holding ')) notice = ''; }, 2000);
+    } catch (error) {
+      notice = `Could not change hold: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   function frequencyAtSurface(target: HTMLCanvasElement, clientX: number): number {
@@ -1120,6 +1203,22 @@
     }
     if ((event.key === 'b' || event.key === 'B') && !event.metaKey && !event.ctrlKey) {
       toggleBanksCollapsed();
+      return;
+    }
+    if (!scanRunning || event.metaKey || event.ctrlKey) return;
+    if (event.key === 's' || event.key === 'S') {
+      event.preventDefault();
+      void skipCurrentHit();
+      return;
+    }
+    if (event.key === 'l' || event.key === 'L') {
+      event.preventDefault();
+      void lockoutCurrentHit();
+      return;
+    }
+    if (event.key === 'h' || event.key === 'H') {
+      event.preventDefault();
+      void toggleScanHold();
     }
   }
 </script>
@@ -1160,7 +1259,7 @@
       <header class="section-header">
         <div>
           <h2>Voice scan</h2>
-          <p class="section-lead">Pick a band to survey for voice. Squelch ignores steady RF noise; audio gate mutes hiss while you listen.</p>
+          <p class="section-lead">Pick a band to search, or scan enabled banks and saved frequencies. Delay resumes after squelch closes; Hold stays on the hit. Skip lockouts the current frequency.</p>
         </div>
         <button type="button" class="mini section-toggle" onclick={toggleScanWorkspace} aria-expanded={scanWorkspaceOpen}>
           {scanWorkspaceOpen ? 'Collapse' : 'Expand'}
@@ -1187,8 +1286,9 @@
             <input type="checkbox" checked={voiceNoiseReject} onchange={toggleVoiceNoiseReject} />
             <span>Reject RF noise <small>Raises squelch and gates on voice audio while listening</small></span>
           </label>
-          {#if scanRunning && activeBank}
+          {#if scanRunning}
             <div class="scan-live-controls">
+              {#if activeBank}
               <label class="squelch-field">
                 <span>Squelch <b>{activeBank.squelch_db.toFixed(0)} dB</b> above noise</span>
                 <input
@@ -1202,14 +1302,26 @@
                   onchange={setScanSquelch}
                 />
               </label>
+              {/if}
               <span class="noise-readout">Noise floor {noiseFloorDb.toFixed(0)} dBFS</span>
-              <button type="button" class="primary stop" onclick={stopScan}>■ Stop scan</button>
+              <div class="scan-actions">
+                <button type="button" onclick={skipCurrentHit}>Skip</button>
+                <button type="button" onclick={lockoutCurrentHit}>Lockout</button>
+                <button type="button" class:active={scanLocked} onclick={toggleScanHold}>{scanLocked ? 'Resume' : 'Hold'}</button>
+                <button type="button" class="primary stop" onclick={stopScan}>■ Stop scan</button>
+              </div>
             </div>
           {:else}
             <div class="scan-search">
               <input bind:value={filter} placeholder="Search all bands…" aria-label="Search band presets" />
               <button type="button" class:primary={showAllBands} onclick={() => (showAllBands = !showAllBands)}>
                 {showAllBands ? 'Hide band list' : 'Browse all bands'}
+              </button>
+              <button type="button" onclick={startEnabledBanks} disabled={!enabledVoiceBanks.length}>
+                Scan enabled ({enabledVoiceBanks.length})
+              </button>
+              <button type="button" onclick={startBookmarkScan} disabled={!bookmarks.length}>
+                Scan bookmarks
               </button>
             </div>
           {/if}
@@ -1240,7 +1352,7 @@
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● Radio {connected ? 'online' : 'offline'}</span>
         <span class="status-pill" class:on={spectrumLive}>● Spectrum {spectrumStatusLabel}</span>
-        <span class="status-pill" class:on={scanRunning}>● Scan {scanRunning ? activeRange ?? 'running' : 'idle'}</span>
+        <span class="status-pill" class:on={scanRunning}>● Scan {scanRunning ? (scanLocked ? 'HOLD' : scanHolding ? 'delay' : activeRange ?? 'running') : 'idle'}</span>
         <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
         {#if !isCompactLayout}
           <button class="layout-toggle" type="button" aria-pressed={logExpanded} onclick={toggleLogExpanded}>
@@ -1277,6 +1389,7 @@
         {/if}
         <ul>
           <li><kbd>Space</kbd> Listen or mute the active VFO</li>
+          <li><kbd>S</kbd> Skip this hit · <kbd>L</kbd> Lockout · <kbd>H</kbd> Hold or resume</li>
           <li><kbd>←</kbd> <kbd>→</kbd> Fine-tune when the spectrum is focused</li>
           <li><kbd>Shift</kbd> + arrows — 10 kHz steps on the spectrum</li>
           <li><kbd>B</kbd> Show or hide saved frequencies</li>
@@ -1520,8 +1633,8 @@
           <div class="waterfall-empty warn">Spectrum stream paused — showing last known frames.</div>
         {/if}
       </div>
-      {#if scanRunning && activeBank}
-        <div class="scan-progress" role="status"><span><b>Scanning {activeBank.name}</b><small>{fmtHz(activeBank.start_hz)} – {fmtHz(activeBank.end_hz)}</small></span><div class="scan-track"><i style={`width:${scanProgress}%`}></i></div><strong>{scanProgress.toFixed(0)}%</strong></div>
+      {#if scanRunning}
+        <div class="scan-progress" role="status"><span><b>Scanning {activeBank?.name ?? activeRange ?? 'range'}</b><small>{scanLocked ? 'HOLD until Resume' : scanHolding ? 'delay — resumes when the channel closes' : activeBank ? `${fmtHz(activeBank.start_hz)} – ${fmtHz(activeBank.end_hz)}` : 'channel scan'}</small></span><div class="scan-track"><i style={`width:${scanProgress}%`}></i></div><strong>{scanProgress.toFixed(0)}%</strong></div>
       {/if}
     </div>
 
@@ -1797,7 +1910,9 @@
   }
   .squelch-field b { color: var(--accent); font: 11px var(--mono); }
   .noise-readout { font: 11px var(--mono); color: var(--fg-dim); padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
-  .scan-search { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+  .scan-search { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; }
+  .scan-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .scan-actions button.active { border-color: var(--accent); color: var(--accent); }
   .all-bands-panel { margin-top: 10px; max-height: 280px; overflow: auto; border-top: 1px solid var(--line); padding-top: 10px; }
   .status-strip { padding: 8px 10px; }
   .bookmarks-aside .bookmark-primary h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }

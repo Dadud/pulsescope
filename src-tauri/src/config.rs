@@ -797,7 +797,7 @@ impl Default for BleConfig {
 
 // ── scan range ────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ScanRange {
     pub name: String,
