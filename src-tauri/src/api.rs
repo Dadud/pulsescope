@@ -1865,8 +1865,22 @@ fn configure_ham_decoders(s: &ApiState, range: &crate::config::ScanRange) {
 
 async fn start_configured_sidecars(s: &ApiState) {
     let cfg = s.0.config.read().clone();
-    let mut jobs: Vec<(&str, String, Vec<String>)> = Vec::new();
+    let mut manifest_ids: Vec<&str> = Vec::new();
     if cfg.rtl433.enabled {
+        manifest_ids.push("rtl_433");
+    }
+    s.0.decoder_scheduler
+        .sync_manifest_jobs(
+            &s.0.sidecars,
+            &s.0.data_dir,
+            &manifest_ids,
+            s.0.db.clone(),
+            s.0.events.clone(),
+        )
+        .await;
+
+    let mut jobs: Vec<(&str, String, Vec<String>)> = Vec::new();
+    if cfg.rtl433.enabled && !s.0.sidecars.is_running("rtl_433") {
         let device = s.0.device.status();
         jobs.push((
             "rtl_433",
@@ -3224,27 +3238,25 @@ async fn scan_digital_voice(State(s): State<ApiState>, Json(req): Json<Value>) -
     let count = (sample_rate as f64 * 3.0) as usize;
     match s.0.device.read_iq(count) {
         Ok(iq) if iq.len() > 4096 => {
-            use crate::demod::{demodulate, Mode};
+            use crate::demod::discriminator_samples;
             use crate::voice_decoder;
-            // Demodulate as NFM to get baseband audio
             let mut previous = None;
-            let audio = demodulate(Mode::Nfm, &iq, &mut previous);
-            // Resample to 48kHz for dsd-fme (it expects 48k or 96k mono WAV)
+            let discriminator = discriminator_samples(&iq, &mut previous);
             let audio_rate = sample_rate as f32;
             let target_rate = 48000.0f32;
             let ratio = target_rate / audio_rate;
-            let target_len = (audio.len() as f32 * ratio) as usize;
+            let target_len = (discriminator.len() as f32 * ratio) as usize;
             let resampled: Vec<f32> = (0..target_len)
                 .map(|i| {
                     let src_idx = i as f32 / ratio;
                     let idx0 = src_idx.floor() as usize;
-                    let idx1 = (idx0 + 1).min(audio.len() - 1);
+                    let idx1 = (idx0 + 1).min(discriminator.len() - 1);
                     let frac = src_idx - idx0 as f32;
-                    audio[idx0] * (1.0 - frac) + audio[idx1] * frac
+                    discriminator[idx0] * (1.0 - frac) + discriminator[idx1] * frac
                 })
                 .collect();
 
-            let result = voice_decoder::decode_digital_voice(&resampled, mode);
+            let result = voice_decoder::decode_digital_voice_discriminator(&resampled, mode);
             Json(json!({
                 "available": result.available,
                 "mode": result.mode,
@@ -3256,8 +3268,9 @@ async fn scan_digital_voice(State(s): State<ApiState>, Json(req): Json<Value>) -
                 "errors": result.errors,
                 "raw_output": result.raw_output,
                 "error": result.error_message,
+                "input": "discriminator",
                 "frequency_hz": status.center_freq_hz,
-                "audio_samples": resampled.len(),
+                "discriminator_samples": resampled.len(),
             }))
         }
         Ok(_) => Json(json!({"available": false, "reason": "insufficient samples"})),
@@ -4431,25 +4444,8 @@ mod readiness_tests {
     #[test]
     fn required_catalog_decoders_stay_unavailable_until_recorded_iq_e2e() {
         let required_ids = [
-            "adsb",
-            "ais",
-            "aprs",
-            "pocsag",
-            "rds",
-            "uat",
-            "acars",
-            "vdl2",
-            "rtl433",
-            "ft8",
-            "wspr",
-            "rtty",
-            "navtex",
-            "dmr",
-            "p25",
-            "nxdn",
-            "dstar",
-            "ysf",
-            "m17",
+            "adsb", "ais", "aprs", "pocsag", "rds", "uat", "acars", "vdl2", "rtl433", "ft8",
+            "wspr", "rtty", "navtex", "dmr", "p25", "nxdn", "dstar", "ysf", "m17",
         ];
         for id in required_ids {
             let decoder = decoder_development_entry(id, id, "iq", "live");

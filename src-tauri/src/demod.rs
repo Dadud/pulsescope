@@ -92,6 +92,25 @@ pub fn demodulate(
     out
 }
 
+/// Raw FM discriminator samples for digital-voice decoders (dsd-fme, etc.).
+/// Unlike [`demodulate`] for NFM, this does not apply audio soft limiting or
+/// scaling intended for speaker output — only the quadrature phase derivative.
+pub fn discriminator_samples(iq: &[Complex<f32>], previous: &mut Option<Complex<f32>>) -> Vec<f32> {
+    if iq.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(iq.len());
+    let mut prev = previous.take().unwrap_or(iq[0]);
+    for s in iq {
+        let cross = s.im * prev.re - s.re * prev.im;
+        let dot = s.re * prev.re + s.im * prev.im;
+        out.push(cross.atan2(dot));
+        prev = *s;
+    }
+    *previous = Some(prev);
+    out
+}
+
 /// Stateful broadcast-FM stereo multiplex decoder. Pilot phase is estimated
 /// from each 20 ms block, doubled for the 38 kHz DSB-SC channel, and blended
 /// toward mono when the 19 kHz pilot is weak. Four cascaded one-pole sections

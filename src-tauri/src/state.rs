@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, watch};
 use crate::audio::AudioSink;
 use crate::config::{Config, ScanRange};
 use crate::db::Db;
+use crate::decoder_scheduler::DecoderScheduler;
 use crate::device::DeviceLayer;
 use crate::scanner::{ScannerDependencies, ScannerHandle};
 use crate::sidecar::SidecarRegistry;
@@ -42,6 +43,7 @@ pub struct AppState {
     pub listener_sessions: RwLock<HashMap<String, ListenerSession>>,
     pub trunking: RwLock<TrunkingRuntime>,
     pub sidecars: SidecarRegistry,
+    pub decoder_scheduler: DecoderScheduler,
     /// Native ham decoder tasks are explicitly tied to their selected narrow
     /// operating window and are cancelled when the operator changes range.
     pub ham_decoder_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
@@ -63,6 +65,8 @@ impl AppState {
     pub fn new() -> Arc<Self> {
         let data_dir = crate::state::AppState::default_data_dir();
         let config = Config::load(&data_dir);
+        let decoder_scheduler =
+            DecoderScheduler::with_trusted_keys(DecoderScheduler::load_trusted_keys(&data_dir));
         let db = Db::open(&data_dir.join("pulsescope.db")).expect("failed to open pulsescope.db");
         let (events_tx, _events_rx) = broadcast::channel(1024);
         let (spectrum_tx, _spectrum_rx) = watch::channel(SpectrumFrame::default());
@@ -89,6 +93,7 @@ impl AppState {
             listener_sessions: RwLock::new(HashMap::new()),
             trunking: RwLock::new(TrunkingRuntime::default()),
             sidecars: SidecarRegistry::new(),
+            decoder_scheduler,
             ham_decoder_tasks: Mutex::new(HashMap::new()),
             events: events_tx,
             spectrum: spectrum_tx,

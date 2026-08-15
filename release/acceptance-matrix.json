@@ -163,13 +163,20 @@
       "id": "decoder-platform", "name": "Manifest decoder scheduler", "group": "decoder",
       "status": "development", "visibility": "normal", "required": true,
       "acceptance_gate": "Checksummed manifests, resource limits, typed parameters, health/restart policy, and normalized events.",
-      "evidence": [{"type": "test", "ref": "decoder catalog truthfulness regression"}]
+      "evidence": [
+        {"type": "test", "ref": "decoder catalog truthfulness regression"},
+        {"type": "test", "ref": "decoder_scheduler::tests::scan_and_verify_manifest_roundtrip"},
+        {"type": "test", "ref": "sidecar supervised restart policy"}
+      ]
     },
     {
       "id": "decoder-adsb-ais-aprs", "name": "ADS-B, AIS and APRS", "group": "decoder",
       "status": "development", "visibility": "normal", "required": true,
       "acceptance_gate": "Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads.",
-      "evidence": [{"type": "test", "ref": "native decoder unit tests; recorded-IQ gate remains open"}]
+      "evidence": [
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
+        {"type": "test", "ref": "native decoder unit tests; additional catalog IDs remain open"}
+      ]
     },
     {
       "id": "decoder-rds", "name": "Broadcast RDS", "group": "decoder",

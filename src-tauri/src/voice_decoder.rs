@@ -111,6 +111,11 @@ pub struct DsdResult {
     pub error_message: Option<String>,
 }
 
+/// Run dsd-fme on discriminator PCM (48 kHz mono), not speaker-filtered voice audio.
+pub fn decode_digital_voice_discriminator(samples: &[f32], mode: &str) -> DsdResult {
+    decode_digital_voice(samples, mode)
+}
+
 /// Run dsd-fme on demodulated audio samples.
 /// `mode` can be: "auto", "p25p1", "p25p2", "dmr", "nxdn48", "nxdn96", "dstar", "ysf", "m17", "provoice"
 pub fn decode_digital_voice(samples: &[f32], mode: &str) -> DsdResult {

@@ -1,0 +1,51 @@
+{
+  "schema": "pulsescope.recorded-iq-fixture",
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "adsb-df17-abcdef",
+      "protocol": "adsb",
+      "file": "adsb-df17-abcdef.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "adsb",
+        "icao": "ABCDEF",
+        "mmsi": null,
+        "source": null,
+        "info_contains": null
+      },
+      "sha256": "056c6956fcdaa9ab44255bf29e6e364357fcef0d70ce2df0daf169bc962e6907"
+    },
+    {
+      "id": "ais-type1-position",
+      "protocol": "ais",
+      "file": "ais-type1-position.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "ais",
+        "icao": null,
+        "mmsi": 366123456,
+        "source": null,
+        "info_contains": null
+      },
+      "sha256": "8e36744f15b27a2d26a9e8b9ec741b74f4e289f074c4979bcb92350c79b473ca"
+    },
+    {
+      "id": "aprs-w1aw-hello",
+      "protocol": "aprs",
+      "file": "aprs-w1aw-hello.nrz.json",
+      "kind": "nrz_bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "aprs",
+        "icao": null,
+        "mmsi": null,
+        "source": "W1AW",
+        "info_contains": "Hello world"
+      },
+      "sha256": "d954aa848389c8c5e6b248a1691b9a0c739d455cc1d49d97a88e0fb0cf8c71ce"
+    }
+  ]
+}

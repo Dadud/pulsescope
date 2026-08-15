@@ -26,6 +26,14 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESTARTS: u8 = 3;
 
 #[derive(Clone)]
+struct SpawnRecipe {
+    exe: PathBuf,
+    args: Vec<String>,
+    db: Db,
+    events_tx: broadcast::Sender<ScannerEvent>,
+}
+
+#[derive(Clone)]
 pub struct SidecarRegistry {
     children: Arc<Mutex<HashMap<String, Arc<Mutex<Child>>>>>,
     inputs: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<ChildStdin>>>>>,
@@ -33,6 +41,7 @@ pub struct SidecarRegistry {
     input_stats: Arc<Mutex<HashMap<String, (u64, u64)>>>,
     failures: Arc<Mutex<HashMap<String, String>>>,
     restarts: Arc<Mutex<HashMap<String, u8>>>,
+    spawn_recipes: Arc<Mutex<HashMap<String, SpawnRecipe>>>,
 }
 
 pub fn encode_u8_iq(samples: &[rustfft::num_complex::Complex<f32>]) -> Vec<u8> {
@@ -60,6 +69,7 @@ impl SidecarRegistry {
             input_stats: Arc::new(Mutex::new(HashMap::new())),
             failures: Arc::new(Mutex::new(HashMap::new())),
             restarts: Arc::new(Mutex::new(HashMap::new())),
+            spawn_recipes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -101,6 +111,7 @@ impl SidecarRegistry {
 
         let stdout = tokio::io::BufReader::new(stdout);
         let events_tx_clone = events_tx.clone();
+        let db_task = db.clone();
         let protocol_for_task = protocol.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
@@ -110,7 +121,7 @@ impl SidecarRegistry {
                     Ok(Some(line)) if line.len() <= MAX_LINE_BYTES => {
                         tracing::debug!(proto = %protocol_for_task, line = %line, "sidecar");
                         if let Some(m) = parse_line(&protocol_for_task, &line) {
-                            let _ = db.insert_decoded_message(&m);
+                            let _ = db_task.insert_decoded_message(&m);
                             let _ = events_tx_clone.send(ScannerEvent::DecodedMessage(m));
                         }
                     }
@@ -164,11 +175,73 @@ impl SidecarRegistry {
         if let Some(status) = exited {
             self.inputs.lock().await.remove(name);
             self.children.lock().remove(name);
+            self.spawn_recipes.lock().remove(name);
             let detail = format!("decoder exited during startup with {status}");
             self.failures.lock().insert(name.into(), detail.clone());
             return Err(anyhow::anyhow!(detail));
         }
+        self.spawn_recipes.lock().insert(
+            name.to_string(),
+            SpawnRecipe {
+                exe,
+                args,
+                db: db.clone(),
+                events_tx,
+            },
+        );
+        self.spawn_supervisor(name.to_string());
         Ok(())
+    }
+
+    fn spawn_supervisor(&self, name: String) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let child_arc = registry.children.lock().get(&name).cloned();
+                if child_arc.is_none() {
+                    break;
+                }
+                let exit = if let Some(child_arc) = child_arc {
+                    let mut child = child_arc.lock();
+                    child.try_wait()
+                } else {
+                    break;
+                };
+                if let Ok(Some(status)) = exit {
+                    registry.inputs.lock().await.remove(&name);
+                    registry.children.lock().remove(&name);
+                    let attempt = {
+                        let mut restarts = registry.restarts.lock();
+                        let count = restarts.entry(name.clone()).or_insert(0);
+                        *count += 1;
+                        *count
+                    };
+                    if attempt > MAX_RESTARTS {
+                        registry.failures.lock().insert(
+                            name.clone(),
+                            format!("exited with {status}; restart limit reached"),
+                        );
+                        registry.spawn_recipes.lock().remove(&name);
+                        break;
+                    }
+                    let recipe = registry.spawn_recipes.lock().get(&name).cloned();
+                    if let Some(recipe) = recipe {
+                        tracing::warn!(decoder = %name, attempt, "restarting decoder sidecar");
+                        let _ = registry
+                            .spawn_decoder(
+                                &name,
+                                recipe.exe,
+                                recipe.args,
+                                recipe.db,
+                                recipe.events_tx,
+                            )
+                            .await;
+                    }
+                    break;
+                }
+            }
+        });
     }
 
     /// Launch only after a signed manifest and its executable digest have
@@ -237,6 +310,7 @@ impl SidecarRegistry {
 
     pub async fn kill(&self, name: &str) -> anyhow::Result<()> {
         self.inputs.lock().await.remove(name);
+        self.spawn_recipes.lock().remove(name);
         let child_arc = self.children.lock().remove(name);
         if let Some(child_arc) = child_arc {
             let mut child = child_arc.lock();
@@ -254,6 +328,7 @@ impl SidecarRegistry {
 
     pub async fn kill_all(&self) -> anyhow::Result<()> {
         self.inputs.lock().await.clear();
+        self.spawn_recipes.lock().clear();
         let kids: Vec<_> = self.children.lock().drain().collect();
         for (_, child_arc) in kids {
             let mut child = child_arc.lock();

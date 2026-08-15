@@ -11,7 +11,6 @@ use std::f32::consts::TAU;
 const MARK_HZ: f32 = 1200.0; // conventional APRS is mark=1200, space=2200
 const SPACE_HZ: f32 = 2200.0;
 const BAUD: f32 = 1200.0;
-const SAMPLES_PER_BIT: f32 = 96000.0 / BAUD; // 80 samples at 96k
 
 #[derive(Debug, Clone)]
 pub struct AprsFrame {
@@ -25,6 +24,7 @@ pub struct AprsFrame {
 
 pub struct AprsDecoder {
     sample_rate: f32,
+    samples_per_bit: f32,
     mark_phase: f32,
     space_phase: f32,
     bit_phase: f32, // 0..1
@@ -34,6 +34,7 @@ pub struct AprsDecoder {
     shift: u32,
     // HDLC: look for the 0x7e flag and de-stuff.
     flag_count: usize,
+    frame_bits: Vec<u8>,
     pub frames: Vec<AprsFrame>,
 }
 
@@ -41,6 +42,7 @@ impl AprsDecoder {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             sample_rate,
+            samples_per_bit: sample_rate / BAUD,
             mark_phase: 0.0,
             space_phase: 0.0,
             bit_phase: 0.0,
@@ -48,6 +50,7 @@ impl AprsDecoder {
             bit_count: 0,
             shift: 0,
             flag_count: 0,
+            frame_bits: Vec::new(),
             frames: Vec::new(),
         }
     }
@@ -81,7 +84,7 @@ impl AprsDecoder {
         let mark_e = self.goertzel_step(sample, MARK_HZ);
         let space_e = self.goertzel_step(sample, SPACE_HZ);
         let bit = space_e > mark_e; // space dominant -> bit=1 (space=2200)
-        self.bit_phase += 1.0 / SAMPLES_PER_BIT;
+        self.bit_phase += 1.0 / self.samples_per_bit;
         let mut frame_decoded = false;
         if self.bit_phase >= 1.0 {
             self.bit_phase -= 1.0;
@@ -98,6 +101,9 @@ impl AprsDecoder {
         if self.bit_count == 0 && !nrz {
             return false; // HDLC flag begins with a zero-bit transition
         }
+        if self.flag_count == 1 {
+            self.frame_bits.push(nrz as u8);
+        }
         self.shift = (self.shift << 1) | nrz as u32;
         self.bit_count += 1;
         // Look for HDLC flag = 0x7e = 0b01111110
@@ -106,22 +112,19 @@ impl AprsDecoder {
             if last_byte == 0x7e {
                 self.flag_count += 1;
                 if self.flag_count >= 2 {
-                    // Two flags seen -> previous frame is closed
-                    if self.bit_count > 16 {
-                        // had at least one byte between flags
+                    if !self.frame_bits.is_empty() {
                         let decoded = self.try_emit_frame();
-                        // Reset bit accumulator for next frame
+                        self.frame_bits.clear();
                         self.shift = 0;
                         self.bit_count = 0;
                         self.flag_count = 1;
                         return decoded;
-                    } else {
-                        // Idle flags only
-                        self.shift = 0;
-                        self.bit_count = 0;
-                        self.flag_count = 1;
                     }
+                    self.shift = 0;
+                    self.bit_count = 0;
+                    self.flag_count = 1;
                 } else {
+                    self.frame_bits.clear();
                     self.shift = 0x7e;
                     self.bit_count = 8;
                 }
@@ -138,18 +141,18 @@ impl AprsDecoder {
     }
 
     fn try_emit_frame(&mut self) -> bool {
-        // Frame bytes: between flag_count >= 2, bits accumulated starting
-        // *after* the first 0x7e flag (which is 8 bits). After the second
-        // 0x7e, the bytes between the two flags are the frame payload.
-        //
-        // The simplest possible approach: just collect bytes from the
-        // current shift register and the next 8-bit aligned ones until
-        // we hit the closing flag. The full bit-stripping implementation
-        // is below; this is the working compact form.
-        //
-        // For a real implementation we'd carry a full bit buffer; for
-        // honest test coverage of marker/structure, the unit tests
-        // exercise the bit-stripping math directly.
+        let frames = parse_ax25_bits(&self.frame_bits);
+        if let Some(frame) = frames.first() {
+            self.frames.push(AprsFrame {
+                dest: frame.dest.clone(),
+                source: frame.source.clone(),
+                digipeaters: frame.digipeaters.clone(),
+                info: frame.info.clone(),
+                received_at_ms: crate::scanner::now_ms(),
+                snr_db: 12.0,
+            });
+            return true;
+        }
         false
     }
 }
@@ -275,6 +278,77 @@ fn ax25_call(bytes: &[u8]) -> String {
         s.push_str(&ssid.to_string());
     }
     s
+}
+
+/// Canonical W1AW>APRS Hello-world AX.25 payload for fixtures.
+pub fn hello_world_ax25_payload() -> Vec<u8> {
+    let dest = vec![
+        b'A' << 1,
+        b'P' << 1,
+        b'R' << 1,
+        b'S' << 1,
+        b' ' << 1,
+        b' ' << 1,
+        0x00,
+    ];
+    let src = vec![
+        b'W' << 1,
+        b'1' << 1,
+        b'A' << 1,
+        b'W' << 1,
+        b' ' << 1,
+        b' ' << 1,
+        0x00,
+    ];
+    let digi = vec![
+        b'T' << 1,
+        b'C' << 1,
+        b'P' << 1,
+        b'I' << 1,
+        b'P' << 1,
+        b' ' << 1,
+        0x80 | 1,
+    ];
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&dest);
+    payload.extend_from_slice(&src);
+    payload.extend_from_slice(&digi);
+    payload.extend_from_slice(&[0x03, 0xf0]);
+    payload.extend_from_slice(b"Hello world");
+    payload
+}
+
+/// Recover NRZ bits from AFSK audio using per-bit Goertzel windows.
+pub fn recover_nrz_bits_chunked(samples: &[f32], sample_rate: f32) -> Vec<u8> {
+    let samples_per_bit = (sample_rate / BAUD).round().max(1.0) as usize;
+    let mut prev_tone = false;
+    let mut bits = Vec::new();
+    for chunk in samples.chunks(samples_per_bit) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mark_e = goertzel_energy(chunk, MARK_HZ, sample_rate);
+        let space_e = goertzel_energy(chunk, SPACE_HZ, sample_rate);
+        let tone_bit = space_e > mark_e;
+        let nrz = tone_bit != prev_tone;
+        prev_tone = tone_bit;
+        bits.push(nrz as u8);
+    }
+    bits
+}
+
+fn goertzel_energy(samples: &[f32], freq: f32, sample_rate: f32) -> f32 {
+    let mut s1 = 0.0f32;
+    let mut s2 = 0.0f32;
+    let k = freq * samples.len() as f32 / sample_rate;
+    let omega = TAU * k / samples.len() as f32;
+    let coeff = 2.0 * omega.cos();
+    for &x in samples {
+        let s0 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    s1 * s1 + s2 * s2 - coeff * s1 * s2
 }
 
 #[cfg(test)]
@@ -455,7 +529,7 @@ mod tests {
         let mut decoder = AprsDecoder::new(sample_rate);
         let mut mark_dominant = 0;
         let mut space_dominant = 0;
-        for chunk in samples.chunks(SAMPLES_PER_BIT as usize) {
+        for chunk in samples.chunks((sample_rate / BAUD).round() as usize) {
             let me = goertzel(chunk, MARK_HZ, sample_rate);
             let se = goertzel(chunk, SPACE_HZ, sample_rate);
             if me > se {
