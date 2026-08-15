@@ -137,6 +137,24 @@ pub enum ScannerCommand {
     SetRangeSquelch {
         squelch_db: f32,
     },
+    /// A manual retune moved the hardware window. Native decoders are gated on
+    /// the active bank's name, so without this the bank that started the scan
+    /// stays selected and every frame of IQ is discarded by the wrong decoder
+    /// set. `range` is resolved by the caller, which owns the bank table.
+    FollowRetune {
+        center_hz: u64,
+        range: Option<ScanRange>,
+    },
+    /// Allocate another listening slot. The sweep only grows the VFO list on
+    /// confirmed hits, so an operator holding on one channel would otherwise
+    /// never get a second receiver.
+    AddVfo {
+        frequency_hz: Option<u64>,
+        mode: Option<String>,
+    },
+    RemoveVfo {
+        id: u32,
+    },
     SetVfoFrequency {
         id: u32,
         frequency_hz: u64,
@@ -801,6 +819,110 @@ async fn scanner_loop(
                     logged_channels.clear();
                     let _ = events_tx.send(ScannerEvent::VfoStates(Vec::new()));
                     tracing::info!("scanner stopped");
+                }
+                ScannerCommand::FollowRetune { center_hz, range } => {
+                    // IQ buffered under the previous RF window describes other
+                    // frequencies entirely.
+                    capture_ring.clear();
+                    audio_ring.clear();
+                    snapshot_ring.clear();
+                    audio.clear_queue();
+                    smoothed_noise_floor = None;
+                    candidate_hz = None;
+                    candidate_since = None;
+                    logged_channels.clear();
+                    let status = device.status();
+                    if let Some(next) = range {
+                        let unchanged = active_range
+                            .as_ref()
+                            .is_some_and(|current| current.name == next.name);
+                        if !unchanged {
+                            native_decoders.reset(status.sample_rate);
+                            state.lock().active_range = Some(next.name.clone());
+                            tracing::info!(
+                                range = %next.name,
+                                center_hz,
+                                "scanner bank follows manual retune"
+                            );
+                            active_range = Some(next);
+                        }
+                    }
+                    // A VFO left outside the new passband can never be
+                    // channelized, so it would sit silent at a frequency the
+                    // radio no longer covers. Re-home those slots on the center
+                    // the operator just chose and adopt the bank's default mode,
+                    // since the old mode belonged to the old band.
+                    let usable_half = (status.sample_rate as u64 * 45) / 100;
+                    let bank_mode = active_range.as_ref().map(|range| range.mode.clone());
+                    let vfos = {
+                        let mut runtime = state.lock();
+                        for vfo in &mut runtime.vfo_states {
+                            if vfo.frequency_hz.abs_diff(center_hz) > usable_half {
+                                vfo.frequency_hz = center_hz;
+                                vfo.squelch_open = false;
+                                vfo.strength_db = -120.0;
+                                vfo.audio_level_db = -120.0;
+                                vfo.snr_db = 0.0;
+                                if let Some(mode) = bank_mode.as_ref() {
+                                    vfo.mode = mode.clone();
+                                }
+                            }
+                        }
+                        runtime.vfo_states.clone()
+                    };
+                    let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
+                }
+                ScannerCommand::AddVfo { frequency_hz, mode } => {
+                    let status = device.status();
+                    let bank_mode = active_range
+                        .as_ref()
+                        .map(|range| range.mode.clone())
+                        .unwrap_or_else(|| "nfm".to_string());
+                    let vfos = {
+                        let mut runtime = state.lock();
+                        if runtime.vfo_states.len() < cfg.max_vfos {
+                            let id = runtime
+                                .vfo_states
+                                .iter()
+                                .map(|vfo| vfo.id)
+                                .max()
+                                .map(|highest| highest.saturating_add(1))
+                                .unwrap_or(0);
+                            runtime.vfo_states.push(VfoState {
+                                id,
+                                frequency_hz: frequency_hz.unwrap_or(status.center_freq_hz),
+                                mode: mode.unwrap_or(bank_mode),
+                                // Audio stays opt-in; the slot arrives with a
+                                // Listen control rather than unsolicited sound.
+                                muted: true,
+                                volume: 0.7,
+                                audio_agc: true,
+                                squelch_open: false,
+                                strength_db: -120.0,
+                                audio_level_db: -120.0,
+                                // Operator-placed slots must not be recycled by
+                                // the sweep's hit allocator.
+                                locked: true,
+                                last_hit_ms: now_ms(),
+                                snr_db: 0.0,
+                                noise_floor_db: -120.0,
+                            });
+                        }
+                        runtime.vfo_states.clone()
+                    };
+                    let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
+                }
+                ScannerCommand::RemoveVfo { id } => {
+                    let vfos = {
+                        let mut runtime = state.lock();
+                        // The audio and identify paths assume a selected VFO
+                        // exists while a bank is active.
+                        if runtime.vfo_states.len() > 1 {
+                            runtime.vfo_states.retain(|vfo| vfo.id != id);
+                        }
+                        runtime.vfo_states.clone()
+                    };
+                    let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                 }
                 ScannerCommand::SetVfoFrequency { id, frequency_hz } => {
                     let mut runtime = state.lock();
@@ -1994,6 +2116,8 @@ mod scan_window_tests {
             "/scan/skip",
             "/scan/lockout",
             "/vfo/:id/rds",
+            "/vfo/add",
+            "/vfo/:id/remove",
             "/scan/ctcss",
             "/scan/aprs",
         ] {

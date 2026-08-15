@@ -110,6 +110,8 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | Method | Path                       | Body              |
 |--------|----------------------------|-------------------|
 | GET    | `/vfo/states`              | —                 |
+| POST   | `/vfo/add`                 | `{ frequency_hz?, mode? }` — allocate an operator slot; `409` past `/scanner/max-vfos`, `400` outside the passband |
+| POST   | `/vfo/:id/remove`          | — release an operator slot; the last remaining VFO is kept |
 | POST   | `/vfo/:id/mute`            | `{ id, on }` `on: true` **mutes** the VFO |
 | POST   | `/vfo/:id/volume`          | `{ id, value }`   |
 | POST   | `/vfo/:id/audio_agc`       | `{ id, on }`      |
@@ -118,6 +120,17 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET    | `/vfo/diagnostics`         | — per-VFO stats   |
 | GET    | `/scan/ctcss`              | — CTCSS/DCS on the unmuted or locked VFO |
 | GET    | `/scan/aprs`               | — AX.25 AFSK on the unmuted or locked VFO |
+
+The sweep only allocates a VFO when it confirms a hit, so `/vfo/add` is the
+only way to obtain a second slot while holding on one channel.
+
+A manual retune — `/device/frequency`, `/api/v2/receivers/:id/tune`, or
+`/vfo/:id/frequency` past the edge of the capture window — reselects the
+narrowest configured bank containing the new center. Native decoders are
+chosen by bank name, so without this a receiver tuned to a LoRa channel while
+`FM Broadcast` was selected would discard every sample. Any VFO left outside
+the new passband is re-homed to the new center and adopts that bank's default
+mode; a VFO still inside the window is untouched.
 
 ## Spectrum / signal ID
 

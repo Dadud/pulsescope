@@ -134,7 +134,9 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/scanner/max-vfos", get(scanner_max_vfos))
         // ── VFOs ─────────────────────────────────────────────────────────
         .route("/vfo/states", get(vfo_states))
+        .route("/vfo/add", post(vfo_add))
         .route("/vfo/diagnostics", get(vfo_diagnostics))
+        .route("/vfo/:id/remove", post(vfo_remove))
         .route("/vfo/:id/mute", post(vfo_mute))
         .route("/vfo/:id/volume", post(vfo_volume))
         .route("/vfo/:id/frequency", post(vfo_frequency))
@@ -910,6 +912,7 @@ async fn receiver_tune_v2(
     }
     let result = match s.0.device.set_frequency(req.frequency_hz) {
         Ok(()) => {
+            follow_manual_retune(&s, s.0.device.status().center_freq_hz);
             json!({"ok":true,"command_id":req.command_id,"receiver_id":id,"actual_frequency_hz":s.0.device.status().center_freq_hz,"revision":revision})
         }
         Err(error) => {
@@ -1751,6 +1754,7 @@ async fn device_frequency(
                 handle.flush_iq();
             }
             s.0.audio.clear_queue();
+            follow_manual_retune(&s, s.0.device.status().center_freq_hz);
             (
                 StatusCode::OK,
                 Json(json!({"ok": true, "status": s.0.device.status()})),
@@ -2354,6 +2358,9 @@ async fn vfo_frequency(
             handle.flush_iq();
         }
         s.0.audio.clear_queue();
+        // Ordered before the explicit placement below so the requested
+        // frequency wins over bank-follow re-homing.
+        follow_manual_retune(&s, s.0.device.status().center_freq_hz);
     }
     send_vfo(
         &s,
@@ -2369,6 +2376,80 @@ async fn vfo_frequency(
         ),
     )
 }
+#[derive(Deserialize)]
+struct VfoAddReq {
+    #[serde(default)]
+    frequency_hz: Option<u64>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// Allocate an operator-placed listening slot. The sweep only grows the VFO
+/// list when it confirms a hit, so holding on one channel otherwise leaves a
+/// single receiver with no way to add another.
+async fn vfo_add(State(s): State<ApiState>, Json(req): Json<VfoAddReq>) -> impl IntoResponse {
+    let max_vfos = s.0.config.read().scanner.max_vfos;
+    let active = {
+        let scanner = s.0.scanner.read();
+        scanner.as_ref().map(|handle| {
+            let runtime = handle.state.lock();
+            (runtime.running, runtime.vfo_states.len())
+        })
+    };
+    let Some((running, count)) = active else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok":false,"error":"receiver is not running","max_vfos":max_vfos})),
+        );
+    };
+    if !running {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({"ok":false,"error":"start a band scan before adding a VFO","max_vfos":max_vfos}),
+            ),
+        );
+    }
+    if count >= max_vfos {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({"ok":false,"error":format!("receiver limit is {max_vfos} VFOs"),"max_vfos":max_vfos,"vfos":count}),
+            ),
+        );
+    }
+    // Reject a placement the hardware window cannot channelize rather than
+    // silently substituting a reachable frequency.
+    if let Some(frequency_hz) = req.frequency_hz {
+        let status = s.0.device.status();
+        let usable_half = (status.sample_rate as u64 * 45) / 100;
+        if frequency_hz.abs_diff(status.center_freq_hz) > usable_half {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"ok":false,"error":"frequency is outside the current passband","center_freq_hz":status.center_freq_hz,"usable_half_hz":usable_half}),
+                ),
+            );
+        }
+    }
+    send_vfo(
+        &s,
+        crate::scanner::ScannerCommand::AddVfo {
+            frequency_hz: req.frequency_hz,
+            mode: req.mode,
+        },
+    );
+    (
+        StatusCode::OK,
+        Json(json!({"ok":true,"max_vfos":max_vfos,"vfos":count + 1})),
+    )
+}
+
+async fn vfo_remove(State(s): State<ApiState>, Path(id): Path<u32>) -> impl IntoResponse {
+    send_vfo(&s, crate::scanner::ScannerCommand::RemoveVfo { id });
+    Json(json!({"ok":true,"id":id}))
+}
+
 #[derive(Deserialize)]
 struct VfoModeReq {
     mode: String,
@@ -5149,6 +5230,63 @@ fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
     }
 }
 
+/// Which configured bank owns `frequency_hz`. The narrowest match wins so a
+/// specific service bank beats a wide amateur allocation covering the same
+/// spectrum, and `current` is kept when it still contains the frequency so
+/// banks that share edges do not flap. Enabled banks are preferred, but a
+/// disabled one is still better than leaving the previous band selected.
+fn pick_range_for_frequency<'a>(
+    ranges: &'a [crate::config::ScanRange],
+    frequency_hz: u64,
+    current: Option<&str>,
+) -> Option<&'a crate::config::ScanRange> {
+    let contains = |range: &crate::config::ScanRange| {
+        range.start_hz <= frequency_hz && frequency_hz <= range.end_hz
+    };
+    if let Some(name) = current {
+        if let Some(range) = ranges
+            .iter()
+            .find(|range| range.name == name && contains(range))
+        {
+            return Some(range);
+        }
+    }
+    let narrowest = |only_enabled: bool| {
+        ranges
+            .iter()
+            .filter(|range| contains(range) && (!only_enabled || range.enabled))
+            .min_by_key(|range| range.end_hz.saturating_sub(range.start_hz))
+    };
+    narrowest(true).or_else(|| narrowest(false))
+}
+
+fn range_for_frequency(
+    s: &ApiState,
+    frequency_hz: u64,
+    current: Option<&str>,
+) -> Option<crate::config::ScanRange> {
+    let cfg = s.0.config.read();
+    pick_range_for_frequency(&cfg.scan_ranges, frequency_hz, current).cloned()
+}
+
+/// Keep bank selection and VFO placement consistent with a manual retune.
+/// Native decoders are selected by bank name, so a retune that leaves the old
+/// bank active silently discards every sample: tuning to a LoRa channel while
+/// `FM Broadcast` is selected can never decode.
+fn follow_manual_retune(s: &ApiState, center_hz: u64) {
+    let current = {
+        let scanner = s.0.scanner.read();
+        scanner
+            .as_ref()
+            .and_then(|handle| handle.state.lock().active_range.clone())
+    };
+    let range = range_for_frequency(s, center_hz, current.as_deref());
+    send_vfo(
+        s,
+        crate::scanner::ScannerCommand::FollowRetune { center_hz, range },
+    );
+}
+
 /// Copy live IQ from the capture snapshot ring. Never reads the hardware
 /// stream while the scanner owns it — that would steal waterfall/audio samples.
 fn live_iq_snapshot(s: &ApiState, count: usize) -> Result<Vec<Complex<f32>>, String> {
@@ -5258,6 +5396,69 @@ mod readiness_tests {
             assert_eq!(decoder["available"], true);
             assert_eq!(decoder["verification"], "recorded_iq_e2e");
         }
+    }
+}
+
+#[cfg(test)]
+mod retune_bank_tests {
+    use super::pick_range_for_frequency;
+    use crate::config::default_scan_ranges;
+
+    /// The original defect: tuning to a LoRa channel while `FM Broadcast` was
+    /// the active bank left the LoRa decoder gated off, because native decoders
+    /// are selected by bank name and the bank never followed the radio.
+    #[test]
+    fn manual_retune_to_lora_leaves_a_lora_named_bank_selected() {
+        let ranges = default_scan_ranges();
+        for (label, frequency_hz) in [("meshtastic 915", 906_875_000u64), ("ism 433", 433_175_000)]
+        {
+            let picked = pick_range_for_frequency(&ranges, frequency_hz, Some("FM Broadcast"))
+                .unwrap_or_else(|| panic!("{label} must resolve to a bank"));
+            let name = picked.name.to_ascii_lowercase();
+            assert!(
+                ["ism 433", "ism 915", "33cm", "lora", "70cm"]
+                    .iter()
+                    .any(|needle| name.contains(needle)),
+                "{label} selected {} which the LoRa decoder does not accept",
+                picked.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_bank_still_containing_the_center_is_kept() {
+        let ranges = default_scan_ranges();
+        let picked = pick_range_for_frequency(&ranges, 96_100_000, Some("FM Broadcast"))
+            .expect("FM must resolve");
+        assert_eq!(picked.name, "FM Broadcast");
+    }
+
+    #[test]
+    fn the_narrowest_containing_bank_wins_over_a_wide_allocation() {
+        let ranges = default_scan_ranges();
+        let picked =
+            pick_range_for_frequency(&ranges, 1_090_000_000, None).expect("1090 must resolve");
+        let widest = ranges
+            .iter()
+            .filter(|range| range.start_hz <= 1_090_000_000 && 1_090_000_000 <= range.end_hz)
+            .count();
+        assert!(widest >= 1);
+        assert!(
+            picked.end_hz - picked.start_hz
+                <= ranges
+                    .iter()
+                    .filter(|range| range.start_hz <= 1_090_000_000
+                        && 1_090_000_000 <= range.end_hz)
+                    .map(|range| range.end_hz - range.start_hz)
+                    .max()
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_frequency_no_bank_covers_resolves_to_nothing() {
+        let ranges = default_scan_ranges();
+        assert!(pick_range_for_frequency(&ranges, 1, None).is_none());
     }
 }
 

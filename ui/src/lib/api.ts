@@ -308,6 +308,11 @@ export const Api = {
   scanUnlock: () => postJson('/scan/unlock'),
   scanStatus: () => getJson<{ running: boolean; locked: boolean; holding?: boolean; range?: string | null }>('/scan/status'),
   vfoStates: () => getJson<VfoState[]>('/vfo/states'),
+  scannerMaxVfos: () => getJson<{ max_vfos: number }>('/scanner/max-vfos'),
+  /** Allocate an operator-placed slot. Rejects past the receiver's VFO limit. */
+  vfoAdd: (frequency_hz?: number, mode?: string) =>
+    postJson<{ ok: boolean; max_vfos: number; vfos: number }>('/vfo/add', { frequency_hz, mode }),
+  vfoRemove: (id: number) => postJson(`/vfo/${id}/remove`, { id }),
   /** `muted: true` is sent as `{ on: true }` — the wire flag means muted, not listen. */
   vfoMute: (id: number, muted: boolean) => postJson(`/vfo/${id}/mute`, { id, on: muted }),
   vfoVolume: (id: number, value: number) => postJson(`/vfo/${id}/volume`, { id, value }),

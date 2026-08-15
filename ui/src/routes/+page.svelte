@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
   import { Api, openEvents, openSpectrum, type ScanRange, type VfoState, type DecodedMessage, type ScannerEvent, type SpectrumStreamFrame, type ReceiverBookmark } from '$lib/api';
   import { BrowserAudio, type BrowserAudioState } from '$lib/browser-audio';
   import { WaterfallCanvas } from '$lib/waterfall-canvas';
@@ -23,6 +22,8 @@
   let bookmarkLabel = $state('');
   let activeRange: string | null = $state(null);
   let vfos: VfoState[] = $state([]);
+  let maxVfos = $state(1);
+  let vfoBusy = $state(false);
   let messages: DecodedMessage[] = $state([]);
   let signalHistory: any[] = $state([]);
   let deviceCaps: any = $state(null);
@@ -40,7 +41,9 @@
   let notice = $state('');
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
-  let ws: WebSocket | null = $state(null);
+  // Keep sockets off the reactive graph. Reading them from an $effect cleanup
+  // (or reconnect path) must not re-subscribe the startup effect.
+  let ws: WebSocket | null = null;
   let eventReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let eventConnection = $state<'connecting' | 'open' | 'closed' | 'error'>('connecting');
   let spectrumWs: WebSocket | null = null;
@@ -117,39 +120,88 @@
 
   let noiseFloorDb = $state(-120);
   let voiceNoiseReject = $state(true);
-  let showAllBands = $state(false);
   let scanWorkspaceOpen = $state(true);
   let scanLocked = $state(false);
   let scanHolding = $state(false);
+  type ScanCategoryId = 'popular' | 'ham' | 'public-safety' | 'air' | 'lora-ism' | 'weather' | 'marine' | 'broadcast' | 'digital' | 'all';
+  let selectedScanCategory = $state<ScanCategoryId>('popular');
   let vfoIdentity = $state<Record<number, string>>({});
 
-  const VOICE_STARTER_BANDS = [
+  const POPULAR_SCAN_BANDS = [
     'FM Broadcast',
     'NOAA Weather',
     '2m Amateur',
     'Aircraft AM',
-    'Marine VHF',
+    'Public Safety UHF',
     '70cm Amateur',
+    '800 Trunked',
+    'ISM 433',
+    'ISM 915',
+    'Marine VHF',
   ];
 
-  const filteredBanks = $derived(
-    banks.filter((b) => b.name.toLowerCase().includes(filter.toLowerCase())),
-  );
+  const SCAN_CATEGORIES: Array<{ id: ScanCategoryId; label: string; hint: string }> = [
+    { id: 'popular', label: 'Popular', hint: 'Frequently used local listening bands' },
+    { id: 'ham', label: 'Ham', hint: 'Amateur voice and digital allocations' },
+    { id: 'public-safety', label: 'Law / safety', hint: 'Police, fire, federal, and trunked allocations' },
+    { id: 'air', label: 'Air', hint: 'Civil and military aviation' },
+    { id: 'lora-ism', label: 'LoRa / 433', hint: '433 MHz, 915 MHz, and other ISM allocations' },
+    { id: 'weather', label: 'Weather', hint: 'NOAA weather, APT, and radiosondes' },
+    { id: 'marine', label: 'Marine', hint: 'Marine voice, AIS, and NAVTEX' },
+    { id: 'broadcast', label: 'Broadcast', hint: 'AM, FM, and shortwave broadcast' },
+    { id: 'digital', label: 'Digital', hint: 'FT8, SSTV, APRS, WSPR, RTTY, and data links' },
+    { id: 'all', label: 'All', hint: 'Every published band preset' },
+  ];
 
-  const featuredVoiceBanks = $derived(
-    VOICE_STARTER_BANDS
-      .map((name) => banks.find((bank) => bank.name === name))
-      .filter((bank): bank is ScanRange => Boolean(bank)),
+  function scanCategoryMatches(bank: ScanRange, category: ScanCategoryId): boolean {
+    const name = bank.name;
+    switch (category) {
+      case 'popular': return POPULAR_SCAN_BANDS.includes(name);
+      case 'ham': return /amateur|^220 amateur|^ft8 |^sstv |^wspr |^rtty |^cw |^aprs /i.test(name);
+      case 'public-safety': return /public safety|trunked|^700 ps |federal gov|t-band/i.test(name);
+      case 'air': return /aircraft|^atc |acars|military air|ads-b|vdl2|aero|uat/i.test(name);
+      case 'lora-ism': return /^ism (433|915|2\.4|5\.8)|lora/i.test(name);
+      case 'weather': return /noaa|weather|radiosonde/i.test(name);
+      case 'marine': return /marine|^ais$|navtex/i.test(name);
+      case 'broadcast': return /broadcast|^sw \d+m$/i.test(name);
+      case 'digital': return /ft8|sstv|wspr|rtty|^cw |aprs|vdl2|acars|ads-b|^ais$|navtex/i.test(name);
+      case 'all': return true;
+    }
+  }
+
+  const visibleScanBanks = $derived.by(() => {
+    const needle = filter.trim().toLowerCase();
+    if (needle) {
+      const aliasCategory: ScanCategoryId | null =
+        /\b(ham|amateur)\b/.test(needle) ? 'ham'
+        : /\b(police|law|public safety|fire|ems)\b/.test(needle) ? 'public-safety'
+        : /\b(air|aviation|aircraft)\b/.test(needle) ? 'air'
+        : /\b(lora|433|915|ism)\b/.test(needle) ? 'lora-ism'
+        : /\b(weather|noaa)\b/.test(needle) ? 'weather'
+        : /\b(marine|boat|ship)\b/.test(needle) ? 'marine'
+        : null;
+      return banks.filter((bank) =>
+        `${bank.name} ${bank.mode} ${bank.start_hz} ${bank.end_hz}`.toLowerCase().includes(needle)
+        || (aliasCategory !== null && scanCategoryMatches(bank, aliasCategory))
+      );
+    }
+    if (selectedScanCategory === 'popular') {
+      return POPULAR_SCAN_BANDS
+        .map((name) => banks.find((bank) => bank.name === name))
+        .filter((bank): bank is ScanRange => Boolean(bank));
+    }
+    return banks.filter((bank) => scanCategoryMatches(bank, selectedScanCategory));
+  });
+
+  const selectedScanCategoryLabel = $derived(
+    filter.trim()
+      ? `Search results for “${filter.trim()}”`
+      : SCAN_CATEGORIES.find((category) => category.id === selectedScanCategory)?.label ?? 'Bands',
   );
 
   const enabledVoiceBanks = $derived(banks.filter((bank) => bank.enabled));
   const enabledBookmarks = $derived(bookmarks.filter((bookmark) => bookmark.enabled !== false));
   const listeningVfos = $derived(vfos.filter((vfo) => !vfo.muted));
-  const groupedBanks = $derived(
-    ['HF', 'VHF', 'UHF', 'Microwave', 'Broadcast', 'Satellite', 'ISM', 'Other']
-      .map((group) => ({ group, banks: filteredBanks.filter((bank) => bandGroup(bank) === group) }))
-      .filter((entry) => entry.banks.length > 0)
-  );
 
   const visibleMessages = $derived(
     messages.filter((m) => {
@@ -185,17 +237,20 @@
   }
 
 
-  // SvelteKit's hash/static production build eliminated the onMount callback
-  // from this route, leaving only a convincing but inert HTML shell. A runes
-  // effect is retained in the client bundle; untrack prevents live state read
-  // during setup from turning reconnects into effect restarts.
-  $effect(() => untrack(() => {
+  // SvelteKit's hash/static production build has stripped onMount from this
+  // route before, leaving an inert HTML shell. A runes $effect is retained in
+  // the client bundle. Do not read $state during setup: production builds have
+  // collapsed untrack() to an identity call, so any reactive read here
+  // resubscribes the effect, tears down sockets/listeners, and leaves the
+  // receiver stuck on "Radio offline" / "Band list still loading".
+  $effect(() => {
     browserAudio = new BrowserAudio((state) => { audioState = state; });
-    displayConfig = loadSpectrumDisplayConfig();
+    const savedDisplay = loadSpectrumDisplayConfig();
+    displayConfig = savedDisplay;
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     voiceNoiseReject = localStorage.getItem('pulsescope.voice-noise-reject') !== '0';
     scanWorkspaceOpen = localStorage.getItem('pulsescope.ui.scan-workspace') !== '0';
-    spectrumSmoother.setAlpha(displayConfig.smoothing);
+    spectrumSmoother.setAlpha(savedDisplay.smoothing);
     banksCollapsed = localStorage.getItem('pulsescope.ui.banksCollapsed') === '1';
     logExpanded = localStorage.getItem('pulsescope.ui.logExpanded') === '1';
     dismissedOnboarding = localStorage.getItem('pulsescope.ui.onboarding.dismissed') === '1';
@@ -265,7 +320,7 @@
       waterfallCanvasRenderer.detach();
       browserAudio?.stop(); browserAudio = null;
     };
-  }));
+  });
 
   function connectEvents() {
     if (!livePolling || ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
@@ -372,10 +427,11 @@
       console.warn('device status failed', e);
       notice = `Receiver status unavailable: ${e instanceof Error ? e.message : String(e)}`;
     }
-    const [banksResult, signalsResult, capabilitiesResult, bookmarksResult, vfosResult, messagesResult, listenerResult] = await Promise.allSettled([
+    const [banksResult, signalsResult, capabilitiesResult, bookmarksResult, vfosResult, messagesResult, listenerResult, maxVfosResult] = await Promise.allSettled([
       Api.banks(), Api.signalEvents(100), Api.deviceCapabilities(), Api.bookmarksV2(),
-      Api.vfoStates(), Api.decodedMessages(100), syncListenerView(),
+      Api.vfoStates(), Api.decodedMessages(100), syncListenerView(), Api.scannerMaxVfos(),
     ]);
+    if (maxVfosResult.status === 'fulfilled') maxVfos = Number(maxVfosResult.value?.max_vfos ?? 1);
     if (banksResult.status === 'fulfilled') banks = banksResult.value;
     if (signalsResult.status === 'fulfilled') signalHistory = signalsResult.value;
     if (capabilitiesResult.status === 'fulfilled') deviceCaps = capabilitiesResult.value;
@@ -470,19 +526,6 @@
       width: Math.max(320, Math.round((rect.width || fallbackWidth) * scale)),
       height: Math.max(80, Math.round((rect.height || fallbackHeight) * scale)),
     };
-  }
-
-  function bandGroup(bank: ScanRange): string {
-    const name = bank.name.toLowerCase();
-    if (name.includes('broadcast') || name.includes('fm')) return 'Broadcast';
-    if (name.includes('sat') || name.includes('aircraft') || name.includes('ads-b')) return 'Satellite';
-    if (name.includes('ism') || name.includes('sensor') || name.includes('lora')) return 'ISM';
-    const midpoint = (bank.start_hz + bank.end_hz) / 2;
-    if (midpoint < 30e6) return 'HF';
-    if (midpoint < 300e6) return 'VHF';
-    if (midpoint < 1e9) return 'UHF';
-    if (midpoint < 6e9) return 'Microwave';
-    return 'Other';
   }
 
   function persistDisplayConfig() {
@@ -736,13 +779,7 @@
     };
   }
 
-  async function startScan(name: string) {
-    activeRange = name;
-    scanRunning = true;
-    await Api.scanStart(name);
-  }
-
-  async function startVoiceScan(bank: ScanRange) {
+  async function startBandScan(bank: ScanRange) {
     if (activeRange === bank.name && scanRunning) {
       await stopScan();
       return;
@@ -757,9 +794,17 @@
         notice = `Could not raise squelch: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
-    await startScan(bank.name);
-    notice = `Scanning ${bank.name} · squelch ${banks.find((b) => b.name === bank.name)?.squelch_db?.toFixed(0) ?? '—'} dB above noise`;
-    window.setTimeout(() => { if (notice.startsWith('Scanning ')) notice = ''; }, 2500);
+    activeRange = bank.name;
+    scanRunning = true;
+    try {
+      await Api.scanStart(bank.name);
+      notice = `Scanning ${bank.name} · squelch ${banks.find((b) => b.name === bank.name)?.squelch_db?.toFixed(0) ?? '—'} dB above noise`;
+      window.setTimeout(() => { if (notice.startsWith('Scanning ')) notice = ''; }, 2500);
+    } catch (error) {
+      activeRange = null;
+      scanRunning = false;
+      notice = `Could not scan ${bank.name}: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   async function setScanSquelch(event: Event) {
@@ -792,9 +837,9 @@
     scrollToSection('scan-workspace');
   }
 
-  async function startQuickMode(match: string) {
-    const range = banks.find((b) => b.name.toLowerCase().includes(match.toLowerCase()));
-    if (range) await startVoiceScan(range);
+  function selectScanCategory(category: ScanCategoryId) {
+    selectedScanCategory = category;
+    filter = '';
   }
 
   async function stopScan() {
@@ -1098,6 +1143,39 @@
     const value = Number((event.currentTarget as HTMLInputElement).value);
     if (Number.isFinite(value) && value > 0) await Api.vfoFrequency(id, value);
   }
+
+  /** A VFO outside the capture window cannot be channelized, so it can never
+   *  produce audio. Surface that instead of leaving a silent tile. */
+  function outsidePassband(vfo: VfoState) {
+    if (sampleRateHz <= 1 || centerFreqHz <= 0) return false;
+    return Math.abs(vfo.frequency_hz - centerFreqHz) > sampleRateHz * 0.45;
+  }
+
+  async function addVfo() {
+    vfoBusy = true;
+    try {
+      const seed = vfos.length ? undefined : centerFreqHz;
+      const result = await Api.vfoAdd(seed);
+      maxVfos = Number(result?.max_vfos ?? maxVfos);
+      notice = 'Added a listening VFO. Press Listen to hear it.';
+    } catch (error) {
+      notice = String((error as Error)?.message || error);
+    } finally {
+      vfoBusy = false;
+    }
+    window.setTimeout(() => { if (notice.startsWith('Added a listening')) notice = ''; }, 2400);
+  }
+
+  async function removeVfo(id: number) {
+    vfoBusy = true;
+    try {
+      await Api.vfoRemove(id);
+    } catch (error) {
+      notice = String((error as Error)?.message || error);
+    } finally {
+      vfoBusy = false;
+    }
+  }
   async function setVfoMode(id: number, event: Event) {
     await Api.vfoMode(id, (event.currentTarget as HTMLSelectElement).value);
   }
@@ -1291,28 +1369,57 @@
     <section id="scan-workspace" class="scan-workspace card section-card" class:collapsed={!scanWorkspaceOpen}>
       <header class="section-header">
         <div>
-          <h2>Voice scan</h2>
-          <p class="section-lead">Pick a band to search, or scan enabled banks and saved frequencies. Delay resumes after squelch closes; Hold stays on the hit. Skip lockouts the current frequency.</p>
+          <h2>Band scan</h2>
+          <p class="section-lead">Choose a category, then choose a band. Scanning starts immediately; select the active band again to stop.</p>
         </div>
         <button type="button" class="mini section-toggle" onclick={toggleScanWorkspace} aria-expanded={scanWorkspaceOpen}>
           {scanWorkspaceOpen ? 'Collapse' : 'Expand'}
         </button>
       </header>
       {#if scanWorkspaceOpen}
-        <div class="starter-bands" role="list" aria-label="Popular voice bands">
-          {#each featuredVoiceBanks as bank (bank.name)}
-            <button
-              type="button"
-              class="band-chip"
-              class:active={activeRange === bank.name && scanRunning}
-              onclick={() => startVoiceScan(bank)}
-            >
-              <strong>{bank.name}</strong>
-              <small>{fmtHz(bank.start_hz)}–{fmtHz(bank.end_hz)} · {bank.mode.toUpperCase()}</small>
-            </button>
-          {:else}
-            <p class="empty-banks">Band list still loading…</p>
-          {/each}
+        <div class="scan-picker">
+          <div class="scan-category-tabs" role="group" aria-label="Band categories">
+            {#each SCAN_CATEGORIES as category (category.id)}
+              <button
+                type="button"
+                class="category-tab"
+                class:active={!filter.trim() && selectedScanCategory === category.id}
+                title={category.hint}
+                aria-pressed={!filter.trim() && selectedScanCategory === category.id}
+                onclick={() => selectScanCategory(category.id)}
+              >
+                {category.label}
+                <b>{banks.filter((bank) => scanCategoryMatches(bank, category.id)).length}</b>
+              </button>
+            {/each}
+          </div>
+          <div class="band-search">
+            <input bind:value={filter} placeholder="Search ham, police, air, LoRa, 433…" aria-label="Search band presets" />
+            {#if filter}<button type="button" class="mini" onclick={() => (filter = '')}>Clear</button>{/if}
+          </div>
+          <div class="scan-picker-head">
+            <strong>{selectedScanCategoryLabel}</strong>
+            <span>{visibleScanBanks.length} {visibleScanBanks.length === 1 ? 'band' : 'bands'} · select one to scan</span>
+          </div>
+          <div class="band-results" role="list" aria-label={selectedScanCategoryLabel}>
+            {#each visibleScanBanks as bank (bank.name)}
+              <button
+                type="button"
+                class="band-result"
+                class:active={activeRange === bank.name && scanRunning}
+                aria-pressed={activeRange === bank.name && scanRunning}
+                onclick={() => startBandScan(bank)}
+              >
+                <span>
+                  <strong>{bank.name}</strong>
+                  <small>{fmtHz(bank.start_hz)}–{fmtHz(bank.end_hz)} · {bank.mode.toUpperCase()}</small>
+                </span>
+                <b class="band-action">{activeRange === bank.name && scanRunning ? 'Stop' : 'Scan'}</b>
+              </button>
+            {:else}
+              <p class="empty-banks">{banks.length ? `No bands match “${filter}”.` : 'Band list still loading…'}</p>
+            {/each}
+          </div>
         </div>
         <div class="scan-toolbar">
           <label class="toggle-field voice-reject">
@@ -1345,11 +1452,7 @@
               </div>
             </div>
           {:else}
-            <div class="scan-search">
-              <input bind:value={filter} placeholder="Search all bands…" aria-label="Search band presets" />
-              <button type="button" class:primary={showAllBands} onclick={() => (showAllBands = !showAllBands)}>
-                {showAllBands ? 'Hide band list' : 'Browse all bands'}
-              </button>
+            <div class="scan-secondary-actions">
               <button type="button" onclick={startEnabledBanks} disabled={!enabledVoiceBanks.length}>
                 Scan enabled ({enabledVoiceBanks.length})
               </button>
@@ -1359,25 +1462,6 @@
             </div>
           {/if}
         </div>
-        {#if showAllBands && !scanRunning}
-          <div class="all-bands-panel">
-            {#each groupedBanks as entry (entry.group)}
-              <section class="bank-group">
-                <h3>{entry.group}</h3>
-                <div class="starter-bands compact">
-                  {#each entry.banks as bank (bank.name)}
-                    <button type="button" class="band-chip" onclick={() => startVoiceScan(bank)}>
-                      <strong>{bank.name}</strong>
-                      <small>{fmtHz(bank.start_hz)}–{fmtHz(bank.end_hz)}</small>
-                    </button>
-                  {/each}
-                </div>
-              </section>
-            {:else}
-              <p class="empty-banks">No bands match “{filter}”.</p>
-            {/each}
-          </div>
-        {/if}
       {/if}
     </section>
 
@@ -1684,11 +1768,22 @@
       {/if}
     </section>
 
+    <div class="vfo-head">
+      <div>
+        <h2>Listening VFOs</h2>
+        <small>{vfos.length} of {maxVfos} receiver slots. Each slot has its own Listen control.</small>
+      </div>
+      <button class="mini add-vfo" disabled={vfoBusy || vfos.length >= maxVfos} onclick={addVfo}>+ Add VFO</button>
+    </div>
+
     <div class="vfo-grid">
       {#each vfos as v (v.id)}
-        <div class="vfo-tile card">
+        <div class="vfo-tile card" class:stranded={outsidePassband(v)}>
           <div class="vfo-freq">{fmtHz(v.frequency_hz)}</div>
           <small class="vfo-offset">Listening VFO · {v.frequency_hz >= centerFreqHz ? '+' : '−'}{fmtHz(Math.abs(v.frequency_hz - centerFreqHz))} from center</small>
+          {#if outsidePassband(v)}
+            <span class="vfo-warn">Outside the capture window — no audio until you retune. <button class="mini" onclick={() => Api.vfoFrequency(v.id, v.frequency_hz)}>Recenter</button></span>
+          {/if}
           {#if v.locked}<span class="vfo-lock">LOCKED · logged {v.last_hit_ms ? fmtTime(v.last_hit_ms) : 'now'}</span>{/if}
           <div class="vfo-controls">
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
@@ -1727,6 +1822,9 @@
           <div class="vfo-actions">
             <button class="mini" class:on={v.audio_agc} onclick={() => Api.vfoAgc(v.id, !v.audio_agc)}>AGC</button>
             <button class="mini" onclick={() => identifyVfo(v.id)}>ID</button>
+            {#if vfos.length > 1}
+              <button class="mini remove-vfo" disabled={vfoBusy} aria-label="Remove VFO {v.id}" onclick={() => removeVfo(v.id)}>Remove</button>
+            {/if}
           </div>
           <div class="vfo-strength">
             <div class="meter">
@@ -1863,14 +1961,9 @@
   .getting-started strong { color: var(--accent); }
   .getting-started p { margin: 4px 0 0; color: var(--fg-dim); font-size: 12px; line-height: 1.45; max-width: 52rem; }
   .getting-started-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .banks-header h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .banks-help { margin: 0 0 8px; color: var(--fg-dim); font-size: 11px; line-height: 1.35; }
-  .bank-groups { overflow-y: auto; flex: 1; }
-  .bank-group h3 { margin: 10px 4px 4px; color: var(--accent-2); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
-  .bank-group ul { list-style: none; margin: 0; padding: 0; }
   .empty-banks { color: var(--fg-dim); font-size: 12px; padding: 12px 4px; }
   .bookmark-section { border-top:1px solid var(--line); margin-top:10px; padding-top:10px; }
-  .bookmark-section>h3 { margin:0 0 7px; color:var(--fg-dim); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
   .bookmark-add { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px; }
   .bookmark-add input { min-width:0; }
   .bookmark-list { list-style:none; margin:7px 0 0; padding:0; }
@@ -1880,16 +1973,6 @@
   .bookmark-tune small { color:var(--fg-dim); font:9px var(--mono); }
   .bookmark-delete { width:30px; padding:4px; color:var(--fg-dim); background:transparent; border-color:transparent; }
   .banks li { margin: 2px 0; }
-  .range-row {
-    display: flex; flex-direction: column; width: 100%;
-    background: transparent; border: 1px solid transparent;
-    text-align: left; padding: 6px 8px; border-radius: 6px; cursor: pointer;
-    color: var(--fg);
-  }
-  .range-row:hover { background: var(--bg-elev-2); }
-  .range-row.active { background: var(--bg-elev-2); border-color: var(--accent); }
-  .range-name { font-weight: 500; font-size: 13px; }
-  .range-meta { font-size: 11px; color: var(--fg-dim); font-family: var(--mono); }
   .stop { margin-top: 8px; width: 100%; }
 
   .ui-notice { padding: 6px 10px; color: var(--warn); background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); border-radius: 4px; font-size: 12px; }
@@ -1899,30 +1982,71 @@
   .setup-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .setup-actions a { display:inline-flex; align-items:center; min-height:30px; padding:6px 12px; border-radius:6px; text-decoration:none; }
   .scan-workspace { border-color: rgba(45, 212, 191, 0.22); background: linear-gradient(180deg, rgba(45, 212, 191, 0.07), var(--bg-elev)); }
-  .scan-workspace.collapsed .starter-bands,
-  .scan-workspace.collapsed .scan-toolbar,
-  .scan-workspace.collapsed .all-bands-panel { display: none; }
-  .starter-bands {
-    display: flex;
-    flex-wrap: wrap;
+  .scan-workspace.collapsed .scan-picker,
+  .scan-workspace.collapsed .scan-toolbar { display: none; }
+  .scan-picker {
+    display: grid;
     gap: 8px;
     margin-bottom: 10px;
   }
-  .starter-bands.compact { gap: 6px; }
-  .band-chip {
-    display: grid;
-    gap: 2px;
-    min-width: 132px;
-    padding: 10px 12px;
-    text-align: left;
-    border: 1px solid var(--line-strong);
-    border-radius: 8px;
+  .scan-category-tabs {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+  .category-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    min-height: 34px;
+    padding: 6px 10px;
+    white-space: nowrap;
+    color: var(--fg-dim);
     background: var(--bg);
   }
-  .band-chip strong { font-size: 13px; color: var(--fg); }
-  .band-chip small { color: var(--fg-dim); font: 10px var(--mono); }
-  .band-chip:hover { border-color: var(--accent-2); }
-  .band-chip.active { border-color: var(--accent); background: rgba(45, 212, 191, 0.12); }
+  .category-tab b { color: var(--accent-2); font: 10px var(--mono); }
+  .category-tab.active {
+    color: #03120f;
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+  .category-tab.active b { color: #063f35; }
+  .band-search { display: flex; gap: 6px; }
+  .band-search input { flex: 1; min-width: 0; min-height: 38px; }
+  .scan-picker-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .scan-picker-head strong { font-size: 12px; color: var(--accent-2); }
+  .scan-picker-head span { color: var(--fg-dim); font: 10px var(--mono); }
+  .band-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 6px;
+    max-height: 202px;
+    overflow-y: auto;
+    padding: 1px 3px 3px 1px;
+  }
+  .band-result {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    min-height: 52px;
+    padding: 8px 10px;
+    text-align: left;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .band-result > span { display: grid; gap: 2px; min-width: 0; }
+  .band-result strong { overflow: hidden; color: var(--fg); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .band-result small { overflow: hidden; color: var(--fg-dim); font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+  .band-result:hover { border-color: var(--accent-2); }
+  .band-result.active { border-color: var(--accent); background: rgba(45, 212, 191, 0.12); }
+  .band-action { flex: 0 0 auto; color: var(--accent-2); font: 10px var(--mono); text-transform: uppercase; }
+  .band-result.active .band-action { color: var(--warn); }
   .scan-toolbar { display: grid; gap: 10px; }
   .toggle-field {
     display: flex;
@@ -1949,10 +2073,9 @@
   }
   .squelch-field b { color: var(--accent); font: 11px var(--mono); }
   .noise-readout { font: 11px var(--mono); color: var(--fg-dim); padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
-  .scan-search { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; }
+  .scan-secondary-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .scan-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .scan-actions button.active { border-color: var(--accent); color: var(--accent); }
-  .all-bands-panel { margin-top: 10px; max-height: 280px; overflow: auto; border-top: 1px solid var(--line); padding-top: 10px; }
   .status-strip { padding: 8px 10px; }
   .bookmarks-aside .bookmark-primary h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .squelch-badge {
@@ -1963,10 +2086,7 @@
     text-transform: uppercase;
   }
   .squelch-badge.open { color: var(--ok); border-color: var(--ok); background: rgb(34 197 94 / 12%); }
-  .command-strip { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; background: var(--bg-elev-2); border: 1px solid var(--line); }
-  .quick-modes, .runtime-status { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-  .strip-label { color: var(--fg-dim); text-transform: uppercase; font: 10px var(--mono); margin-right: 4px; }
-  .quick { padding: 4px 7px; font-size: 11px; border-radius: 3px; }
+  .runtime-status { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
   .status-pill { color: var(--fg-dim); font: 10px var(--mono); }
   .status-pill.on { color: var(--ok); }
   .settings-link { color: var(--fg); text-decoration: none; font-size: 12px; border-left: 1px solid var(--line-strong); padding-left: 8px; }
@@ -2058,8 +2178,16 @@
   .listen-hit { white-space:nowrap; color:var(--accent); border-color:var(--accent); }
   .history-empty { color: var(--fg-dim); padding: 8px 0; font-size: 12px; }
 
+  .vfo-head { order: 2; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .vfo-head h2 { margin: 0; }
+  .vfo-head small { color: var(--fg-dim); font-size: 10px; }
+  .add-vfo { white-space: nowrap; color: var(--accent); border-color: var(--accent); }
+  .add-vfo:disabled { color: var(--fg-dim); border-color: var(--line); cursor: not-allowed; }
+  .remove-vfo { color: var(--danger); border-color: var(--danger); }
   .vfo-grid { order: 2; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
   .vfo-tile { display: flex; flex-direction: column; gap: 4px; }
+  .vfo-tile.stranded { border-color: var(--warn); }
+  .vfo-warn { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 3px 5px; border: 1px solid var(--warn); border-radius: 3px; color: var(--warn); font: 9px var(--mono); }
   .vfo-freq { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
   .vfo-offset { color:var(--fg-dim); font:9px var(--mono); }
   .vfo-lock { align-self:flex-start; padding:2px 5px; border:1px solid var(--ok); border-radius:3px; color:var(--ok); background:rgb(34 197 94 / 10%); font:700 9px var(--mono); }
@@ -2073,9 +2201,12 @@
   .mini-spectrum { width: 100%; height: 42px; background: #070c12; border: 1px solid var(--line); border-radius: 3px; }
   .freq-input { min-width: 0; width: 100%; font-family: var(--mono); font-size: 11px; }
   .vfo-controls select { font-size: 11px; }
-  .vfo-bar { display: flex; align-items: center; gap: 6px; font-size: 11px; }
-  .vfo-bar input[type=range] { flex: 1; }
-  .vfo-bar .listen { min-width:74px; padding:5px 8px; color:var(--fg); border-color:var(--accent); }
+  /* A range input refuses to shrink below its intrinsic width, so a single flex
+     row overflowed the tile and pushed Listen out of sight behind the next
+     tile. Give the slider its own row and let Listen span the full width. */
+  .vfo-bar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 6px; font-size: 11px; }
+  .vfo-bar input[type=range] { width: 100%; min-width: 0; }
+  .vfo-bar .listen { grid-column: 1 / -1; width: 100%; min-height: 32px; padding:5px 8px; color:var(--fg); border-color:var(--accent); }
   .vfo-bar .listen.on { color:#03120f; background:var(--accent); }
   .vfo-strength { display: flex; align-items: center; gap: 6px; }
   .meter { flex: 1; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
@@ -2113,17 +2244,16 @@
       font-size: 13px;
       text-transform: none;
     }
-    .banks-header { display:grid; grid-template-columns:1fr; gap:6px; }
-    .banks-header input { min-height:42px; font-size:14px; }
-    .bank-groups { max-height:280px; }
-    .range-row { min-height:52px; padding:9px 10px; }
-    .range-name { font-size:14px; }
     .center { order:1; overflow:visible; padding:0; gap:8px; }
     #band-presets, #rf-controls, #spectrum-display, #events-log, #scan-workspace { scroll-margin-top: 128px; }
-    .band-chip { min-width: 0; flex: 1 1 calc(50% - 8px); min-height: 52px; }
-    .starter-bands { flex-wrap: wrap; }
+    .scan-category-tabs { margin-inline: -2px; }
+    .category-tab { min-height: 44px; font-size: 13px; }
+    .band-search input { min-height: 44px; font-size: 14px; }
+    .scan-picker-head { align-items: flex-start; flex-direction: column; gap: 3px; }
+    .band-results { grid-template-columns: 1fr; max-height: 280px; }
+    .band-result { min-height: 58px; }
     .scan-live-controls { flex-direction: column; align-items: stretch; }
-    .scan-search { grid-template-columns: 1fr; }
+    .scan-secondary-actions { display: grid; grid-template-columns: 1fr; }
     .status-strip { position: sticky; top: 0; z-index: 9; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
     .scan-workspace { order: -2; }
     .runtime-status {
@@ -2184,7 +2314,7 @@
     .vfo-grid { grid-template-columns:1fr; gap:10px; }
     .vfo-tile { padding:12px; gap:8px; }
     .vfo-freq { font-size:22px; }
-    .vfo-bar .listen { min-width:110px; min-height:44px; font-size:14px; }
+    .vfo-bar .listen { min-height:44px; font-size:14px; }
     .signal-history { display:block; max-height:none; order:2; }
     .history-list { max-height:260px; }
     .history-row { grid-template-columns:1fr auto; gap:4px 8px; padding:9px 0; }
