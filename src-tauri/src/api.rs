@@ -26,6 +26,7 @@ use axum::http::{header, HeaderValue, Method};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::state::{AppState, ScannerEvent, SpectrumFrame};
+use rustfft::num_complex::Complex;
 
 #[derive(Clone)]
 pub struct ApiState(pub Arc<AppState>);
@@ -1250,18 +1251,20 @@ async fn profile_apply_v2(State(s): State<ApiState>, Path(id): Path<String>) -> 
         }
     }
     if let Some(handle) = s.0.scanner.read().as_ref() {
-        let _ = handle
-            .cmd_tx
-            .send(crate::scanner::ScannerCommand::SetVfoMode {
-                id: 0,
-                mode: profile.mode.clone(),
-            });
-        let _ = handle
-            .cmd_tx
-            .send(crate::scanner::ScannerCommand::SetVfoFrequency {
-                id: 0,
-                frequency_hz: profile.center_frequency_hz,
-            });
+        handle.flush_iq();
+        s.0.audio.clear_queue();
+        let mut runtime = handle.state.lock();
+        let index = runtime
+            .vfo_states
+            .iter()
+            .position(|vfo| vfo.id == 0)
+            .or_else(|| runtime.vfo_states.first().map(|_| 0));
+        if let Some(index) = index {
+            let vfo = &mut runtime.vfo_states[index];
+            vfo.frequency_hz = profile.center_frequency_hz;
+            vfo.mode = profile.mode.clone();
+            vfo.locked = false;
+        }
     }
     (
         StatusCode::OK,
@@ -2518,24 +2521,26 @@ async fn signal_id_classify(State(s): State<ApiState>, Json(v): Json<Value>) -> 
         .unwrap_or(false);
 
     let classification = if with_audio && s.0.device.status().connected {
-        // Capture ~0.4 s of IQ, demodulate, and run audio feature detectors
         let status = s.0.device.status();
         let count = ((status.sample_rate as f64) * 0.4) as usize;
-        match s.0.device.read_iq(count.max(4096)) {
+        match live_iq_snapshot(&s, count.max(4096)) {
             Ok(iq) if iq.len() > 2048 => {
-                use crate::demod::{demodulate, mix_down, Mode};
-                let mut phase = 0.0f64;
-                let offset = frequency_hz as f64 - status.center_freq_hz as f64;
-                let baseband = mix_down(&iq, offset, status.sample_rate, &mut phase);
-                let mut prev = None;
-                let pcm = demodulate(Mode::parse(&mode), &baseband, &mut prev);
+                use crate::demod::Mode;
+                let parsed = Mode::parse(&mode);
+                let (pcm, audio_rate) = channelized_vfo_audio(
+                    &iq,
+                    frequency_hz,
+                    status.center_freq_hz,
+                    status.sample_rate,
+                    parsed,
+                );
                 crate::signal_id::classify(
                     frequency_hz,
                     bandwidth_hz,
                     &mode,
                     &range_name,
                     snr_db,
-                    Some((&pcm, status.sample_rate as f32)),
+                    Some((&pcm, audio_rate)),
                 )
             }
             _ => crate::signal_id::classify(
@@ -3157,8 +3162,7 @@ async fn scan_adsb(State(s): State<ApiState>) -> Json<Value> {
     let rate = status.sample_rate.max(1);
     // Capture ~0.5 s of IQ; ADS-B works best at ≥2 Msps
     let count = ((rate as f64) * 0.5) as usize;
-    let count = count.clamp(8192, 4_000_000);
-    match s.0.device.read_iq(count) {
+    match live_iq_snapshot(&s, count.clamp(8192, 2_400_000)) {
         Ok(iq) => {
             let msgs = crate::adsb::decode_iq_chunk(&iq, rate);
             // Persist high-confidence messages
@@ -3192,7 +3196,7 @@ async fn scan_adsb(State(s): State<ApiState>) -> Json<Value> {
             "available": true,
             "native": true,
             "messages": [],
-            "error": e.to_string()
+            "error": e
         })),
     }
 }
@@ -3486,7 +3490,8 @@ async fn scan_ctcss(State(s): State<ApiState>) -> Json<Value> {
         return Json(json!({"available": false, "reason": "scanner not running"}));
     };
     let vfos = h.state.lock().vfo_states.clone();
-    let vfo_id = vfos.first().map(|v| v.id).unwrap_or(0);
+    let vfo = crate::scanner::selected_vfo(&vfos).cloned();
+    let vfo_id = vfo.as_ref().map(|v| v.id).unwrap_or(0);
     drop(handle);
     let status = s.0.device.status();
     if !status.connected {
@@ -3494,34 +3499,28 @@ async fn scan_ctcss(State(s): State<ApiState>) -> Json<Value> {
     }
     let sample_rate = status.sample_rate;
     let count = (sample_rate as f64 * 0.3) as usize;
-    match s.0.device.read_iq(count) {
+    match live_iq_snapshot(&s, count.max(4096)) {
         Ok(iq) if iq.len() > 1024 => {
-            let audio = {
-                use crate::demod::{demodulate, mix_down, Mode};
-                let mut previous = None;
-                let mut phase = 0.0;
-                let offset = vfos
-                    .first()
-                    .map(|vfo| vfo.frequency_hz as f64 - status.center_freq_hz as f64)
-                    .unwrap_or(0.0);
-                let baseband = mix_down(&iq, offset, sample_rate, &mut phase);
-                demodulate(Mode::Nfm, &baseband, &mut previous)
-            };
-            let audio_rate = sample_rate as f32;
-            use crate::demod::{detect_ctcss, detect_dcs};
+            use crate::demod::{detect_ctcss, detect_dcs, Mode};
+            let vfo_hz = vfo
+                .as_ref()
+                .map(|vfo| vfo.frequency_hz)
+                .unwrap_or(status.center_freq_hz);
+            let (audio, audio_rate) =
+                channelized_vfo_audio(&iq, vfo_hz, status.center_freq_hz, sample_rate, Mode::Nfm);
             let ctcss = detect_ctcss(&audio, audio_rate);
             let dcs = detect_dcs(&audio, audio_rate);
             Json(json!({
                 "available": true,
                 "vfo_id": vfo_id,
-                "frequency_hz": vfos.first().map(|vfo| vfo.frequency_hz).unwrap_or(status.center_freq_hz),
+                "frequency_hz": vfo_hz,
                 "ctcss": ctcss.map(|(tone, conf)| json!({"tone_hz": (tone * 10.0).round() / 10.0, "confidence": conf})),
                 "dcs": dcs,
                 "samples_analyzed": audio.len(),
             }))
         }
         Ok(_) => Json(json!({"available": false, "reason": "insufficient samples"})),
-        Err(e) => Json(json!({"available": false, "error": e.to_string()})),
+        Err(e) => Json(json!({"available": false, "error": e})),
     }
 }
 
@@ -3532,22 +3531,24 @@ async fn scan_aprs(State(s): State<ApiState>) -> Json<Value> {
     }
     // Read ~2 seconds of IQ for APRS decode (1200 baud = ~2400 bits = ~300 bytes)
     let sample_rate = status.sample_rate;
-    let count = (sample_rate as f64 * 2.0) as usize;
-    match s.0.device.read_iq(count) {
+    let count = (sample_rate as f64 * 0.5) as usize;
+    let vfo_hz = s.0.scanner.read().as_ref().and_then(|handle| {
+        crate::scanner::selected_vfo(&handle.state.lock().vfo_states).map(|vfo| vfo.frequency_hz)
+    });
+    match live_iq_snapshot(&s, count.max(4096)) {
         Ok(iq) if iq.len() > 4096 => {
             use crate::aprs::AprsDecoder;
-            use crate::demod::{demodulate, Mode};
-            let mut previous = None;
-            let audio = demodulate(Mode::Nfm, &iq, &mut previous);
-            let audio_rate = sample_rate as f32;
+            use crate::demod::Mode;
+            let tune_hz = vfo_hz.unwrap_or(status.center_freq_hz);
+            let (audio, audio_rate) =
+                channelized_vfo_audio(&iq, tune_hz, status.center_freq_hz, sample_rate, Mode::Nfm);
             let mut decoder = AprsDecoder::new(audio_rate);
-            let _frames_found = 0;
             for &sample in &audio {
                 decoder.feed(sample);
             }
             Json(json!({
                 "available": true,
-                "frequency_hz": status.center_freq_hz,
+                "frequency_hz": tune_hz,
                 "samples_analyzed": audio.len(),
                 "frames_found": decoder.frames.len(),
                 "frames": decoder.frames.iter().map(|f| json!({
@@ -3559,7 +3560,7 @@ async fn scan_aprs(State(s): State<ApiState>) -> Json<Value> {
             }))
         }
         Ok(_) => Json(json!({"available": false, "reason": "insufficient samples"})),
-        Err(e) => Json(json!({"available": false, "error": e.to_string()})),
+        Err(e) => Json(json!({"available": false, "error": e})),
     }
 }
 
@@ -3569,29 +3570,25 @@ async fn scan_digital_voice(State(s): State<ApiState>, Json(req): Json<Value>) -
     if !status.connected {
         return Json(json!({"available": false, "reason": "no device connected"}));
     }
-    // Read ~3 seconds of IQ at the current frequency for digital voice decode
     let sample_rate = status.sample_rate;
-    let count = (sample_rate as f64 * 3.0) as usize;
-    match s.0.device.read_iq(count) {
+    let count = (sample_rate as f64 * 0.5) as usize;
+    let vfo_hz = s.0.scanner.read().as_ref().and_then(|handle| {
+        crate::scanner::selected_vfo(&handle.state.lock().vfo_states).map(|vfo| vfo.frequency_hz)
+    });
+    match live_iq_snapshot(&s, count.max(4096)) {
         Ok(iq) if iq.len() > 4096 => {
-            use crate::demod::discriminator_samples;
+            use crate::demod::{channelize_iq, discriminator_samples, Mode};
             use crate::voice_decoder;
+            let tune_hz = vfo_hz.unwrap_or(status.center_freq_hz);
+            let channel = channelize_iq(
+                &iq,
+                tune_hz as f64 - status.center_freq_hz as f64,
+                sample_rate,
+                Mode::Nfm,
+            );
             let mut previous = None;
-            let discriminator = discriminator_samples(&iq, &mut previous);
-            let audio_rate = sample_rate as f32;
-            let target_rate = 48000.0f32;
-            let ratio = target_rate / audio_rate;
-            let target_len = (discriminator.len() as f32 * ratio) as usize;
-            let resampled: Vec<f32> = (0..target_len)
-                .map(|i| {
-                    let src_idx = i as f32 / ratio;
-                    let idx0 = src_idx.floor() as usize;
-                    let idx1 = (idx0 + 1).min(discriminator.len() - 1);
-                    let frac = src_idx - idx0 as f32;
-                    discriminator[idx0] * (1.0 - frac) + discriminator[idx1] * frac
-                })
-                .collect();
-
+            let discriminator = discriminator_samples(&channel, &mut previous);
+            let resampled = crate::sidecar::resample_audio(&discriminator, sample_rate, 48_000);
             let result = voice_decoder::decode_digital_voice_discriminator(&resampled, mode);
             Json(json!({
                 "available": result.available,
@@ -3605,12 +3602,12 @@ async fn scan_digital_voice(State(s): State<ApiState>, Json(req): Json<Value>) -
                 "raw_output": result.raw_output,
                 "error": result.error_message,
                 "input": "discriminator",
-                "frequency_hz": status.center_freq_hz,
+                "frequency_hz": tune_hz,
                 "discriminator_samples": resampled.len(),
             }))
         }
         Ok(_) => Json(json!({"available": false, "reason": "insufficient samples"})),
-        Err(e) => Json(json!({"available": false, "error": e.to_string()})),
+        Err(e) => Json(json!({"available": false, "error": e})),
     }
 }
 
@@ -4289,11 +4286,11 @@ async fn device_test(State(s): State<ApiState>) -> impl IntoResponse {
             json!({"ok":false,"result":"not_connected","connected":false,"samples":0,"error":"device is not connected"}),
         );
     }
-    let iq = match s.0.device.read_iq(4096) {
+    let iq = match live_iq_snapshot(&s, 4096) {
         Ok(iq) => iq,
         Err(e) => {
             return Json(
-                json!({"ok":false,"result":"stream_error","connected":true,"samples":0,"error":e.to_string()}),
+                json!({"ok":false,"result":"stream_error","connected":true,"samples":0,"error":e}),
             )
         }
     };
@@ -4458,21 +4455,23 @@ async fn vfo_identify(State(s): State<ApiState>, Path(id): Path<i64>) -> impl In
 
     let classification = if status.connected {
         let count = ((status.sample_rate as f64) * 0.35) as usize;
-        match s.0.device.read_iq(count.max(4096)) {
+        match live_iq_snapshot(&s, count.max(4096)) {
             Ok(iq) if iq.len() > 2048 => {
-                use crate::demod::{demodulate, mix_down, Mode};
-                let mut phase = 0.0f64;
-                let offset = v.frequency_hz as f64 - status.center_freq_hz as f64;
-                let baseband = mix_down(&iq, offset, status.sample_rate, &mut phase);
-                let mut prev = None;
-                let pcm = demodulate(Mode::parse(&v.mode), &baseband, &mut prev);
+                use crate::demod::Mode;
+                let (pcm, audio_rate) = channelized_vfo_audio(
+                    &iq,
+                    v.frequency_hz,
+                    status.center_freq_hz,
+                    status.sample_rate,
+                    Mode::parse(&v.mode),
+                );
                 crate::signal_id::classify(
                     v.frequency_hz,
                     12_500,
                     &v.mode,
                     &range_name,
                     snr_db,
-                    Some((&pcm, status.sample_rate as f32)),
+                    Some((&pcm, audio_rate)),
                 )
             }
             _ => crate::signal_id::classify(
@@ -4525,18 +4524,20 @@ async fn vfo_rds(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoRes
     if !status.connected {
         return Json(json!({"present":false,"reason":"no device connected"}));
     }
-    // Read ~0.5 seconds of IQ at current rate and decode RDS from WFM multiplex
     let count = (status.sample_rate as f64 * 0.5) as usize;
-    match s.0.device.read_iq(count) {
+    match live_iq_snapshot(&s, count.max(4096)) {
         Ok(iq) if iq.len() > 4096 => {
-            use crate::demod::{decode_rds, demodulate, mix_down, Mode};
+            use crate::demod::{channelize_iq, decode_rds, discriminator_samples, Mode};
+            let channel = channelize_iq(
+                &iq,
+                v.frequency_hz as f64 - status.center_freq_hz as f64,
+                status.sample_rate,
+                Mode::Wfm,
+            );
             let mut previous = None;
-            let mut phase = 0.0;
-            let offset = v.frequency_hz as f64 - status.center_freq_hz as f64;
-            let baseband = mix_down(&iq, offset, status.sample_rate, &mut phase);
-            let multiplex = demodulate(Mode::Wfm, &baseband, &mut previous);
-            let audio_rate = status.sample_rate as f32;
-            match decode_rds(&multiplex, audio_rate) {
+            let multiplex = discriminator_samples(&channel, &mut previous);
+            let multiplex = crate::sidecar::resample_audio(&multiplex, status.sample_rate, 190_000);
+            match decode_rds(&multiplex, 190_000.0) {
                 Some(rds) if rds.groups_found > 0 => Json(json!({
                     "present": true,
                     "frequency_hz": v.frequency_hz,
@@ -4556,7 +4557,7 @@ async fn vfo_rds(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoRes
             }
         }
         Ok(_) => Json(json!({"present":false,"reason":"insufficient samples"})),
-        Err(e) => Json(json!({"present":false,"error":e.to_string()})),
+        Err(e) => Json(json!({"present":false,"error":e})),
     }
 }
 async fn signal_events(State(s): State<ApiState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
@@ -4799,6 +4800,43 @@ async fn ws_pump(socket: WebSocket, tx: tokio::sync::broadcast::Sender<ScannerEv
 fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
     if let Some(h) = s.0.scanner.read().as_ref() {
         let _ = h.cmd_tx.send(cmd);
+    }
+}
+
+/// Copy live IQ from the capture snapshot ring. Falls back to a direct device
+/// read only when the scanner is not running, so waterfall/audio keep their samples.
+fn live_iq_snapshot(s: &ApiState, count: usize) -> Result<Vec<Complex<f32>>, String> {
+    if let Some(handle) = s.0.scanner.read().as_ref() {
+        if let Some(iq) = handle.snapshot_iq(count) {
+            if iq.len() > 2048 {
+                return Ok(iq);
+            }
+        }
+    }
+    s.0.device
+        .read_iq(count.max(4096))
+        .map_err(|error| error.to_string())
+}
+
+fn channelized_vfo_audio(
+    iq: &[Complex<f32>],
+    vfo_hz: u64,
+    center_hz: u64,
+    sample_rate: u32,
+    mode: crate::demod::Mode,
+) -> (Vec<f32>, f32) {
+    use crate::demod::channelize_demod;
+    let pcm = channelize_demod(iq, vfo_hz as f64 - center_hz as f64, sample_rate, mode);
+    match mode {
+        crate::demod::Mode::Wfm => (
+            crate::sidecar::resample_audio(&pcm, sample_rate, 190_000),
+            190_000.0,
+        ),
+        _ if sample_rate > 48_000 => (
+            crate::sidecar::resample_audio(&pcm, sample_rate, 48_000),
+            48_000.0,
+        ),
+        _ => (pcm, sample_rate as f32),
     }
 }
 

@@ -25,7 +25,7 @@ use crate::capture::{CaptureWorker, IqNetworkSink, IqRing};
 use crate::config::{ScanRange, ScannerConfig};
 use crate::db::Db;
 use crate::demod::{
-    dc_block, decimate_complex_average, decode_wfm_stereo, deemphasis, demodulate,
+    channelize_iq, dc_block, decimate_complex_average, decode_wfm_stereo, deemphasis, demodulate,
     discriminator_samples, low_pass_complex, low_pass_real, mix_down, Mode, SincResampler,
     WfmStereoState,
 };
@@ -102,6 +102,14 @@ pub struct VfoState {
     /// Smoothed noise floor used for squelch decisions (dBFS).
     #[serde(default)]
     pub noise_floor_db: f32,
+}
+
+/// Prefer the VFO the operator is listening to, then a scanner lock, then VFO 0.
+pub fn selected_vfo(vfos: &[VfoState]) -> Option<&VfoState> {
+    vfos.iter()
+        .find(|vfo| !vfo.muted)
+        .or_else(|| vfos.iter().find(|vfo| vfo.locked))
+        .or(vfos.first())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -564,6 +572,15 @@ impl ScannerHandle {
         }
     }
 
+    /// Copy the newest captured IQ without draining FFT or audio consumers.
+    pub fn snapshot_iq(&self, count: usize) -> Option<Vec<Complex<f32>>> {
+        self.iq_consumers
+            .iter()
+            .find(|ring| ring.name() == "snapshot")
+            .or_else(|| self.iq_consumers.first())
+            .and_then(|ring| ring.copy_latest(count))
+    }
+
     pub fn abort(&self) {
         if let Some(task) = self.task.lock().take() {
             task.abort();
@@ -578,6 +595,9 @@ impl ScannerHandle {
         let capture_ring =
             IqRing::new_latest("fft", cfg.fft_size.saturating_mul(5).saturating_mul(2));
         let audio_ring = IqRing::new("audio", 2_000_000);
+        // ~1 s at 2.4 MS/s. Identify / RDS / CTCSS copy from here instead of
+        // calling DeviceLayer::read_iq, which would steal hardware samples.
+        let snapshot_ring = IqRing::new_latest("snapshot", 2_400_000);
         let task = tokio::spawn(scanner_loop(
             cfg,
             dependencies,
@@ -585,12 +605,13 @@ impl ScannerHandle {
             state.clone(),
             capture_ring.clone(),
             audio_ring.clone(),
+            snapshot_ring.clone(),
         ));
 
         ScannerHandle {
             cmd_tx: cmd_tx.clone(),
             state,
-            iq_consumers: vec![capture_ring, audio_ring],
+            iq_consumers: vec![capture_ring, audio_ring, snapshot_ring],
             task: Arc::new(Mutex::new(Some(task))),
         }
     }
@@ -604,6 +625,7 @@ async fn scanner_loop(
     state: Arc<Mutex<ScannerRuntimeState>>,
     capture_ring: IqRing,
     audio_ring: IqRing,
+    snapshot_ring: IqRing,
 ) {
     let ScannerDependencies {
         device,
@@ -634,7 +656,11 @@ async fn scanner_loop(
     );
     let _capture_worker = CaptureWorker::start(
         device.clone(),
-        vec![capture_ring.clone(), audio_ring.clone()],
+        vec![
+            capture_ring.clone(),
+            audio_ring.clone(),
+            snapshot_ring.clone(),
+        ],
         cfg.fft_size,
         playback,
         iq_network,
@@ -673,6 +699,7 @@ async fn scanner_loop(
                     // not process IQ captured under the previous contract.
                     capture_ring.clear();
                     audio_ring.clear();
+                    snapshot_ring.clear();
                     audio.clear_queue();
                     let name = range.name.clone();
                     let vfos = starter_vfos(&range, device.status().center_freq_hz, cfg.max_vfos);
@@ -834,12 +861,16 @@ async fn scanner_loop(
         recording.lock().write_iq(&iq);
 
         if let Some(range) = active_range.as_ref() {
+            let tune_hz = selected_vfo(&state.lock().vfo_states)
+                .map(|vfo| vfo.frequency_hz)
+                .unwrap_or_else(|| device.status().center_freq_hz);
             native_decoders.feed(
                 range,
                 &iq,
                 &discriminator,
                 device.status().sample_rate,
                 device.status().center_freq_hz,
+                tune_hz,
                 &db,
                 &events_tx,
             );
@@ -1119,6 +1150,10 @@ async fn scanner_loop(
                 }
             }
             let holding_signal = signal_hold_until.is_some_and(|until| Instant::now() < until);
+            if !signal_present && !holding_signal {
+                signal_hold_started = None;
+                signal_hold_until = None;
+            }
             runtime.holding = holding_signal;
             (runtime.frames_processed, runtime.latest_spectrum_ms)
         };
@@ -1179,6 +1214,7 @@ async fn scanner_loop(
                     if device.set_frequency(next).is_ok() {
                         capture_ring.clear();
                         audio_ring.clear();
+                        snapshot_ring.clear();
                         audio.clear_queue();
                         smoothed_noise_floor = None;
                         signal_hold_started = None;
@@ -1208,6 +1244,7 @@ async fn scanner_loop(
                     if device.set_frequency(center).is_ok() {
                         capture_ring.clear();
                         audio_ring.clear();
+                        snapshot_ring.clear();
                         audio.clear_queue();
                         smoothed_noise_floor = None;
                         native_decoders.reset(status.sample_rate);
@@ -1278,7 +1315,7 @@ impl NativeRangeDecoders {
                 crate::pocsag::PocsagBaud::Baud1200,
             ),
             ais: crate::ais::IqDecoder::new(sample_rate as f64).ok(),
-            aprs: Some(crate::aprs::AprsDecoder::new(sample_rate as f32)),
+            aprs: Some(crate::aprs::AprsDecoder::new(24_000.0)),
             uat: Some(crate::aviation::UatIqDecoder::new(sample_rate)),
             acars: Some(crate::aviation::AcarsIqDecoder::new(
                 sample_rate,
@@ -1312,6 +1349,7 @@ impl NativeRangeDecoders {
         discriminator: &[f32],
         sample_rate: u32,
         center_hz: u64,
+        tune_hz: u64,
         db: &Db,
         events_tx: &broadcast::Sender<ScannerEvent>,
     ) {
@@ -1331,6 +1369,7 @@ impl NativeRangeDecoders {
         let cw = range_name_matches(name, &["cw"]);
         let rds =
             range.mode.eq_ignore_ascii_case("wfm") || range_name_matches(name, &["fm broadcast"]);
+        let offset_hz = tune_hz as f64 - center_hz as f64;
 
         if mode_s {
             if self.adsb.is_none() {
@@ -1365,14 +1404,17 @@ impl NativeRangeDecoders {
         }
 
         if pocsag {
-            let audio_24k = crate::sidecar::resample_audio(discriminator, sample_rate, 24_000);
+            let channel = channelize_iq(iq, offset_hz, sample_rate, Mode::Nfm);
+            let mut previous = None;
+            let audio = discriminator_samples(&channel, &mut previous);
+            let audio_24k = crate::sidecar::resample_audio(&audio, sample_rate, 24_000);
             for message in self.pocsag_1200.push_audio(&audio_24k) {
                 publish_decoded(
                     db,
                     events_tx,
                     crate::db::DecodedMessage {
                         id: None,
-                        frequency_hz: center_hz,
+                        frequency_hz: tune_hz,
                         protocol: "pocsag".into(),
                         message_type: "pager".into(),
                         address: message.ric.to_string(),
@@ -1519,11 +1561,15 @@ impl NativeRangeDecoders {
 
         if aprs {
             if self.aprs.is_none() {
-                self.aprs = Some(crate::aprs::AprsDecoder::new(sample_rate as f32));
+                self.aprs = Some(crate::aprs::AprsDecoder::new(24_000.0));
             }
             if let Some(decoder) = self.aprs.as_mut() {
-                for sample in discriminator {
-                    decoder.feed(*sample);
+                let channel = channelize_iq(iq, offset_hz, sample_rate, Mode::Nfm);
+                let mut previous = None;
+                let audio = discriminator_samples(&channel, &mut previous);
+                let audio_24k = crate::sidecar::resample_audio(&audio, sample_rate, 24_000);
+                for sample in audio_24k {
+                    decoder.feed(sample);
                 }
                 for frame in std::mem::take(&mut decoder.frames) {
                     publish_decoded(
@@ -1531,7 +1577,7 @@ impl NativeRangeDecoders {
                         events_tx,
                         crate::db::DecodedMessage {
                             id: None,
-                            frequency_hz: center_hz,
+                            frequency_hz: tune_hz,
                             protocol: "aprs".into(),
                             message_type: "ax25".into(),
                             address: frame.source,
@@ -1547,7 +1593,10 @@ impl NativeRangeDecoders {
         }
 
         if rds {
-            let mpx = crate::sidecar::resample_audio(discriminator, sample_rate, 190_000);
+            let channel = channelize_iq(iq, offset_hz, sample_rate, Mode::Wfm);
+            let mut previous = None;
+            let mpx = discriminator_samples(&channel, &mut previous);
+            let mpx = crate::sidecar::resample_audio(&mpx, sample_rate, 190_000);
             self.rds_mpx.extend_from_slice(&mpx);
             const RDS_WINDOW: usize = 76_000;
             if self.rds_mpx.len() >= RDS_WINDOW {
@@ -1562,7 +1611,7 @@ impl NativeRangeDecoders {
                                     events_tx,
                                     crate::db::DecodedMessage {
                                         id: None,
-                                        frequency_hz: center_hz,
+                                        frequency_hz: tune_hz,
                                         protocol: "rds".into(),
                                         message_type: "group".into(),
                                         address: format!("{pi:04X}"),
@@ -1743,6 +1792,40 @@ mod scan_window_tests {
     }
 
     #[test]
+    fn selected_vfo_prefers_unmuted_then_locked() {
+        let muted_locked = VfoState {
+            id: 0,
+            frequency_hz: 162_400_000,
+            mode: "nfm".into(),
+            muted: true,
+            volume: 0.7,
+            audio_agc: true,
+            squelch_open: true,
+            strength_db: -40.0,
+            audio_level_db: -20.0,
+            locked: true,
+            last_hit_ms: 1,
+            snr_db: 12.0,
+            noise_floor_db: -90.0,
+        };
+        let unmuted = VfoState {
+            id: 1,
+            frequency_hz: 162_550_000,
+            muted: false,
+            locked: false,
+            ..muted_locked.clone()
+        };
+        assert_eq!(
+            selected_vfo(&[muted_locked.clone(), unmuted.clone()]).map(|vfo| vfo.id),
+            Some(1)
+        );
+        assert_eq!(
+            selected_vfo(&[muted_locked.clone()]).map(|vfo| vfo.frequency_hz),
+            Some(162_400_000)
+        );
+    }
+
+    #[test]
     fn dc_bin_is_rejected_even_when_config_is_zero() {
         assert!(peak_is_dc_rejected(
             100_000_000,
@@ -1863,11 +1946,16 @@ mod scan_window_tests {
             "/scan/lockout",
             "/vfo/:id/rds",
             "/scan/ctcss",
+            "/scan/aprs",
         ] {
             assert!(docs.contains(route), "API.md must document {route}");
         }
         assert!(docs.contains("`enabled`"));
         assert!(docs.contains("Bookmarks"));
+        assert!(
+            docs.contains("without parking scanner Hold"),
+            "profile apply must not park Hold"
+        );
     }
 
     #[test]

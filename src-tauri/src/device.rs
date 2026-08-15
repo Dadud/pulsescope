@@ -1237,14 +1237,13 @@ impl DeviceLayer {
 
     pub fn read_iq(&self, count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
         #[cfg(feature = "soapysdr")]
-        if self.hardware.lock().is_some() {
-            let result = self
-                .hardware
-                .lock()
-                .as_mut()
-                .expect("hardware checked")
-                .read(count);
-            return self.observe_read(count, result);
+        {
+            let mut hardware = self.hardware.lock();
+            if let Some(device) = hardware.as_mut() {
+                let result = device.read(count);
+                drop(hardware);
+                return self.observe_read(count, result);
+            }
         }
         let status = self.status();
         if !status.connected || status.driver != "mock" {

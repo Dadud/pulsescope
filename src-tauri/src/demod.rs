@@ -253,6 +253,49 @@ pub fn decode_wfm_stereo(
     output
 }
 
+/// Mix a VFO to baseband, apply a mode-appropriate channel filter, and demodulate.
+/// One-shot identify / CTCSS / RDS / APRS paths use this so they do not decode
+/// the full capture window at DC.
+pub fn channelize_demod(
+    iq: &[Complex<f32>],
+    offset_hz: f64,
+    sample_rate: u32,
+    mode: Mode,
+) -> Vec<f32> {
+    let filtered = channelize_iq(iq, offset_hz, sample_rate, mode);
+    let mut previous = None;
+    match mode {
+        Mode::Sam => {
+            let mut pll = 0.0;
+            demodulate_sam(&filtered, &mut pll)
+        }
+        Mode::Cw => {
+            let mut bfo = 0.0;
+            demodulate_cw(&filtered, sample_rate, 700.0, &mut bfo)
+        }
+        other => demodulate(other, &filtered, &mut previous),
+    }
+}
+
+/// Mix a VFO to baseband and apply the channel filter without demodulating.
+pub fn channelize_iq(
+    iq: &[Complex<f32>],
+    offset_hz: f64,
+    sample_rate: u32,
+    mode: Mode,
+) -> Vec<Complex<f32>> {
+    let mut phase = 0.0;
+    let baseband = mix_down(iq, offset_hz, sample_rate, &mut phase);
+    let cutoff_hz = match mode {
+        Mode::Wfm => 100_000.0,
+        Mode::Nfm => 12_500.0,
+        Mode::Cw => 800.0,
+        _ => 5_000.0,
+    };
+    let mut filter = Complex::new(0.0, 0.0);
+    low_pass_complex(&baseband, cutoff_hz, sample_rate, &mut filter)
+}
+
 /// Translate a VFO offset to zero-IF while preserving oscillator phase.
 pub fn mix_down(
     input: &[Complex<f32>],
@@ -1665,6 +1708,25 @@ mod tests {
         let output = mix_down(&input, 12_500.0, 2_000_000, &mut phase);
         assert_eq!(output.len(), input.len());
         assert!(phase.abs() > 0.0);
+    }
+
+    #[test]
+    fn channelize_demod_follows_an_offset_nfm_vfo() {
+        let sample_rate = 48_000u32;
+        let offset_hz = 5_000.0;
+        let tone_hz = 1_000.0;
+        let mut phase = 0.0f64;
+        let iq: Vec<Complex<f32>> = (0..sample_rate as usize / 20)
+            .map(|index| {
+                let audio = (TAU * tone_hz * index as f32 / sample_rate as f32).sin() * 0.4;
+                phase += std::f64::consts::TAU * (offset_hz + audio as f64) / sample_rate as f64;
+                Complex::from_polar(0.7, phase as f32)
+            })
+            .collect();
+        let pcm = channelize_demod(&iq, offset_hz, sample_rate, Mode::Nfm);
+        assert_eq!(pcm.len(), iq.len());
+        let energy: f32 = pcm.iter().map(|sample| sample * sample).sum();
+        assert!(energy > 1.0, "channelized NFM should recover deviation");
     }
 
     #[test]

@@ -157,6 +157,23 @@ impl IqRing {
         self.taken.fetch_add(count as u64, Ordering::Relaxed);
         Some(out)
     }
+    /// Copy the newest samples without consuming them. Identify / RDS / CTCSS
+    /// / APRS endpoints must not steal IQ from the capture worker.
+    pub fn copy_latest(&self, count: usize) -> Option<Vec<Complex<f32>>> {
+        if count == 0 {
+            return None;
+        }
+        let q = self.inner.lock();
+        if q.is_empty() {
+            return None;
+        }
+        let take = count.min(q.len());
+        let skip = q.len() - take;
+        Some(q.iter().skip(skip).copied().collect())
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
     pub fn len(&self) -> usize {
         self.inner.lock().len()
     }
@@ -371,5 +388,27 @@ mod tests {
         let status = ring.status();
         assert_eq!(status["dropped_samples"], 0);
         assert_eq!(status["skipped_samples"], 2);
+    }
+
+    #[test]
+    fn copy_latest_does_not_consume_queued_samples() {
+        let ring = IqRing::new_latest("snapshot", 8);
+        ring.push(
+            &(1..=6)
+                .map(|value| Complex::new(value as f32, 0.0))
+                .collect::<Vec<_>>(),
+        );
+        let copied = ring.copy_latest(3).unwrap();
+        assert_eq!(
+            copied.iter().map(|sample| sample.re).collect::<Vec<_>>(),
+            vec![4.0, 5.0, 6.0]
+        );
+        assert_eq!(ring.len(), 6);
+        assert_eq!(ring.status()["taken_samples"], 0);
+        let taken = ring.take_latest_exact(3).unwrap();
+        assert_eq!(
+            taken.iter().map(|sample| sample.re).collect::<Vec<_>>(),
+            vec![4.0, 5.0, 6.0]
+        );
     }
 }

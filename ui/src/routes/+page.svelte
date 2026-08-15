@@ -151,7 +151,7 @@
 
   const visibleMessages = $derived(
     messages.filter((m) => {
-      const matchesTab = dockFilter === 'all' || m.protocol.toLowerCase().includes(dockFilter);
+      const matchesTab = messageMatchesDock(m.protocol, dockFilter);
       const needle = messageSearch.trim().toLowerCase();
       return matchesTab && (!needle || `${m.protocol} ${m.content}`.toLowerCase().includes(needle));
     })
@@ -1143,15 +1143,30 @@
     setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 5000);
   }
 
+  function messageMatchesDock(protocol: string, tab: string): boolean {
+    if (tab === 'all') return true;
+    const value = protocol.toLowerCase();
+    const needles: Record<string, string[]> = {
+      trunk: ['p25', 'dmr', 'nxdn', 'ysf', 'dstar', 'd-star', 'm17', 'trunk', 'talkgroup'],
+      pag: ['pocsag', 'flex', 'pager', 'paging'],
+      sensor: ['rtl_433', 'sensor', 'rs41', 'radiosonde'],
+      air: ['adsb', 'acars', 'uat', 'vdl', 'aircraft'],
+      ais: ['ais'],
+      rds: ['rds'],
+      lora: ['lora'],
+    };
+    return (needles[tab] ?? [tab]).some((needle) => value.includes(needle));
+  }
+
   function rdsForVfo(vfo: VfoState) {
     const bandwidth = 150_000;
     return messages.find((message) => message.protocol.toLowerCase() === 'rds' && Math.abs(Number(message.frequency_hz) - vfo.frequency_hz) <= bandwidth);
   }
 
   function exportMessages() {
-    const header = 'timestamp_ms,frequency_hz,protocol,message_type,address,content\\n';
+    const header = 'timestamp_ms,frequency_hz,protocol,message_type,address,content\n';
     const csv = header + visibleMessages.map((m) => [m.timestamp_ms, m.frequency_hz, m.protocol, m.message_type, m.address, m.content]
-      .map((value) => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\\n');
+      .map((value) => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;

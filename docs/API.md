@@ -35,7 +35,7 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET/POST | `/api/v2/listener-sessions` | Independent per-browser viewport and selected-VFO state |
 | GET/POST | `/api/v2/profiles` | Persistent server-owned receiver profiles |
 | GET/DELETE | `/api/v2/profiles/:id` | Read or remove a receiver profile |
-| POST | `/api/v2/profiles/:id/apply` | Atomically apply the stored sample-rate and center-frequency contract |
+| POST | `/api/v2/profiles/:id/apply` | Atomically apply the stored sample-rate, bandwidth, and center-frequency contract. Updates VFO 0 mode/frequency without parking scanner Hold. |
 | GET/POST | `/api/v2/bookmarks` | Persistent shared frequency bookmarks |
 | DELETE | `/api/v2/bookmarks/:id` | Remove a shared bookmark |
 | GET | `/api/v2/bandplans` | Configured RF bands and scan defaults |
@@ -113,10 +113,11 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | POST   | `/vfo/:id/mute`            | `{ id, on }`      |
 | POST   | `/vfo/:id/volume`          | `{ id, value }`   |
 | POST   | `/vfo/:id/audio_agc`       | `{ id, on }`      |
-| POST   | `/vfo/:id/identify`        | — signal-ID       |
-| GET    | `/vfo/:id/rds`             | — PI/PS for a WFM VFO |
+| POST   | `/vfo/:id/identify`        | — signal-ID on a snapshot of live IQ mixed to this VFO |
+| GET    | `/vfo/:id/rds`             | — PI/PS from a 190 kHz WFM multiplex mixed to this VFO |
 | GET    | `/vfo/diagnostics`         | — per-VFO stats   |
-| GET    | `/scan/ctcss`              | — CTCSS/DCS on the active VFO |
+| GET    | `/scan/ctcss`              | — CTCSS/DCS on the unmuted or locked VFO |
+| GET    | `/scan/aprs`               | — AX.25 AFSK on the unmuted or locked VFO |
 
 ## Spectrum / signal ID
 
