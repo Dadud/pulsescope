@@ -1465,18 +1465,18 @@ async fn media_session_v2() -> impl IntoResponse {
 async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
     let mut decoders = vec![
         decoder_fixture_verified_entry("adsb", "ADS-B / Mode S", "iq", "live"),
-        decoder_fixture_verified_entry("ais", "AIS", "discriminator", "on_demand"),
-        decoder_fixture_verified_entry("aprs", "APRS / AX.25", "audio", "on_demand"),
+        decoder_fixture_verified_entry("ais", "AIS", "discriminator", "live"),
+        decoder_fixture_verified_entry("aprs", "APRS / AX.25", "audio", "live"),
         decoder_fixture_verified_entry("pocsag", "POCSAG", "audio", "live"),
         decoder_development_entry("rds", "Broadcast RDS", "wfm_multiplex", "on_demand"),
-        decoder_development_entry("uat", "978 UAT", "iq", "on_demand"),
-        decoder_development_entry("acars", "ACARS", "audio", "managed_sidecar"),
-        decoder_development_entry("vdl2", "VDL Mode 2", "iq", "managed_sidecar"),
+        decoder_fixture_verified_entry("uat", "978 UAT", "bits", "live"),
+        decoder_fixture_verified_entry("acars", "ACARS", "bits", "live"),
+        decoder_fixture_verified_entry("vdl2", "VDL Mode 2", "bits", "live"),
         decoder_development_entry("rtl433", "rtl_433 sensors", "iq", "managed_sidecar"),
         decoder_development_entry("ft8", "FT8 / FT4", "audio", "managed_sidecar"),
         decoder_development_entry("wspr", "WSPR", "audio", "managed_sidecar"),
-        decoder_fixture_verified_entry("rtty", "RTTY / FSK", "audio", "on_demand"),
-        decoder_fixture_verified_entry("navtex", "NAVTEX", "audio", "on_demand"),
+        decoder_fixture_verified_entry("rtty", "RTTY / FSK", "audio", "live"),
+        decoder_fixture_verified_entry("navtex", "NAVTEX", "audio", "live"),
         decoder_development_entry("dmr", "DMR", "discriminator", "managed_sidecar"),
         decoder_development_entry("p25", "P25", "discriminator", "managed_sidecar"),
         decoder_development_entry("nxdn", "NXDN", "discriminator", "managed_sidecar"),
@@ -1989,6 +1989,13 @@ async fn start_configured_sidecars(s: &ApiState) {
                 null_out.into(),
             ],
         ));
+    }
+    if cfg.dump978.enabled && !s.0.sidecars.is_running("dump978") {
+        let mut args = cfg.dump978.extra_args.clone();
+        if args.is_empty() {
+            args.push("--raw-stdin".into());
+        }
+        jobs.push(("dump978", cfg.dump978.path, args));
     }
 
     for (name, path, args) in jobs {
@@ -3244,15 +3251,34 @@ async fn native_vdl2_decode(Json(v): Json<Value>) -> Json<Value> {
     )
 }
 
-async fn scan_ais(State(_s): State<ApiState>) -> Json<Value> {
-    Json(
-        json!({"available":false,"native":true,"messages":[],"reason":"native AIS parser accepts fixture IQ via POST /scan/ais; live GMSK channel integration is not wired"}),
+async fn scan_ais(State(s): State<ApiState>) -> Json<Value> {
+    recent_native_scan_messages(
+        &s,
+        "ais",
+        "Native AIS decode runs while the AIS scan range is active; this endpoint returns recent persisted messages.",
     )
 }
-async fn scan_acars(State(_s): State<ApiState>) -> Json<Value> {
-    Json(
-        json!({"available":false,"native":true,"messages":[],"reason":"native ACARS parser accepts fixture IQ/bits via POST /scan/acars; live device pipeline is not wired"}),
+
+async fn scan_acars(State(s): State<ApiState>) -> Json<Value> {
+    recent_native_scan_messages(
+        &s,
+        "acars",
+        "Native ACARS decode runs while the ACARS scan range is active; this endpoint returns recent persisted messages.",
     )
+}
+
+fn recent_native_scan_messages(s: &ApiState, protocol: &str, note: &str) -> Json<Value> {
+    let messages =
+        s.0.db
+            .messages_by_protocol(Some(protocol), 50)
+            .unwrap_or_default();
+    Json(json!({
+        "available": true,
+        "native": true,
+        "integration": "live_scan_range",
+        "messages": messages,
+        "note": note,
+    }))
 }
 async fn scan_aero(State(s): State<ApiState>) -> Json<Value> {
     scan_acars(State(s)).await
@@ -4673,8 +4699,7 @@ mod readiness_tests {
     #[test]
     fn required_catalog_decoders_stay_unavailable_until_recorded_iq_e2e() {
         let remaining = [
-            "rds", "uat", "acars", "vdl2", "rtl433", "ft8", "wspr", "dmr", "p25", "nxdn", "dstar",
-            "ysf", "m17",
+            "rds", "rtl433", "ft8", "wspr", "dmr", "p25", "nxdn", "dstar", "ysf", "m17",
         ];
         for id in remaining {
             let decoder = decoder_development_entry(id, id, "iq", "live");
@@ -4691,7 +4716,9 @@ mod readiness_tests {
 
     #[test]
     fn recorded_iq_e2e_catalog_ids_are_available() {
-        for id in ["adsb", "ais", "aprs", "pocsag", "rtty", "navtex"] {
+        for id in [
+            "adsb", "ais", "aprs", "pocsag", "rtty", "navtex", "uat", "acars", "vdl2",
+        ] {
             let decoder = decoder_fixture_verified_entry(id, id, "iq", "live");
             assert_eq!(decoder["id"], *id);
             assert_eq!(decoder["status"], "fixture_verified");

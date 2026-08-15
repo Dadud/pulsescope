@@ -724,6 +724,129 @@ pub fn vdl2_fcs_valid(frame_with_fcs: &[u8]) -> bool {
     frame_with_fcs.len() >= 3 && crc16_reflected(frame_with_fcs, 0xffff) == 0xf0b8
 }
 
+fn bits_of_word(word: u64, count: usize) -> Vec<bool> {
+    (0..count)
+        .map(|i| ((word >> (count - 1 - i)) & 1) != 0)
+        .collect()
+}
+
+fn bytes_to_bits_msb(bytes: &[u8]) -> Vec<bool> {
+    bytes
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |bit| ((byte >> bit) & 1) != 0))
+        .collect()
+}
+
+fn bytes_to_bits_lsb(bytes: &[u8]) -> Vec<bool> {
+    bytes
+        .iter()
+        .flat_map(|byte| (0..8).map(move |bit| ((byte >> bit) & 1) != 0))
+        .collect()
+}
+
+fn rs_encode(data: &[u8], roots: usize) -> Vec<u8> {
+    let mut generator = vec![1u8];
+    for i in 0..roots {
+        let root = gf_pow_alpha(120 + i);
+        let mut next = vec![0u8; generator.len() + 1];
+        for (j, &coefficient) in generator.iter().enumerate() {
+            next[j] ^= coefficient;
+            next[j + 1] ^= gf_mul(coefficient, root);
+        }
+        generator = next;
+    }
+    let mut work = data.to_vec();
+    work.resize(data.len() + roots, 0);
+    for i in 0..data.len() {
+        let lead = work[i];
+        if lead != 0 {
+            for j in 1..generator.len() {
+                work[i + j] ^= gf_mul(lead, generator[j]);
+            }
+        }
+    }
+    let mut codeword = data.to_vec();
+    codeword.extend_from_slice(&work[data.len()..]);
+    codeword
+}
+
+fn odd_parity(value: u8) -> u8 {
+    let seven = value & 0x7f;
+    if seven.count_ones().is_multiple_of(2) {
+        seven | 0x80
+    } else {
+        seven
+    }
+}
+
+fn acars_hello_bytes() -> Vec<u8> {
+    let mut body: Vec<u8> = b"2N123AB \x15Q0A\x02HELLO"
+        .iter()
+        .copied()
+        .map(odd_parity)
+        .collect();
+    body.push(0x83); // ETX already has odd parity
+    let crc = acars_crc16(&body);
+    let mut wire = vec![0x16, 0x16, 0x01];
+    wire.extend_from_slice(&body);
+    wire.push(crc as u8);
+    wire.push((crc >> 8) as u8);
+    wire
+}
+
+fn hdlc_stuffed_bits(payload: &[u8]) -> Vec<bool> {
+    let mut frame = payload.to_vec();
+    let crc = !crc16_reflected(payload, 0xffff);
+    frame.push(crc as u8);
+    frame.push((crc >> 8) as u8);
+    let raw = bytes_to_bits_lsb(&frame);
+    let mut stuffed = Vec::new();
+    let mut ones = 0;
+    for bit in raw {
+        stuffed.push(bit);
+        if bit {
+            ones += 1;
+            if ones == 5 {
+                stuffed.push(false);
+                ones = 0;
+            }
+        } else {
+            ones = 0;
+        }
+    }
+    let flag = [false, true, true, true, true, true, true, false];
+    let mut wire = flag.to_vec();
+    wire.extend(stuffed);
+    wire.extend(flag);
+    wire
+}
+
+fn bits_to_u8(bits: &[bool]) -> Vec<u8> {
+    bits.iter().map(|bit| u8::from(*bit)).collect()
+}
+
+/// Short UAT downlink bits (MSB-first) with ICAO `ABCDEF` and a HELLO payload.
+pub fn synthesize_uat_abcdef_bits() -> Vec<u8> {
+    let mut data = [0u8; 18];
+    data[0] = 0x03; // short type zero, qualifier three
+    data[1..4].copy_from_slice(&[0xAB, 0xCD, 0xEF]);
+    data[4..9].copy_from_slice(b"HELLO");
+    let codeword = rs_encode(&data, 12);
+    let mut wire = bits_of_word(UAT_DOWNLINK_SYNC, UAT_SYNC_BITS);
+    wire.extend(bytes_to_bits_msb(&codeword));
+    bits_to_u8(&wire)
+}
+
+/// ACARS MSK bits (LSB-first) for registration `N123AB` and text `HELLO`.
+pub fn synthesize_acars_hello_bits() -> Vec<u8> {
+    bits_to_u8(&bytes_to_bits_lsb(&acars_hello_bytes()))
+}
+
+/// VDL2 HDLC bits (after physical-layer recovery) carrying `HELLO`.
+pub fn synthesize_vdl2_hello_bits() -> Vec<u8> {
+    bits_to_u8(&hdlc_stuffed_bits(b"HELLO"))
+}
+
 fn crc16_reflected(bytes: &[u8], initial: u16) -> u16 {
     let mut crc = initial;
     for &byte in bytes {
@@ -743,115 +866,13 @@ fn crc16_reflected(bytes: &[u8], initial: u16) -> u16 {
 mod tests {
     use super::*;
 
-    fn bits_of_word(word: u64, count: usize) -> Vec<bool> {
-        (0..count)
-            .map(|i| ((word >> (count - 1 - i)) & 1) != 0)
-            .collect()
-    }
-
-    fn bytes_to_bits_msb(bytes: &[u8]) -> Vec<bool> {
-        bytes
-            .iter()
-            .flat_map(|byte| (0..8).rev().map(move |bit| ((byte >> bit) & 1) != 0))
-            .collect()
-    }
-
-    fn bytes_to_bits_lsb(bytes: &[u8]) -> Vec<bool> {
-        bytes
-            .iter()
-            .flat_map(|byte| (0..8).map(move |bit| ((byte >> bit) & 1) != 0))
-            .collect()
-    }
-
-    fn rs_encode(data: &[u8], roots: usize) -> Vec<u8> {
-        let mut generator = vec![1u8];
-        for i in 0..roots {
-            let root = gf_pow_alpha(120 + i);
-            let mut next = vec![0u8; generator.len() + 1];
-            for (j, &coefficient) in generator.iter().enumerate() {
-                next[j] ^= coefficient;
-                next[j + 1] ^= gf_mul(coefficient, root);
-            }
-            generator = next;
-        }
-        let mut work = data.to_vec();
-        work.resize(data.len() + roots, 0);
-        for i in 0..data.len() {
-            let lead = work[i];
-            if lead != 0 {
-                for j in 1..generator.len() {
-                    work[i + j] ^= gf_mul(lead, generator[j]);
-                }
-            }
-        }
-        let mut codeword = data.to_vec();
-        codeword.extend_from_slice(&work[data.len()..]);
-        codeword
-    }
-
-    fn odd_parity(value: u8) -> u8 {
-        let seven = value & 0x7f;
-        if seven.count_ones().is_multiple_of(2) {
-            seven | 0x80
-        } else {
-            seven
-        }
-    }
-
-    fn acars_fixture() -> Vec<u8> {
-        let mut body: Vec<u8> = b"2N123AB \x15Q0A\x02HELLO"
-            .iter()
-            .copied()
-            .map(odd_parity)
-            .collect();
-        body.push(0x83); // ETX already has odd parity
-        let crc = acars_crc16(&body);
-        let mut wire = vec![0x16, 0x16, 0x01];
-        wire.extend_from_slice(&body);
-        wire.push(crc as u8);
-        wire.push((crc >> 8) as u8);
-        wire
-    }
-
-    fn hdlc_fixture(payload: &[u8]) -> Vec<bool> {
-        let mut frame = payload.to_vec();
-        let crc = !crc16_reflected(payload, 0xffff);
-        frame.push(crc as u8);
-        frame.push((crc >> 8) as u8);
-        assert!(vdl2_fcs_valid(&frame));
-        let raw = bytes_to_bits_lsb(&frame);
-        let mut stuffed = Vec::new();
-        let mut ones = 0;
-        for bit in raw {
-            stuffed.push(bit);
-            if bit {
-                ones += 1;
-                if ones == 5 {
-                    stuffed.push(false);
-                    ones = 0;
-                }
-            } else {
-                ones = 0;
-            }
-        }
-        let flag = [false, true, true, true, true, true, true, false];
-        let mut wire = flag.to_vec();
-        wire.extend(stuffed);
-        wire.extend(flag);
-        wire
+    fn as_bools(bits: &[u8]) -> Vec<bool> {
+        bits.iter().map(|bit| *bit != 0).collect()
     }
 
     #[test]
     fn uat_short_frame_streams_across_chunks_and_validates_rs() {
-        let mut data = [0u8; 18];
-        data[0] = 0x03; // short type zero, qualifier three
-        data[1..4].copy_from_slice(&[0xAB, 0xCD, 0xEF]);
-        data[4..9].copy_from_slice(b"HELLO");
-        let codeword = rs_encode(&data, 12);
-        assert!(uat_rs_valid(&codeword, 12));
-
-        let mut wire = bits_of_word(UAT_DOWNLINK_SYNC, UAT_SYNC_BITS);
-        wire.extend(bytes_to_bits_msb(&codeword));
+        let wire = as_bools(&synthesize_uat_abcdef_bits());
         let mut decoder = UatDecoder::new();
         decoder.feed_bits(&wire[..31]);
         decoder.feed_bits(&wire[31..173]);
@@ -908,8 +929,7 @@ mod tests {
 
     #[test]
     fn acars_streaming_parser_extracts_header_text_and_crc() {
-        let wire = acars_fixture();
-        let bits = bytes_to_bits_lsb(&wire);
+        let bits = as_bools(&synthesize_acars_hello_bits());
         let mut decoder = AcarsDecoder::default();
         for chunk in bits.chunks(13) {
             decoder.feed_bits(chunk);
@@ -928,7 +948,7 @@ mod tests {
 
     #[test]
     fn acars_reports_bad_bcs_without_fake_success() {
-        let mut wire = acars_fixture();
+        let mut wire = acars_hello_bytes();
         let last = wire.len() - 1;
         wire[last] ^= 0x40;
         let mut decoder = AcarsDecoder::default();
@@ -941,7 +961,7 @@ mod tests {
     #[test]
     fn vdl2_hdlc_destuffs_and_validates_fcs() {
         let payload = [0xFF, 0xF8, 0x7E, 0x01, 0x23, 0x45];
-        let wire = hdlc_fixture(&payload);
+        let wire = hdlc_stuffed_bits(&payload);
         let mut decoder = Vdl2Decoder::new();
         for chunk in wire.chunks(7) {
             decoder.feed_bits(chunk);
@@ -955,7 +975,7 @@ mod tests {
     #[test]
     fn vdl2_nrzi_level_api_preserves_streaming_state() {
         let payload = b"AVLC";
-        let bits = hdlc_fixture(payload);
+        let bits = hdlc_stuffed_bits(payload);
         // Add one initial level because the first NRZI level establishes state.
         let mut level = false;
         let mut levels = vec![level];
@@ -977,7 +997,7 @@ mod tests {
     #[test]
     fn vdl2_bad_fcs_is_typed_as_invalid() {
         let payload = b"BAD";
-        let mut wire = hdlc_fixture(payload);
+        let mut wire = hdlc_stuffed_bits(payload);
         // Flip a non-flag data bit.
         wire[10] = !wire[10];
         let mut decoder = Vdl2Decoder::new();
@@ -985,5 +1005,26 @@ mod tests {
         let messages = decoder.take_messages();
         assert_eq!(messages.len(), 1);
         assert!(!messages[0].fcs_valid);
+    }
+
+    #[test]
+    fn recorded_bit_synthesizers_round_trip_production_decoders() {
+        let mut uat = UatDecoder::new();
+        uat.feed_bits(&as_bools(&synthesize_uat_abcdef_bits()));
+        let uat_messages = uat.take_messages();
+        assert_eq!(uat_messages[0].address_hex.as_deref(), Some("ABCDEF"));
+
+        let mut acars = AcarsDecoder::default();
+        acars.feed_bits(&as_bools(&synthesize_acars_hello_bits()));
+        let acars_messages = acars.take_messages();
+        assert!(acars_messages[0].crc_valid);
+        assert_eq!(acars_messages[0].registration.as_deref(), Some("N123AB"));
+        assert_eq!(acars_messages[0].text, "HELLO");
+
+        let mut vdl2 = Vdl2Decoder::new();
+        vdl2.feed_bits(&as_bools(&synthesize_vdl2_hello_bits()));
+        let vdl2_messages = vdl2.take_messages();
+        assert!(vdl2_messages[0].fcs_valid);
+        assert_eq!(vdl2_messages[0].payload, b"HELLO");
     }
 }

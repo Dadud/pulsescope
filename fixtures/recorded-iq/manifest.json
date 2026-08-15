@@ -91,6 +91,51 @@
         "info_contains": "HELLO"
       },
       "sha256": "d0e7a258a298bdcd8ed15559cbd2881efae04aa36009b6e47dd4b0feef771cc5"
+    },
+    {
+      "id": "uat-abcdef",
+      "protocol": "uat",
+      "file": "uat-abcdef.bits.json",
+      "kind": "bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "uat",
+        "icao": "ABCDEF",
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "de88af5675052dd2c93e8e5d51aa2c063255bfbd6aab254de6981584224dad7b"
+    },
+    {
+      "id": "acars-n123ab-hello",
+      "protocol": "acars",
+      "file": "acars-n123ab-hello.bits.json",
+      "kind": "bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "acars",
+        "icao": null,
+        "mmsi": null,
+        "source": "N123AB",
+        "info_contains": "HELLO"
+      },
+      "sha256": "144e8ead8c68a9dd4244a0cc6866f3c7be4a4e212890da7b96753661fe50307f"
+    },
+    {
+      "id": "vdl2-hello",
+      "protocol": "vdl2",
+      "file": "vdl2-hello.bits.json",
+      "kind": "bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "vdl2",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "8e500277a04ebec795961a0bf28bb568f610572251561b4db88d39f433d0aa01"
     }
   ]
 }

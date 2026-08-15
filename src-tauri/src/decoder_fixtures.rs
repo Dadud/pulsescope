@@ -239,6 +239,87 @@ pub fn decode_navtex_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedM
         .collect()
 }
 
+pub fn decode_uat_bits(bits: &[u8]) -> Vec<DecodedMessage> {
+    let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
+    let mut decoder = crate::aviation::UatDecoder::new();
+    decoder.feed_bits(&bools);
+    decoder
+        .take_messages()
+        .into_iter()
+        .map(|m| DecodedMessage {
+            id: None,
+            frequency_hz: 978_000_000,
+            protocol: "uat".into(),
+            message_type: format!("{:?}", m.frame_kind).to_ascii_lowercase(),
+            address: m.address_hex.clone().unwrap_or_default(),
+            function_code: m
+                .message_code
+                .map(|code| format!("MC{code}"))
+                .unwrap_or_default(),
+            content: m
+                .payload
+                .iter()
+                .filter(|b| (0x20..=0x7e).contains(*b))
+                .map(|b| *b as char)
+                .collect(),
+            raw: hex::encode(&m.raw_codeword),
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
+pub fn decode_acars_bits(bits: &[u8]) -> Vec<DecodedMessage> {
+    let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
+    let mut decoder = crate::aviation::AcarsDecoder::default();
+    decoder.feed_bits(&bools);
+    decoder
+        .take_messages()
+        .into_iter()
+        .filter(|m| m.crc_valid)
+        .map(|m| DecodedMessage {
+            id: None,
+            frequency_hz: 131_550_000,
+            protocol: "acars".into(),
+            message_type: m.label.clone().unwrap_or_else(|| "acars".into()),
+            address: m.registration.clone().unwrap_or_default(),
+            function_code: m.block_id.map(|c| c.to_string()).unwrap_or_default(),
+            content: m.text.clone(),
+            raw: hex::encode(&m.raw_bytes),
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
+pub fn decode_vdl2_bits(bits: &[u8]) -> Vec<DecodedMessage> {
+    let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
+    let mut decoder = crate::aviation::Vdl2Decoder::new();
+    decoder.feed_bits(&bools);
+    decoder
+        .take_messages()
+        .into_iter()
+        .filter(|m| m.fcs_valid)
+        .map(|m| DecodedMessage {
+            id: None,
+            frequency_hz: 136_975_000,
+            protocol: "vdl2".into(),
+            message_type: "avlc".into(),
+            address: String::new(),
+            function_code: String::new(),
+            content: m
+                .payload
+                .iter()
+                .filter(|b| (0x20..=0x7e).contains(*b))
+                .map(|b| *b as char)
+                .collect(),
+            raw: hex::encode(&m.raw_frame),
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
 pub fn run_recorded_fixture(
     root: &Path,
     entry: &RecordedFixtureEntry,
@@ -278,6 +359,15 @@ pub fn run_recorded_fixture(
             Ok(match entry.protocol.as_str() {
                 "aprs" => decode_aprs_nrz_bits(&artifact.bits),
                 _ => anyhow::bail!("unsupported nrz protocol {}", entry.protocol),
+            })
+        }
+        "bits" => {
+            let artifact: RecordedNrzArtifact = serde_json::from_str(&text)?;
+            Ok(match entry.protocol.as_str() {
+                "uat" => decode_uat_bits(&artifact.bits),
+                "acars" => decode_acars_bits(&artifact.bits),
+                "vdl2" => decode_vdl2_bits(&artifact.bits),
+                _ => anyhow::bail!("unsupported bits protocol {}", entry.protocol),
             })
         }
         other => anyhow::bail!("unsupported fixture kind {}", other),
@@ -411,6 +501,36 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
     )?;
     let navtex_sha = hex::encode(Sha256::digest(std::fs::read(&navtex_path)?));
 
+    let uat_bits_artifact = RecordedNrzArtifact {
+        baud: 1_041_667,
+        bits: crate::aviation::synthesize_uat_abcdef_bits(),
+    };
+    let uat_path = root.join("uat-abcdef.bits.json");
+    std::fs::write(&uat_path, serde_json::to_string_pretty(&uat_bits_artifact)?)?;
+    let uat_sha = hex::encode(Sha256::digest(std::fs::read(&uat_path)?));
+
+    let acars_bits_artifact = RecordedNrzArtifact {
+        baud: 2400,
+        bits: crate::aviation::synthesize_acars_hello_bits(),
+    };
+    let acars_path = root.join("acars-n123ab-hello.bits.json");
+    std::fs::write(
+        &acars_path,
+        serde_json::to_string_pretty(&acars_bits_artifact)?,
+    )?;
+    let acars_sha = hex::encode(Sha256::digest(std::fs::read(&acars_path)?));
+
+    let vdl2_bits_artifact = RecordedNrzArtifact {
+        baud: 31_500,
+        bits: crate::aviation::synthesize_vdl2_hello_bits(),
+    };
+    let vdl2_path = root.join("vdl2-hello.bits.json");
+    std::fs::write(
+        &vdl2_path,
+        serde_json::to_string_pretty(&vdl2_bits_artifact)?,
+    )?;
+    let vdl2_sha = hex::encode(Sha256::digest(std::fs::read(&vdl2_path)?));
+
     let manifest = RecordedFixtureManifest {
         schema: "pulsescope.recorded-iq-fixture".into(),
         version: 1,
@@ -505,6 +625,51 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                 },
                 sha256: navtex_sha,
             },
+            RecordedFixtureEntry {
+                id: "uat-abcdef".into(),
+                protocol: "uat".into(),
+                file: "uat-abcdef.bits.json".into(),
+                kind: "bits".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "uat".into(),
+                    icao: Some("ABCDEF".into()),
+                    mmsi: None,
+                    source: None,
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: uat_sha,
+            },
+            RecordedFixtureEntry {
+                id: "acars-n123ab-hello".into(),
+                protocol: "acars".into(),
+                file: "acars-n123ab-hello.bits.json".into(),
+                kind: "bits".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "acars".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: Some("N123AB".into()),
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: acars_sha,
+            },
+            RecordedFixtureEntry {
+                id: "vdl2-hello".into(),
+                protocol: "vdl2".into(),
+                file: "vdl2-hello.bits.json".into(),
+                kind: "bits".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "vdl2".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: None,
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: vdl2_sha,
+            },
         ],
     };
     std::fs::write(
@@ -558,5 +723,19 @@ mod tests {
         let messages = decode_aprs_nrz_bits(&nrz_bits);
         assert!(messages.iter().any(|m| m.address == "W1AW"));
         assert!(messages.iter().any(|m| m.content.contains("Hello world")));
+    }
+
+    #[test]
+    fn uat_acars_vdl2_bit_fixtures_decode_to_normalized_events() {
+        let uat = decode_uat_bits(&crate::aviation::synthesize_uat_abcdef_bits());
+        assert!(uat.iter().any(|m| m.address == "ABCDEF"));
+        assert!(uat.iter().any(|m| m.content.contains("HELLO")));
+
+        let acars = decode_acars_bits(&crate::aviation::synthesize_acars_hello_bits());
+        assert!(acars.iter().any(|m| m.address == "N123AB"));
+        assert!(acars.iter().any(|m| m.content.contains("HELLO")));
+
+        let vdl2 = decode_vdl2_bits(&crate::aviation::synthesize_vdl2_hello_bits());
+        assert!(vdl2.iter().any(|m| m.content.contains("HELLO")));
     }
 }

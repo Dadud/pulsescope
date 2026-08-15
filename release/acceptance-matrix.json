@@ -195,7 +195,7 @@
       "acceptance_gate": "Per-protocol recorded-IQ fixtures and normalized events.",
       "evidence": [
         {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
-        {"type": "test", "ref": "native POCSAG/UAT unit tests; rtl_433/ACARS/VDL2 recorded-IQ gate remains open"}
+        {"type": "test", "ref": "UAT/ACARS/VDL2 recorded-bit fixtures and native POCSAG audio; rtl_433 recorded-IQ gate remains open"}
       ]
     },
     {

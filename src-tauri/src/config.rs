@@ -1087,6 +1087,16 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             Adaptive,
         ),
         range(
+            "VDL2",
+            136_970_000,
+            136_980_000,
+            "am",
+            25_000,
+            1,
+            1_000_000,
+            Adaptive,
+        ),
+        range(
             "NOAA APT",
             137_000_000,
             138_000_000,
@@ -1108,6 +1118,7 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
         ),
         // Narrow digital-mode windows have their own presets so auto-decoder
         // selection never has to infer a mode from a full amateur allocation.
+        range("NAVTEX 518", 517_000, 519_000, "usb", 300, 1, 62_500, Off),
         range(
             "FT8 80m", 3_572_000, 3_574_000, "usb", 3_000, 1, 125_000, Off,
         ),
@@ -1115,10 +1126,19 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             "FT8 40m", 7_073_000, 7_075_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
+            "WSPR 40m", 7_038_600, 7_040_000, "usb", 3_000, 1, 125_000, Off,
+        ),
+        range(
             "FT8 30m", 10_135_000, 10_137_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
             "FT8 20m", 14_073_000, 14_075_000, "usb", 3_000, 1, 125_000, Off,
+        ),
+        range(
+            "RTTY 20m", 14_079_000, 14_082_000, "usb", 3_000, 1, 125_000, Off,
+        ),
+        range(
+            "WSPR 20m", 14_095_600, 14_097_000, "usb", 3_000, 1, 125_000, Off,
         ),
         range(
             "SSTV 20m", 14_229_000, 14_231_000, "usb", 3_000, 1, 125_000, Off,
@@ -1162,6 +1182,16 @@ pub fn default_scan_ranges() -> Vec<ScanRange> {
             12_500,
             1,
             125_000,
+            Off,
+        ),
+        range(
+            "APRS 2m",
+            144_380_000,
+            144_400_000,
+            "nfm",
+            12_500,
+            1,
+            250_000,
             Off,
         ),
         range(
@@ -1707,4 +1737,36 @@ fn range(
 #[allow(dead_code)]
 pub fn poll_interval(cfg: &ScannerConfig) -> Duration {
     Duration::from_micros((1_000_000.0 / cfg.update_rate_hz.max(1.0)) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_scan_ranges;
+
+    #[test]
+    fn builtin_ranges_cover_decoder_windows() {
+        let names: Vec<String> = default_scan_ranges()
+            .into_iter()
+            .map(|range| range.name)
+            .collect();
+        for required in [
+            "AIS",
+            "ACARS",
+            "VDL2",
+            "APRS 2m",
+            "ADS-B UAT",
+            "ADS-B 1090",
+            "Pagers",
+            "NAVTEX 518",
+            "RTTY 20m",
+            "WSPR 20m",
+            "WSPR 40m",
+            "Radiosonde",
+        ] {
+            assert!(
+                names.iter().any(|name| name == required),
+                "missing builtin scan range {required}"
+            );
+        }
+    }
 }

@@ -414,9 +414,7 @@ async fn scanner_loop(
         .collect();
     let mut last_signal_hit = Instant::now() - Duration::from_secs(2);
     let mut smoothed_noise_floor: Option<f32> = None;
-    let mut native_adsb = AdsbDecoder::new(device.status().sample_rate);
-    let mut native_pocsag_1200 =
-        crate::pocsag::PocsagDecoder::new(24_000, crate::pocsag::PocsagBaud::Baud1200);
+    let mut native_decoders = NativeRangeDecoders::new(device.status().sample_rate);
     let mut discriminator_prev = None;
     let mut next_sweep_at = Instant::now();
     let mut signal_hold_started: Option<Instant> = None;
@@ -446,7 +444,9 @@ async fn scanner_loop(
                             // it remains silent until a browser subscribes.
                             muted: !(range.name.starts_with("SSTV ")
                                 || range.name.starts_with("FT8 ")
-                                || range.name.starts_with("WSPR ")),
+                                || range.name.starts_with("WSPR ")
+                                || range.name.starts_with("RTTY ")
+                                || range.name.starts_with("NAVTEX ")),
                             volume: 0.7,
                             audio_agc: true,
                             squelch_open: false,
@@ -464,6 +464,7 @@ async fn scanner_loop(
                     state.lock().scan_locked = false;
                     state.lock().started_ms = now_ms();
                     active_range = Some(range);
+                    native_decoders.reset(device.status().sample_rate);
                     next_sweep_at = Instant::now()
                         + Duration::from_millis(
                             active_range
@@ -552,71 +553,16 @@ async fn scanner_loop(
             .await;
         recording.lock().write_iq(&iq);
 
-        // Native ADS-B path: only activate on an ADS-B range, so ordinary
-        // scanner traffic never pays the Mode S preamble scan cost.
-        let native_adsb_active = active_range
-            .as_ref()
-            .map(|r| {
-                r.name.to_ascii_lowercase().contains("ads-b")
-                    || r.name.to_ascii_lowercase().contains("adsb")
-            })
-            .unwrap_or(false);
-        if native_adsb_active {
-            if native_adsb.is_none() {
-                native_adsb = AdsbDecoder::new(device.status().sample_rate);
-            }
-            if let Some(decoder) = native_adsb.as_mut() {
-                decoder.feed_iq(&iq);
-                for message in decoder.take_messages() {
-                    let content = message
-                        .callsign
-                        .clone()
-                        .or_else(|| message.altitude_ft.map(|a| format!("{a} ft")))
-                        .unwrap_or_default();
-                    let decoded = crate::db::DecodedMessage {
-                        id: None,
-                        frequency_hz: 1_090_000_000,
-                        protocol: "adsb".into(),
-                        message_type: message.message_type.clone(),
-                        address: message.icao.clone(),
-                        function_code: format!("DF{}", message.df),
-                        content: content.clone(),
-                        raw: message.raw_hex.clone(),
-                        encryption: "none".into(),
-                        timestamp_ms: now_ms(),
-                    };
-                    let _ = db.insert_decoded_message(&decoded);
-                    let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
-                }
-            }
-        }
-
-        let native_pocsag_active = active_range
-            .as_ref()
-            .map(|r| {
-                let name = r.name.to_ascii_lowercase();
-                name.contains("pocsag") || name.contains("pager")
-            })
-            .unwrap_or(false);
-        if native_pocsag_active {
-            let audio_24k =
-                crate::sidecar::resample_audio(&discriminator, device.status().sample_rate, 24_000);
-            for message in native_pocsag_1200.push_audio(&audio_24k) {
-                let decoded = crate::db::DecodedMessage {
-                    id: None,
-                    frequency_hz: device.status().center_freq_hz,
-                    protocol: "pocsag".into(),
-                    message_type: "pager".into(),
-                    address: message.ric.to_string(),
-                    function_code: message.function.to_string(),
-                    content: message.text.clone(),
-                    raw: message.text,
-                    encryption: "none".into(),
-                    timestamp_ms: now_ms(),
-                };
-                let _ = db.insert_decoded_message(&decoded);
-                let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
-            }
+        if let Some(range) = active_range.as_ref() {
+            native_decoders.feed(
+                range,
+                &iq,
+                &discriminator,
+                device.status().sample_rate,
+                device.status().center_freq_hz,
+                &db,
+                &events_tx,
+            );
         }
 
         // Window complex IQ in-place, then transform and shift DC to the center.
@@ -905,6 +851,367 @@ async fn scanner_loop(
     }
 }
 
+fn range_name_matches(name: &str, needles: &[&str]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    needles.iter().any(|needle| lower.contains(needle))
+}
+
+fn publish_decoded(
+    db: &Db,
+    events_tx: &broadcast::Sender<ScannerEvent>,
+    decoded: crate::db::DecodedMessage,
+) {
+    let _ = db.insert_decoded_message(&decoded);
+    let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
+}
+
+struct NativeRangeDecoders {
+    adsb: Option<AdsbDecoder>,
+    pocsag_1200: crate::pocsag::PocsagDecoder,
+    ais: Option<crate::ais::IqDecoder>,
+    aprs: Option<crate::aprs::AprsDecoder>,
+    uat: Option<crate::aviation::UatIqDecoder>,
+    acars: Option<crate::aviation::AcarsIqDecoder>,
+    vdl2: Option<crate::aviation::Vdl2IqDecoder>,
+    hf_audio: Vec<f32>,
+    last_hf_text: String,
+    sample_rate: u32,
+}
+
+impl NativeRangeDecoders {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            adsb: AdsbDecoder::new(sample_rate),
+            pocsag_1200: crate::pocsag::PocsagDecoder::new(
+                24_000,
+                crate::pocsag::PocsagBaud::Baud1200,
+            ),
+            ais: crate::ais::IqDecoder::new(sample_rate as f64).ok(),
+            aprs: Some(crate::aprs::AprsDecoder::new(sample_rate as f32)),
+            uat: Some(crate::aviation::UatIqDecoder::new(sample_rate)),
+            acars: Some(crate::aviation::AcarsIqDecoder::new(
+                sample_rate,
+                crate::aviation::BitOrder::LsbFirst,
+                false,
+            )),
+            vdl2: Some(crate::aviation::Vdl2IqDecoder::new(sample_rate)),
+            hf_audio: Vec::new(),
+            last_hf_text: String::new(),
+            sample_rate,
+        }
+    }
+
+    fn reset(&mut self, sample_rate: u32) {
+        *self = Self::new(sample_rate);
+    }
+
+    fn ensure_rate(&mut self, sample_rate: u32) {
+        if self.sample_rate != sample_rate {
+            self.reset(sample_rate);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn feed(
+        &mut self,
+        range: &ScanRange,
+        iq: &[Complex<f32>],
+        discriminator: &[f32],
+        sample_rate: u32,
+        center_hz: u64,
+        db: &Db,
+        events_tx: &broadcast::Sender<ScannerEvent>,
+    ) {
+        self.ensure_rate(sample_rate);
+        let name = range.name.as_str();
+        let mode_s = range_name_matches(name, &["1090"])
+            || ((range_name_matches(name, &["ads-b", "adsb"]))
+                && !range_name_matches(name, &["uat", "978"]));
+        let uat = range_name_matches(name, &["uat", "978"]);
+        let ais = range_name_matches(name, &["ais"]);
+        let aprs = range_name_matches(name, &["aprs"]);
+        let acars = range_name_matches(name, &["acars"]);
+        let vdl2 = range_name_matches(name, &["vdl"]);
+        let pocsag = range_name_matches(name, &["pocsag", "pager"]);
+        let rtty = range_name_matches(name, &["rtty"]);
+        let navtex = range_name_matches(name, &["navtex"]);
+
+        if mode_s {
+            if self.adsb.is_none() {
+                self.adsb = AdsbDecoder::new(sample_rate);
+            }
+            if let Some(decoder) = self.adsb.as_mut() {
+                decoder.feed_iq(iq);
+                for message in decoder.take_messages() {
+                    let content = message
+                        .callsign
+                        .clone()
+                        .or_else(|| message.altitude_ft.map(|a| format!("{a} ft")))
+                        .unwrap_or_default();
+                    publish_decoded(
+                        db,
+                        events_tx,
+                        crate::db::DecodedMessage {
+                            id: None,
+                            frequency_hz: 1_090_000_000,
+                            protocol: "adsb".into(),
+                            message_type: message.message_type.clone(),
+                            address: message.icao.clone(),
+                            function_code: format!("DF{}", message.df),
+                            content,
+                            raw: message.raw_hex.clone(),
+                            encryption: "none".into(),
+                            timestamp_ms: now_ms(),
+                        },
+                    );
+                }
+            }
+        }
+
+        if pocsag {
+            let audio_24k = crate::sidecar::resample_audio(discriminator, sample_rate, 24_000);
+            for message in self.pocsag_1200.push_audio(&audio_24k) {
+                publish_decoded(
+                    db,
+                    events_tx,
+                    crate::db::DecodedMessage {
+                        id: None,
+                        frequency_hz: center_hz,
+                        protocol: "pocsag".into(),
+                        message_type: "pager".into(),
+                        address: message.ric.to_string(),
+                        function_code: message.function.to_string(),
+                        content: message.text.clone(),
+                        raw: message.text,
+                        encryption: "none".into(),
+                        timestamp_ms: now_ms(),
+                    },
+                );
+            }
+        }
+
+        if ais || uat || acars || vdl2 {
+            let pairs: Vec<(f32, f32)> = iq.iter().map(|c| (c.re, c.im)).collect();
+            if ais {
+                if self.ais.is_none() {
+                    self.ais = crate::ais::IqDecoder::new(sample_rate as f64).ok();
+                }
+                if let Some(decoder) = self.ais.as_mut() {
+                    for message in decoder.push_iq(&pairs).into_iter().filter_map(Result::ok) {
+                        publish_decoded(
+                            db,
+                            events_tx,
+                            crate::db::DecodedMessage {
+                                id: None,
+                                frequency_hz: center_hz,
+                                protocol: "ais".into(),
+                                message_type: format!("type_{}", message.message_type()),
+                                address: message.mmsi().to_string(),
+                                function_code: String::new(),
+                                content: serde_json::to_string(&message).unwrap_or_default(),
+                                raw: String::new(),
+                                encryption: "none".into(),
+                                timestamp_ms: now_ms(),
+                            },
+                        );
+                    }
+                }
+            }
+            if uat {
+                if self.uat.is_none() {
+                    self.uat = Some(crate::aviation::UatIqDecoder::new(sample_rate));
+                }
+                if let Some(decoder) = self.uat.as_mut() {
+                    decoder.push_iq(&pairs);
+                    for message in decoder.take_messages() {
+                        publish_decoded(
+                            db,
+                            events_tx,
+                            crate::db::DecodedMessage {
+                                id: None,
+                                frequency_hz: 978_000_000,
+                                protocol: "uat".into(),
+                                message_type: format!("{:?}", message.frame_kind)
+                                    .to_ascii_lowercase(),
+                                address: message.address_hex.clone().unwrap_or_default(),
+                                function_code: message
+                                    .message_code
+                                    .map(|code| format!("MC{code}"))
+                                    .unwrap_or_default(),
+                                content: message
+                                    .payload
+                                    .iter()
+                                    .filter(|b| (0x20..=0x7e).contains(*b))
+                                    .map(|b| *b as char)
+                                    .collect(),
+                                raw: hex::encode(&message.raw_codeword),
+                                encryption: "none".into(),
+                                timestamp_ms: now_ms(),
+                            },
+                        );
+                    }
+                }
+            }
+            if acars {
+                if self.acars.is_none() {
+                    self.acars = Some(crate::aviation::AcarsIqDecoder::new(
+                        sample_rate,
+                        crate::aviation::BitOrder::LsbFirst,
+                        false,
+                    ));
+                }
+                if let Some(decoder) = self.acars.as_mut() {
+                    decoder.push_iq(&pairs);
+                    for message in decoder.take_messages().into_iter().filter(|m| m.crc_valid) {
+                        publish_decoded(
+                            db,
+                            events_tx,
+                            crate::db::DecodedMessage {
+                                id: None,
+                                frequency_hz: center_hz,
+                                protocol: "acars".into(),
+                                message_type: message
+                                    .label
+                                    .clone()
+                                    .unwrap_or_else(|| "acars".into()),
+                                address: message.registration.clone().unwrap_or_default(),
+                                function_code: message
+                                    .block_id
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_default(),
+                                content: message.text.clone(),
+                                raw: hex::encode(&message.raw_bytes),
+                                encryption: "none".into(),
+                                timestamp_ms: now_ms(),
+                            },
+                        );
+                    }
+                }
+            }
+            if vdl2 {
+                if self.vdl2.is_none() {
+                    self.vdl2 = Some(crate::aviation::Vdl2IqDecoder::new(sample_rate));
+                }
+                if let Some(decoder) = self.vdl2.as_mut() {
+                    decoder.push_iq(&pairs);
+                    for message in decoder.take_messages().into_iter().filter(|m| m.fcs_valid) {
+                        publish_decoded(
+                            db,
+                            events_tx,
+                            crate::db::DecodedMessage {
+                                id: None,
+                                frequency_hz: center_hz,
+                                protocol: "vdl2".into(),
+                                message_type: "avlc".into(),
+                                address: String::new(),
+                                function_code: String::new(),
+                                content: message
+                                    .payload
+                                    .iter()
+                                    .filter(|b| (0x20..=0x7e).contains(*b))
+                                    .map(|b| *b as char)
+                                    .collect(),
+                                raw: hex::encode(&message.raw_frame),
+                                encryption: "none".into(),
+                                timestamp_ms: now_ms(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        if aprs {
+            if self.aprs.is_none() {
+                self.aprs = Some(crate::aprs::AprsDecoder::new(sample_rate as f32));
+            }
+            if let Some(decoder) = self.aprs.as_mut() {
+                for sample in discriminator {
+                    decoder.feed(*sample);
+                }
+                for frame in std::mem::take(&mut decoder.frames) {
+                    publish_decoded(
+                        db,
+                        events_tx,
+                        crate::db::DecodedMessage {
+                            id: None,
+                            frequency_hz: center_hz,
+                            protocol: "aprs".into(),
+                            message_type: "ax25".into(),
+                            address: frame.source,
+                            function_code: frame.dest,
+                            content: frame.info.clone(),
+                            raw: frame.info,
+                            encryption: "none".into(),
+                            timestamp_ms: now_ms(),
+                        },
+                    );
+                }
+            }
+        }
+
+        if rtty || navtex {
+            let audio_8k = crate::sidecar::resample_audio(discriminator, sample_rate, 8_000);
+            self.hf_audio.extend_from_slice(&audio_8k);
+            const HF_WINDOW: usize = 16_000;
+            if self.hf_audio.len() >= HF_WINDOW {
+                if rtty {
+                    if let Some(text) =
+                        crate::demod::decode_rtty(&self.hf_audio, 8_000.0, 2125.0, 1955.0, 50.0)
+                    {
+                        if !text.is_empty() && text != self.last_hf_text {
+                            self.last_hf_text = text.clone();
+                            publish_decoded(
+                                db,
+                                events_tx,
+                                crate::db::DecodedMessage {
+                                    id: None,
+                                    frequency_hz: center_hz,
+                                    protocol: "rtty".into(),
+                                    message_type: "text".into(),
+                                    address: String::new(),
+                                    function_code: String::new(),
+                                    content: text.clone(),
+                                    raw: text,
+                                    encryption: "none".into(),
+                                    timestamp_ms: now_ms(),
+                                },
+                            );
+                        }
+                    }
+                }
+                if navtex {
+                    if let Some(text) = crate::demod::decode_navtex(&self.hf_audio, 8_000.0) {
+                        if !text.is_empty() && text != self.last_hf_text {
+                            self.last_hf_text = text.clone();
+                            publish_decoded(
+                                db,
+                                events_tx,
+                                crate::db::DecodedMessage {
+                                    id: None,
+                                    frequency_hz: center_hz,
+                                    protocol: "navtex".into(),
+                                    message_type: "text".into(),
+                                    address: String::new(),
+                                    function_code: String::new(),
+                                    content: text.clone(),
+                                    raw: text,
+                                    encryption: "none".into(),
+                                    timestamp_ms: now_ms(),
+                                },
+                            );
+                        }
+                    }
+                }
+                let drain = self.hf_audio.len() / 2;
+                self.hf_audio.drain(..drain);
+            }
+        } else {
+            self.hf_audio.clear();
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -960,6 +1267,22 @@ mod scan_window_tests {
             stable_channel_frequency(&range, 92_714_511, 5_000),
             92_700_000
         );
+    }
+
+    #[test]
+    fn decoder_range_names_select_the_matching_native_path() {
+        assert!(range_name_matches("ADS-B 1090", &["1090"]));
+        assert!(!range_name_matches("ADS-B UAT", &["1090"]));
+        assert!(range_name_matches("ADS-B UAT", &["uat", "978"]));
+        assert!(range_name_matches("AIS", &["ais"]));
+        assert!(range_name_matches("APRS 2m", &["aprs"]));
+        assert!(range_name_matches("ACARS", &["acars"]));
+        assert!(range_name_matches("VDL2", &["vdl"]));
+        assert!(range_name_matches("NAVTEX 518", &["navtex"]));
+        assert!(range_name_matches("RTTY 20m", &["rtty"]));
+        assert!(range_name_matches("Pagers", &["pocsag", "pager"]));
+        assert!(!range_name_matches("Aircraft AM", &["ais", "acars", "vdl"]));
+        assert!(!range_name_matches("2m Amateur", &["aprs"]));
     }
 }
 
