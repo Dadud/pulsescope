@@ -3082,12 +3082,12 @@ async fn native_vdl2_decode(Json(v): Json<Value>) -> Json<Value> {
 
 async fn scan_ais(State(_s): State<ApiState>) -> Json<Value> {
     Json(
-        json!({"available":true,"native":true,"messages":[],"reason":"native AIS parser is ready; live GMSK channel integration remains to be wired"}),
+        json!({"available":false,"native":true,"messages":[],"reason":"native AIS parser accepts fixture IQ via POST /scan/ais; live GMSK channel integration is not wired"}),
     )
 }
 async fn scan_acars(State(_s): State<ApiState>) -> Json<Value> {
     Json(
-        json!({"available":false,"messages":[],"reason":"ACARS decoder transport is not implemented"}),
+        json!({"available":false,"native":true,"messages":[],"reason":"native ACARS parser accepts fixture IQ/bits via POST /scan/acars; live device pipeline is not wired"}),
     )
 }
 async fn scan_aero(State(s): State<ApiState>) -> Json<Value> {
@@ -4426,6 +4426,42 @@ mod readiness_tests {
         assert_eq!(decoder["available"], false);
         assert_eq!(decoder["verification"], "unit_fixture");
         assert!(decoder["missing_gate"].as_str().is_some());
+    }
+
+    #[test]
+    fn required_catalog_decoders_stay_unavailable_until_recorded_iq_e2e() {
+        let required_ids = [
+            "adsb",
+            "ais",
+            "aprs",
+            "pocsag",
+            "rds",
+            "uat",
+            "acars",
+            "vdl2",
+            "rtl433",
+            "ft8",
+            "wspr",
+            "rtty",
+            "navtex",
+            "dmr",
+            "p25",
+            "nxdn",
+            "dstar",
+            "ysf",
+            "m17",
+        ];
+        for id in required_ids {
+            let decoder = decoder_development_entry(id, id, "iq", "live");
+            assert_eq!(decoder["id"], *id);
+            assert_eq!(decoder["status"], "development");
+            assert_eq!(decoder["available"], false);
+            assert_eq!(decoder["verification"], "unit_fixture");
+            assert_eq!(
+                decoder["missing_gate"].as_str(),
+                Some("recorded IQ end-to-end fixture")
+            );
+        }
     }
 }
 
