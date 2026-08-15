@@ -26,7 +26,8 @@ use crate::config::{ScanRange, ScannerConfig};
 use crate::db::Db;
 use crate::demod::{
     dc_block, decimate_complex_average, decode_wfm_stereo, deemphasis, demodulate,
-    low_pass_complex, low_pass_real, mix_down, Mode, SincResampler, WfmStereoState,
+    discriminator_samples, low_pass_complex, low_pass_real, mix_down, Mode, SincResampler,
+    WfmStereoState,
 };
 use crate::device::DeviceLayer;
 use crate::sidecar::SidecarRegistry;
@@ -414,6 +415,9 @@ async fn scanner_loop(
     let mut last_signal_hit = Instant::now() - Duration::from_secs(2);
     let mut smoothed_noise_floor: Option<f32> = None;
     let mut native_adsb = AdsbDecoder::new(device.status().sample_rate);
+    let mut native_pocsag_1200 =
+        crate::pocsag::PocsagDecoder::new(24_000, crate::pocsag::PocsagBaud::Baud1200);
+    let mut discriminator_prev = None;
     let mut next_sweep_at = Instant::now();
     let mut signal_hold_started: Option<Instant> = None;
     let mut signal_hold_until: Option<Instant> = None;
@@ -441,7 +445,8 @@ async fn scanner_loop(
                             // narrow exception: it needs post-demod audio, but
                             // it remains silent until a browser subscribes.
                             muted: !(range.name.starts_with("SSTV ")
-                                || range.name.starts_with("FT8 ")),
+                                || range.name.starts_with("FT8 ")
+                                || range.name.starts_with("WSPR ")),
                             volume: 0.7,
                             audio_agc: true,
                             squelch_open: false,
@@ -541,6 +546,10 @@ async fn scanner_loop(
             }
         };
         sidecars.feed_iq(&iq).await;
+        let discriminator = discriminator_samples(&iq, &mut discriminator_prev);
+        sidecars
+            .feed_audio(&discriminator, device.status().sample_rate)
+            .await;
         recording.lock().write_iq(&iq);
 
         // Native ADS-B path: only activate on an ADS-B range, so ordinary
@@ -579,6 +588,34 @@ async fn scanner_loop(
                     let _ = db.insert_decoded_message(&decoded);
                     let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
                 }
+            }
+        }
+
+        let native_pocsag_active = active_range
+            .as_ref()
+            .map(|r| {
+                let name = r.name.to_ascii_lowercase();
+                name.contains("pocsag") || name.contains("pager")
+            })
+            .unwrap_or(false);
+        if native_pocsag_active {
+            let audio_24k =
+                crate::sidecar::resample_audio(&discriminator, device.status().sample_rate, 24_000);
+            for message in native_pocsag_1200.push_audio(&audio_24k) {
+                let decoded = crate::db::DecodedMessage {
+                    id: None,
+                    frequency_hz: device.status().center_freq_hz,
+                    protocol: "pocsag".into(),
+                    message_type: "pager".into(),
+                    address: message.ric.to_string(),
+                    function_code: message.function.to_string(),
+                    content: message.text.clone(),
+                    raw: message.text,
+                    encryption: "none".into(),
+                    timestamp_ms: now_ms(),
+                };
+                let _ = db.insert_decoded_message(&decoded);
+                let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
             }
         }
 

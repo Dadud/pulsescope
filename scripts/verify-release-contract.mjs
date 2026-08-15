@@ -45,7 +45,10 @@ for (const certifiedId of matrix.rules?.certified_hardware ?? []) {
 const apiSource = readFileSync(new URL('../src-tauri/src/api.rs', import.meta.url), 'utf8');
 const decoderUi = readFileSync(new URL('../ui/src/routes/feature-packs/+page.svelte', import.meta.url), 'utf8');
 for (const decoderId of matrix.rules?.decoder_catalog_required_ids ?? []) {
-  if (!apiSource.includes(`decoder_development_entry("${decoderId}"`)) failures.push(`decoder catalog is missing ${decoderId}`);
+  const listed =
+    apiSource.includes(`decoder_development_entry("${decoderId}"`) ||
+    apiSource.includes(`decoder_fixture_verified_entry("${decoderId}"`);
+  if (!listed) failures.push(`decoder catalog is missing ${decoderId}`);
 }
 if (!decoderUi.includes('missing_gate') || !decoderUi.includes('Beta')) failures.push('normal decoder UI must show beta status and missing gate');
 

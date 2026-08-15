@@ -1464,10 +1464,10 @@ async fn media_session_v2() -> impl IntoResponse {
 
 async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
     let mut decoders = vec![
-        decoder_development_entry("adsb", "ADS-B / Mode S", "iq", "live"),
-        decoder_development_entry("ais", "AIS", "discriminator", "on_demand"),
-        decoder_development_entry("aprs", "APRS / AX.25", "audio", "on_demand"),
-        decoder_development_entry("pocsag", "POCSAG", "audio", "on_demand"),
+        decoder_fixture_verified_entry("adsb", "ADS-B / Mode S", "iq", "live"),
+        decoder_fixture_verified_entry("ais", "AIS", "discriminator", "on_demand"),
+        decoder_fixture_verified_entry("aprs", "APRS / AX.25", "audio", "on_demand"),
+        decoder_fixture_verified_entry("pocsag", "POCSAG", "audio", "live"),
         decoder_development_entry("rds", "Broadcast RDS", "wfm_multiplex", "on_demand"),
         decoder_development_entry("uat", "978 UAT", "iq", "on_demand"),
         decoder_development_entry("acars", "ACARS", "audio", "managed_sidecar"),
@@ -1475,8 +1475,8 @@ async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
         decoder_development_entry("rtl433", "rtl_433 sensors", "iq", "managed_sidecar"),
         decoder_development_entry("ft8", "FT8 / FT4", "audio", "managed_sidecar"),
         decoder_development_entry("wspr", "WSPR", "audio", "managed_sidecar"),
-        decoder_development_entry("rtty", "RTTY / FSK", "audio", "on_demand"),
-        decoder_development_entry("navtex", "NAVTEX", "audio", "on_demand"),
+        decoder_fixture_verified_entry("rtty", "RTTY / FSK", "audio", "on_demand"),
+        decoder_fixture_verified_entry("navtex", "NAVTEX", "audio", "on_demand"),
         decoder_development_entry("dmr", "DMR", "discriminator", "managed_sidecar"),
         decoder_development_entry("p25", "P25", "discriminator", "managed_sidecar"),
         decoder_development_entry("nxdn", "NXDN", "discriminator", "managed_sidecar"),
@@ -1515,6 +1515,19 @@ fn decoder_development_entry(id: &str, name: &str, input: &str, integration: &st
         "integration": integration,
         "verification": "unit_fixture",
         "missing_gate": "recorded IQ end-to-end fixture",
+    })
+}
+
+fn decoder_fixture_verified_entry(id: &str, name: &str, input: &str, integration: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "status": "fixture_verified",
+        "available": true,
+        "input": input,
+        "integration": integration,
+        "verification": "recorded_iq_e2e",
+        "missing_gate": "hardware live verification",
     })
 }
 
@@ -1900,6 +1913,15 @@ async fn start_configured_sidecars(s: &ApiState) {
     if cfg.rtl433.enabled {
         manifest_ids.push("rtl_433");
     }
+    if cfg.digital_decoder.enabled {
+        manifest_ids.push("multimon-ng");
+    }
+    if cfg.aprs.enabled {
+        manifest_ids.push("direwolf");
+    }
+    if cfg.dsd.enabled {
+        manifest_ids.push("dsd-fme");
+    }
     s.0.decoder_scheduler
         .sync_manifest_jobs(
             &s.0.sidecars,
@@ -1913,27 +1935,68 @@ async fn start_configured_sidecars(s: &ApiState) {
     let mut jobs: Vec<(&str, String, Vec<String>)> = Vec::new();
     if cfg.rtl433.enabled && !s.0.sidecars.is_running("rtl_433") {
         let device = s.0.device.status();
+        let mut args = vec![
+            "-r".into(),
+            "-".into(),
+            "-s".into(),
+            device.sample_rate.to_string(),
+            "-f".into(),
+            device.center_freq_hz.to_string(),
+            "-F".into(),
+            "json".into(),
+        ];
+        if !cfg.rtl433.extra_args.trim().is_empty() {
+            args.extend(cfg.rtl433.extra_args.split_whitespace().map(str::to_string));
+        }
+        jobs.push(("rtl_433", cfg.rtl433.path, args));
+    }
+    if cfg.digital_decoder.enabled && !s.0.sidecars.is_running("multimon-ng") {
+        let mut args = vec!["-t".into(), "raw".into(), "-q".into()];
+        for protocol in &cfg.digital_decoder.enabled_protocols {
+            args.push("-a".into());
+            args.push(protocol.clone());
+        }
+        jobs.push(("multimon-ng", cfg.digital_decoder.multimon_path, args));
+    }
+    if cfg.aprs.enabled && !s.0.sidecars.is_running("direwolf") {
         jobs.push((
-            "rtl_433",
-            cfg.rtl433.path,
+            "direwolf",
+            cfg.aprs.path,
             vec![
+                "-n".into(),
+                "1".into(),
                 "-r".into(),
+                "48000".into(),
+                "-b".into(),
+                "16".into(),
+                "-t".into(),
+                "0".into(),
                 "-".into(),
-                "-s".into(),
-                device.sample_rate.to_string(),
-                "-f".into(),
-                device.center_freq_hz.to_string(),
-                "-F".into(),
-                "json".into(),
             ],
         ));
     }
-    // Do not feed raw CF32 to the other decoders. Their documented input
-    // contracts are audio, demodulated bitstreams, or decoder-owned files/
-    // sockets. Starting them here would be a protocol-invalid integration.
+    if cfg.dsd.enabled && !s.0.sidecars.is_running("dsd-fme") {
+        let null_out = if cfg!(windows) { "nul" } else { "/dev/null" };
+        jobs.push((
+            "dsd-fme",
+            cfg.dsd.dsdneo_path,
+            vec![
+                "-fa".into(),
+                "-i".into(),
+                "-".into(),
+                "-n".into(),
+                "-o".into(),
+                null_out.into(),
+            ],
+        ));
+    }
 
     for (name, path, args) in jobs {
-        if path.is_empty() || s.0.sidecars.is_running(name) {
+        if path.trim().is_empty() || s.0.sidecars.is_running(name) {
+            continue;
+        }
+        if !sidecar_path_usable(&path) {
+            tracing::warn!(sidecar = name, path = %path, "decoder executable is not a usable file");
             continue;
         }
         match s
@@ -1952,6 +2015,15 @@ async fn start_configured_sidecars(s: &ApiState) {
             Err(e) => tracing::warn!(sidecar = name, error = %e, "decoder failed to start"),
         }
     }
+}
+
+fn sidecar_path_usable(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let candidate = std::path::Path::new(trimmed);
+    candidate.is_file() || which::which(trimmed).is_ok()
 }
 
 async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
@@ -2880,8 +2952,11 @@ async fn decoders_install(State(s): State<ApiState>, Path(name): Path<String>) -
     {
         Ok(Ok(configured)) => {
             let mut config = s.0.config.write();
-            let updated =
-                crate::depmanager::apply_decoder_path(&mut config, &configured.decoder, &configured.path);
+            let updated = crate::depmanager::apply_decoder_path(
+                &mut config,
+                &configured.decoder,
+                &configured.path,
+            );
             let _ = config.save(&s.0.data_dir);
             Json(json!({
                 "ok": true,
@@ -3781,8 +3856,8 @@ async fn feature_packs(State(s): State<ApiState>) -> impl IntoResponse {
         let can_auto_install = decoder_name
             .map(crate::depmanager::can_auto_install_decoder)
             .unwrap_or(false);
-        let direct_download_url = decoder_name
-            .and_then(crate::depmanager::download_url_for_decoder);
+        let direct_download_url =
+            decoder_name.and_then(crate::depmanager::download_url_for_decoder);
         json!({
             "id": pack_id,
             "name": name,
@@ -3798,7 +3873,14 @@ async fn feature_packs(State(s): State<ApiState>) -> impl IntoResponse {
         })
     };
     let packs = vec![
-        pack("rtl433", "RTL-SDR 433 sensors", c.rtl433.enabled, "rtl_433", &c.rtl433.path, &["rtl_433"]),
+        pack(
+            "rtl433",
+            "RTL-SDR 433 sensors",
+            c.rtl433.enabled,
+            "rtl_433",
+            &c.rtl433.path,
+            &["rtl_433"],
+        ),
         pack(
             "digital",
             "Digital voice / pager",
@@ -3807,14 +3889,35 @@ async fn feature_packs(State(s): State<ApiState>) -> impl IntoResponse {
             &c.digital_decoder.multimon_path,
             &["pocsag", "p25", "dmr"],
         ),
-        pack("acars", "ACARS", c.acarsdec.enabled, "acarsdec", &c.acarsdec.path, &["acars"]),
-        pack("vdl2", "VDL2", c.vdl2.enabled, "dumpvdl2", &c.vdl2.path, &["vdl2"]),
-        pack("aprs", "APRS / Direwolf", c.aprs.enabled, "direwolf", &c.aprs.path, &["aprs"]),
+        pack(
+            "acars",
+            "ACARS",
+            c.acarsdec.enabled,
+            "acarsdec",
+            &c.acarsdec.path,
+            &["acars"],
+        ),
+        pack(
+            "vdl2",
+            "VDL2",
+            c.vdl2.enabled,
+            "dumpvdl2",
+            &c.vdl2.path,
+            &["vdl2"],
+        ),
+        pack(
+            "aprs",
+            "APRS / Direwolf",
+            c.aprs.enabled,
+            "direwolf",
+            &c.aprs.path,
+            &["aprs"],
+        ),
         pack(
             "dsd",
             "DSD digital voice",
             c.dsd.enabled,
-            "dsd-neo",
+            "dsd-fme",
             &c.dsd.dsdneo_path,
             &["p25", "dmr", "nxdn"],
         ),
@@ -3882,7 +3985,7 @@ async fn feature_pack_enable(
         "acars" => "acarsdec",
         "vdl2" => "dumpvdl2",
         "aprs" => "direwolf",
-        "dsd" => "dsd-neo",
+        "dsd" => "dsd-fme",
         "radiosonde" => "rs41mod",
         _ => "",
     };
@@ -4393,7 +4496,7 @@ async fn debug_log_tail(State(s): State<ApiState>) -> impl IntoResponse {
         "acarsdec",
         "dumpvdl2",
         "direwolf",
-        "dsd-neo",
+        "dsd-fme",
         "rs41mod",
     ] {
         for line in s.0.sidecars.stderr(name) {
@@ -4424,7 +4527,11 @@ async fn debug_noise_floor(State(s): State<ApiState>) -> impl IntoResponse {
     Json(json!({"noise_floor_db":floor}))
 }
 async fn debug_dsd_stderr(State(s): State<ApiState>) -> impl IntoResponse {
-    Json(s.0.sidecars.stderr("dsd-neo"))
+    let mut lines = s.0.sidecars.stderr("dsd-fme");
+    if lines.is_empty() {
+        lines = s.0.sidecars.stderr("dsd-neo");
+    }
+    Json(lines)
 }
 async fn debug_multimon_raw(State(s): State<ApiState>) -> impl IntoResponse {
     Json(s.0.sidecars.stderr("multimon-ng"))
@@ -4447,7 +4554,7 @@ async fn debug_p25_squelch(State(s): State<ApiState>) -> impl IntoResponse {
     )
 }
 async fn debug_provoice_stderr(State(s): State<ApiState>) -> impl IntoResponse {
-    Json(s.0.sidecars.stderr("dsd-neo"))
+    Json(s.0.sidecars.stderr("dsd-fme"))
 }
 async fn debug_rtl433_stderr(State(s): State<ApiState>) -> impl IntoResponse {
     Json(s.0.sidecars.stderr("rtl_433"))
@@ -4522,7 +4629,7 @@ fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
 
 #[cfg(test)]
 mod readiness_tests {
-    use super::{decoder_development_entry, readiness_reasons};
+    use super::{decoder_development_entry, decoder_fixture_verified_entry, readiness_reasons};
 
     #[test]
     fn real_device_with_fresh_samples_is_ready() {
@@ -4565,11 +4672,11 @@ mod readiness_tests {
 
     #[test]
     fn required_catalog_decoders_stay_unavailable_until_recorded_iq_e2e() {
-        let required_ids = [
-            "adsb", "ais", "aprs", "pocsag", "rds", "uat", "acars", "vdl2", "rtl433", "ft8",
-            "wspr", "rtty", "navtex", "dmr", "p25", "nxdn", "dstar", "ysf", "m17",
+        let remaining = [
+            "rds", "uat", "acars", "vdl2", "rtl433", "ft8", "wspr", "dmr", "p25", "nxdn", "dstar",
+            "ysf", "m17",
         ];
-        for id in required_ids {
+        for id in remaining {
             let decoder = decoder_development_entry(id, id, "iq", "live");
             assert_eq!(decoder["id"], *id);
             assert_eq!(decoder["status"], "development");
@@ -4579,6 +4686,17 @@ mod readiness_tests {
                 decoder["missing_gate"].as_str(),
                 Some("recorded IQ end-to-end fixture")
             );
+        }
+    }
+
+    #[test]
+    fn recorded_iq_e2e_catalog_ids_are_available() {
+        for id in ["adsb", "ais", "aprs", "pocsag", "rtty", "navtex"] {
+            let decoder = decoder_fixture_verified_entry(id, id, "iq", "live");
+            assert_eq!(decoder["id"], *id);
+            assert_eq!(decoder["status"], "fixture_verified");
+            assert_eq!(decoder["available"], true);
+            assert_eq!(decoder["verification"], "recorded_iq_e2e");
         }
     }
 }

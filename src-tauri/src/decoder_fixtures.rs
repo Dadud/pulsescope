@@ -182,6 +182,63 @@ pub fn decode_aprs_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedMes
         .collect()
 }
 
+pub fn decode_pocsag_audio(samples: &[f32], sample_rate_hz: u32) -> Vec<DecodedMessage> {
+    let mut decoder =
+        crate::pocsag::PocsagDecoder::new(sample_rate_hz, crate::pocsag::PocsagBaud::Baud1200);
+    decoder
+        .push_audio(samples)
+        .into_iter()
+        .map(|m| DecodedMessage {
+            id: None,
+            frequency_hz: 929_612_500,
+            protocol: "pocsag".into(),
+            message_type: "pager".into(),
+            address: m.ric.to_string(),
+            function_code: m.function.to_string(),
+            content: m.text.clone(),
+            raw: m.text,
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
+pub fn decode_rtty_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedMessage> {
+    crate::demod::decode_rtty(samples, sample_rate_hz, 2125.0, 1955.0, 50.0)
+        .into_iter()
+        .map(|text| DecodedMessage {
+            id: None,
+            frequency_hz: 14_080_000,
+            protocol: "rtty".into(),
+            message_type: "text".into(),
+            address: String::new(),
+            function_code: String::new(),
+            content: text.clone(),
+            raw: text,
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
+pub fn decode_navtex_audio(samples: &[f32], sample_rate_hz: f32) -> Vec<DecodedMessage> {
+    crate::demod::decode_navtex(samples, sample_rate_hz)
+        .into_iter()
+        .map(|text| DecodedMessage {
+            id: None,
+            frequency_hz: 518_000,
+            protocol: "navtex".into(),
+            message_type: "text".into(),
+            address: String::new(),
+            function_code: String::new(),
+            content: text.clone(),
+            raw: text,
+            encryption: "none".into(),
+            timestamp_ms: crate::scanner::now_ms(),
+        })
+        .collect()
+}
+
 pub fn run_recorded_fixture(
     root: &Path,
     entry: &RecordedFixtureEntry,
@@ -210,6 +267,9 @@ pub fn run_recorded_fixture(
             let artifact: RecordedAudioArtifact = serde_json::from_str(&text)?;
             Ok(match entry.protocol.as_str() {
                 "aprs" => decode_aprs_audio(&artifact.samples, artifact.sample_rate_hz as f32),
+                "pocsag" => decode_pocsag_audio(&artifact.samples, artifact.sample_rate_hz),
+                "rtty" => decode_rtty_audio(&artifact.samples, artifact.sample_rate_hz as f32),
+                "navtex" => decode_navtex_audio(&artifact.samples, artifact.sample_rate_hz as f32),
                 _ => anyhow::bail!("unsupported audio protocol {}", entry.protocol),
             })
         }
@@ -312,6 +372,45 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
     )?;
     let aprs_sha = hex::encode(Sha256::digest(std::fs::read(&aprs_path)?));
 
+    let pocsag_rate = 24_000u32;
+    let pocsag_samples = crate::pocsag::synthesize_alphanumeric_audio(
+        pocsag_rate,
+        crate::pocsag::PocsagBaud::Baud1200,
+        42_002,
+        3,
+        "HELLO",
+    );
+    let pocsag_artifact = RecordedAudioArtifact {
+        sample_rate_hz: pocsag_rate,
+        samples: pocsag_samples,
+    };
+    let pocsag_path = root.join("pocsag-hello.audio.json");
+    std::fs::write(
+        &pocsag_path,
+        serde_json::to_string_pretty(&pocsag_artifact)?,
+    )?;
+    let pocsag_sha = hex::encode(Sha256::digest(std::fs::read(&pocsag_path)?));
+
+    let rtty_rate = 8_000.0;
+    let rtty_artifact = RecordedAudioArtifact {
+        sample_rate_hz: rtty_rate as u32,
+        samples: crate::demod::synthesize_rtty_hello(rtty_rate),
+    };
+    let rtty_path = root.join("rtty-hello.audio.json");
+    std::fs::write(&rtty_path, serde_json::to_string_pretty(&rtty_artifact)?)?;
+    let rtty_sha = hex::encode(Sha256::digest(std::fs::read(&rtty_path)?));
+
+    let navtex_artifact = RecordedAudioArtifact {
+        sample_rate_hz: rtty_rate as u32,
+        samples: crate::demod::synthesize_navtex_hello(rtty_rate),
+    };
+    let navtex_path = root.join("navtex-hello.audio.json");
+    std::fs::write(
+        &navtex_path,
+        serde_json::to_string_pretty(&navtex_artifact)?,
+    )?;
+    let navtex_sha = hex::encode(Sha256::digest(std::fs::read(&navtex_path)?));
+
     let manifest = RecordedFixtureManifest {
         schema: "pulsescope.recorded-iq-fixture".into(),
         version: 1,
@@ -360,6 +459,51 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                     info_contains: Some("Hello world".into()),
                 },
                 sha256: aprs_sha,
+            },
+            RecordedFixtureEntry {
+                id: "pocsag-hello".into(),
+                protocol: "pocsag".into(),
+                file: "pocsag-hello.audio.json".into(),
+                kind: "audio".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "pocsag".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: Some("42002".into()),
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: pocsag_sha,
+            },
+            RecordedFixtureEntry {
+                id: "rtty-hello".into(),
+                protocol: "rtty".into(),
+                file: "rtty-hello.audio.json".into(),
+                kind: "audio".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "rtty".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: None,
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: rtty_sha,
+            },
+            RecordedFixtureEntry {
+                id: "navtex-hello".into(),
+                protocol: "navtex".into(),
+                file: "navtex-hello.audio.json".into(),
+                kind: "audio".into(),
+                expected: FixtureExpectation {
+                    message_count_min: 1,
+                    protocol: "navtex".into(),
+                    icao: None,
+                    mmsi: None,
+                    source: None,
+                    info_contains: Some("HELLO".into()),
+                },
+                sha256: navtex_sha,
             },
         ],
     };

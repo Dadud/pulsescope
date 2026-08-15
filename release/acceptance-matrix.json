@@ -171,7 +171,7 @@
     },
     {
       "id": "decoder-adsb-ais-aprs", "name": "ADS-B, AIS and APRS", "group": "decoder",
-      "status": "development", "visibility": "normal", "required": true,
+      "status": "fixture_verified", "visibility": "normal", "required": true,
       "acceptance_gate": "Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads.",
       "evidence": [
         {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
@@ -193,13 +193,19 @@
       "id": "decoder-utility", "name": "rtl_433, ACARS, VDL2, paging and UAT", "group": "decoder",
       "status": "development", "visibility": "normal", "required": false,
       "acceptance_gate": "Per-protocol recorded-IQ fixtures and normalized events.",
-      "evidence": [{"type": "test", "ref": "native and sidecar unit tests; recorded-IQ gate remains open"}]
+      "evidence": [
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
+        {"type": "test", "ref": "native POCSAG/UAT unit tests; rtl_433/ACARS/VDL2 recorded-IQ gate remains open"}
+      ]
     },
     {
       "id": "decoder-hf", "name": "FT8, WSPR, JS8, CW, RTTY, NAVTEX, SSTV and WEFAX", "group": "decoder",
       "status": "development", "visibility": "normal", "required": false,
       "acceptance_gate": "Per-protocol recorded-IQ/audio fixtures and normalized events.",
-      "evidence": [{"type": "test", "ref": "native and sidecar integration scaffolding; recorded-IQ gate remains open"}]
+      "evidence": [
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
+        {"type": "test", "ref": "native RTTY/NAVTEX recorded-audio fixtures; FT8/WSPR/SSTV remain scan-profile or native"}
+      ]
     },
     {
       "id": "docker-appliance", "name": "Docker receiver appliance", "group": "packaging",

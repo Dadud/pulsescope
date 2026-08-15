@@ -24,6 +24,10 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const IO_TIMEOUT: Duration = Duration::from_millis(750);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESTARTS: u8 = 3;
+const IQ_SIDECARS: &[&str] = &["rtl_433", "dump978"];
+const AUDIO_SIDECARS: &[&str] = &["multimon-ng", "direwolf", "dsd-fme"];
+const MULTIMON_RATE_HZ: u32 = 22_050;
+const AUDIO_SIDECAR_RATE_HZ: u32 = 48_000;
 
 #[derive(Clone)]
 struct SpawnRecipe {
@@ -52,6 +56,44 @@ pub fn encode_u8_iq(samples: &[rustfft::num_complex::Complex<f32>]) -> Vec<u8> {
         bytes.extend_from_slice(&[i, q]);
     }
     bytes
+}
+
+pub fn encode_s16le_audio(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+pub fn resample_audio(samples: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
+    if samples.is_empty() || from_hz == 0 || to_hz == 0 {
+        return Vec::new();
+    }
+    if from_hz == to_hz {
+        return samples.to_vec();
+    }
+    let ratio = from_hz as f64 / to_hz as f64;
+    let out_len = ((samples.len() as f64) / ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for index in 0..out_len {
+        let src = index as f64 * ratio;
+        let left = src.floor() as usize;
+        let frac = (src - left as f64) as f32;
+        let a = samples[left];
+        let b = samples.get(left + 1).copied().unwrap_or(a);
+        out.push(a + (b - a) * frac);
+    }
+    out
+}
+
+pub fn consumes_iq(name: &str) -> bool {
+    IQ_SIDECARS.contains(&name)
+}
+
+pub fn consumes_audio(name: &str) -> bool {
+    AUDIO_SIDECARS.contains(&name)
 }
 
 impl Default for SidecarRegistry {
@@ -268,41 +310,59 @@ impl SidecarRegistry {
     }
 
     pub async fn feed_iq(&self, samples: &[rustfft::num_complex::Complex<f32>]) {
+        let bytes = encode_u8_iq(samples);
+        self.feed_stdin(IQ_SIDECARS, &bytes, samples.len() as u64)
+            .await;
+    }
+
+    pub async fn feed_audio(&self, samples: &[f32], sample_rate_hz: u32) {
+        if samples.is_empty() {
+            return;
+        }
+        let audio_48k = resample_audio(samples, sample_rate_hz, AUDIO_SIDECAR_RATE_HZ);
+        let audio_22k = resample_audio(samples, sample_rate_hz, MULTIMON_RATE_HZ);
+        let bytes_48k = encode_s16le_audio(&audio_48k);
+        let bytes_22k = encode_s16le_audio(&audio_22k);
+        self.feed_stdin(&["direwolf", "dsd-fme"], &bytes_48k, audio_48k.len() as u64)
+            .await;
+        self.feed_stdin(&["multimon-ng"], &bytes_22k, audio_22k.len() as u64)
+            .await;
+    }
+
+    async fn feed_stdin(&self, names: &[&str], bytes: &[u8], sample_count: u64) {
         use tokio::io::AsyncWriteExt;
-        let handles: Vec<_> = self
+        let handles: Vec<(String, _)> = self
             .inputs
             .lock()
             .await
             .iter()
-            .filter(|(name, _)| name.as_str() == "rtl_433")
-            .map(|(_, handle)| handle.clone())
+            .filter(|(name, _)| names.contains(&name.as_str()))
+            .map(|(name, handle)| (name.clone(), handle.clone()))
             .collect();
         if handles.is_empty() {
             return;
         }
-        let bytes = encode_u8_iq(samples);
-        if let Some((sample_count, byte_count)) = self.input_stats.lock().get_mut("rtl_433") {
-            *sample_count += samples.len() as u64;
-            *byte_count += bytes.len() as u64;
-        }
-        for handle in handles {
+        for (name, handle) in handles {
+            if let Some((count, byte_count)) = self.input_stats.lock().get_mut(&name) {
+                *count += sample_count;
+                *byte_count += bytes.len() as u64;
+            }
             let mut stdin = handle.lock().await;
-            match tokio::time::timeout(IO_TIMEOUT, stdin.write_all(&bytes)).await {
+            match tokio::time::timeout(IO_TIMEOUT, stdin.write_all(bytes)).await {
                 Ok(Ok(())) => {
                     if let Err(error) = stdin.flush().await {
-                        tracing::debug!(error = %error, "sidecar IQ input closed");
+                        tracing::debug!(sidecar = %name, error = %error, "sidecar stdin closed");
                     }
                 }
                 Ok(Err(error)) => {
                     self.failures
                         .lock()
-                        .insert("rtl_433".into(), format!("stdin closed: {error}"));
+                        .insert(name, format!("stdin closed: {error}"));
                 }
                 Err(error) => {
-                    self.failures.lock().insert(
-                        "rtl_433".into(),
-                        format!("stdin backpressure timeout: {error}"),
-                    );
+                    self.failures
+                        .lock()
+                        .insert(name, format!("stdin backpressure timeout: {error}"));
                 }
             }
         }
@@ -606,6 +666,20 @@ mod tests {
             super::encode_u8_iq(&[Complex::new(-1.0, 1.0), Complex::new(0.0, 0.0)]),
             vec![0, 255, 128, 128]
         );
+    }
+
+    #[test]
+    fn encodes_s16le_audio_and_resamples() {
+        assert_eq!(
+            super::encode_s16le_audio(&[1.0, -1.0]),
+            vec![0xff, 0x7f, 0x01, 0x80]
+        );
+        let resampled = super::resample_audio(&[0.0, 1.0, 0.0], 3, 6);
+        assert!(resampled.len() >= 5);
+        assert!(super::consumes_iq("rtl_433"));
+        assert!(super::consumes_audio("multimon-ng"));
+        assert!(super::consumes_audio("direwolf"));
+        assert!(super::consumes_audio("dsd-fme"));
     }
 
     #[test]

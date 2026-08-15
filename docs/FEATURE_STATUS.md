@@ -62,7 +62,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Manifest decoder scheduler | Beta | normal | yes | Checksummed manifests, resource limits, typed parameters, health/restart policy, and normalized events. |
-| ADS-B, AIS and APRS | Beta | normal | yes | Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads. |
+| ADS-B, AIS and APRS | Fixture verified | normal | yes | Recorded-IQ end-to-end fixtures publish normalized events with known expected payloads. |
 | Broadcast RDS | Beta | normal | yes | RDS recovered from the same stereo multiplex fixture and verified live on broadcast FM. |
 | DMR, P25, NXDN, D-Star, YSF and M17 | Beta | normal | yes | Continuous discriminator feed and per-mode recorded-IQ fixtures; encrypted calls only labeled. |
 | rtl_433, ACARS, VDL2, paging and UAT | Beta | normal | no | Per-protocol recorded-IQ fixtures and normalized events. |

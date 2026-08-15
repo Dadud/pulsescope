@@ -46,6 +46,51 @@
         "info_contains": "Hello world"
       },
       "sha256": "d954aa848389c8c5e6b248a1691b9a0c739d455cc1d49d97a88e0fb0cf8c71ce"
+    },
+    {
+      "id": "pocsag-hello",
+      "protocol": "pocsag",
+      "file": "pocsag-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "pocsag",
+        "icao": null,
+        "mmsi": null,
+        "source": "42002",
+        "info_contains": "HELLO"
+      },
+      "sha256": "a25e58faee7de7b5fca7159c94ede2165934f680843e315ddc6d09aa23bfb97b"
+    },
+    {
+      "id": "rtty-hello",
+      "protocol": "rtty",
+      "file": "rtty-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "rtty",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "34056bc9cbaecddada0010d6d9fcf326d14ef413363559b75767f89f2b1393e4"
+    },
+    {
+      "id": "navtex-hello",
+      "protocol": "navtex",
+      "file": "navtex-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "navtex",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "d0e7a258a298bdcd8ed15559cbd2881efae04aa36009b6e47dd4b0feef771cc5"
     }
   ]
 }

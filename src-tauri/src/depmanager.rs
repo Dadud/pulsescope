@@ -255,6 +255,17 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
         download_url: None,
         extract_subdir: None,
     },
+    DecoderManifest {
+        name: "rs41mod",
+        exe_name: "rs41mod.exe",
+        description: "Vaisala RS41 radiosonde telemetry decoder",
+        github: Some(("rs1729", "RS")),
+        search_dirs: &["", "bin", "rs41mod"],
+        input_type: InputType::StdinAudioS16,
+        protocol: "rs41",
+        download_url: None,
+        extract_subdir: None,
+    },
 ];
 
 /// Distro package names and PATH aliases for decoders commonly installed outside PulseScope.
@@ -264,10 +275,15 @@ const DECODER_SYSTEM_META: &[(&str, &[&str], &[&str])] = &[
     ("direwolf", &["direwolf"], &["direwolf"]),
     ("acarsdec", &["acarsdec"], &["acarsdec"]),
     ("dumpvdl2", &["dumpvdl2"], &["dumpvdl2"]),
-    ("dsd-fme", &["dsd-fme"], &["dsd-fme", "dsd"]),
-    ("dump978", &["dump978-fa", "dump978"], &["dump978-fa", "dump978"]),
+    ("dsd-fme", &["dsd-fme"], &["dsd-fme", "dsd", "dsd-neo"]),
+    (
+        "dump978",
+        &["dump978-fa", "dump978"],
+        &["dump978-fa", "dump978"],
+    ),
     ("jt9", &["wsjtx"], &["jt9", "jt9-64", "wsjtx"]),
     ("wsprd", &["wsjtx"], &["wsprd", "wsprd-64"]),
+    ("rs41mod", &["rs41mod"], &["rs41mod"]),
 ];
 
 fn system_packages(name: &str) -> &'static [&'static str] {
@@ -470,7 +486,8 @@ const ADAPTATION_TEMPLATES: &[AdaptationTemplate] = &[
         readiness: "on_demand",
         native_rust: false,
         depmanager_name: Some("dsd-fme"),
-        notes: "Same dsd-fme batch path as DMR/NXDN digital voice.",
+        notes:
+            "Same dsd-fme batch path as DMR/NXDN digital voice. Live stdin sidecar when enabled.",
     },
     AdaptationTemplate {
         catalog_id: "nxdn",
@@ -516,10 +533,7 @@ pub fn adaptation_report(data_dir: &Path) -> Vec<DecoderAdaptation> {
     ADAPTATION_TEMPLATES
         .iter()
         .map(|template| {
-            let packages = template
-                .depmanager_name
-                .map(system_packages)
-                .unwrap_or(&[]);
+            let packages = template.depmanager_name.map(system_packages).unwrap_or(&[]);
             let dep_status = template
                 .depmanager_name
                 .and_then(|name| scan.iter().find(|entry| entry.name == name));
@@ -562,13 +576,14 @@ pub fn discover_system_binary(name: &str) -> Option<PathBuf> {
 }
 
 /// Maps depmanager decoder names to `feature_packs` ids and config path fields.
-const FEATURE_PACK_BINDINGS: [(&str, &str); 6] = [
+const FEATURE_PACK_BINDINGS: [(&str, &str); 7] = [
     ("rtl_433", "rtl433"),
     ("multimon-ng", "digital"),
     ("acarsdec", "acars"),
     ("dumpvdl2", "vdl2"),
     ("direwolf", "aprs"),
     ("dsd-fme", "dsd"),
+    ("rs41mod", "radiosonde"),
 ];
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -599,8 +614,7 @@ pub fn manifest_for_decoder(name: &str) -> Option<&'static DecoderManifest> {
 }
 
 pub fn can_auto_install_decoder(name: &str) -> bool {
-    manifest_for_decoder(name)
-        .is_some_and(|decoder| effective_download_url(decoder).is_some())
+    manifest_for_decoder(name).is_some_and(|decoder| effective_download_url(decoder).is_some())
 }
 
 pub fn download_url_for_decoder(name: &str) -> Option<&'static str> {
@@ -757,10 +771,7 @@ fn find_decoder(
     // 1. Data dir (downloaded decoders)
     if let Some(subdir) = decoder.extract_subdir {
         for exe_name in &candidates {
-            let exe = data_dir
-                .join("decoders")
-                .join(subdir)
-                .join(exe_name);
+            let exe = data_dir.join("decoders").join(subdir).join(exe_name);
             if file_is_executable(&exe) {
                 return (true, Some(exe), "pulsescope/decoders".into());
             }
@@ -852,6 +863,7 @@ fn configured_decoder_path<'a>(config: &'a Config, decoder_name: &str) -> Option
         "dumpvdl2" => Some(&config.vdl2.path),
         "dsd-fme" | "dsd-neo" => Some(&config.dsd.dsdneo_path),
         "dump978" | "dump978-fa" => Some(&config.dump978.path),
+        "rs41mod" => Some(&config.radiosonde.path),
         _ => None,
     }
 }
@@ -887,6 +899,7 @@ pub fn apply_decoder_path(config: &mut Config, decoder_name: &str, path: &str) -
         "dumpvdl2" => update_path(&mut config.vdl2.path, path),
         "dsd-fme" | "dsd-neo" => update_path(&mut config.dsd.dsdneo_path, path),
         "dump978" | "dump978-fa" => update_path(&mut config.dump978.path, path),
+        "rs41mod" => update_path(&mut config.radiosonde.path, path),
         _ => false,
     }
 }
@@ -900,7 +913,11 @@ fn update_path(current: &mut String, path: &str) -> bool {
 }
 
 /// Download, install when possible, and configure the matching config path.
-pub fn install_decoder(name: &str, data_dir: &Path, config: &mut Config) -> Result<ConfiguredDecoder, String> {
+pub fn install_decoder(
+    name: &str,
+    data_dir: &Path,
+    config: &mut Config,
+) -> Result<ConfiguredDecoder, String> {
     let path = if let Some(decoder) = KNOWN_DECODERS.iter().find(|d| d.name == name) {
         if effective_download_url(decoder).is_some() {
             download_decoder(name, data_dir)?
@@ -1093,10 +1110,8 @@ mod tests {
 
     #[test]
     fn find_decoder_returns_not_found_when_missing() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "pulsescope-depmanager-test-{}",
-            std::process::id()
-        ));
+        let data_dir =
+            std::env::temp_dir().join(format!("pulsescope-depmanager-test-{}", std::process::id()));
         std::fs::create_dir_all(&data_dir).unwrap();
         let decoder = manifest_for_decoder("rtl_433").expect("rtl_433 manifest");
         let pothos_bin = data_dir.join("empty-pothos-bin");
@@ -1117,7 +1132,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
         let decoder = manifest_for_decoder("multimon-ng").expect("multimon-ng manifest");
         let subdir = decoder.extract_subdir.expect("multimon extract subdir");
-        let exe_path = data_dir.join("decoders").join(subdir).join(decoder.exe_name);
+        let exe_path = data_dir
+            .join("decoders")
+            .join(subdir)
+            .join(decoder.exe_name);
         touch_executable(&exe_path);
 
         let mut config = Config::default();
@@ -1129,7 +1147,10 @@ mod tests {
             "expected multimon-ng to be configured: {:?}",
             results
         );
-        assert_eq!(config.digital_decoder.multimon_path, exe_path.to_string_lossy());
+        assert_eq!(
+            config.digital_decoder.multimon_path,
+            exe_path.to_string_lossy()
+        );
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -1155,7 +1176,10 @@ mod tests {
     #[test]
     fn adaptation_report_covers_catalog_ids() {
         let report = adaptation_report(Path::new("/tmp/pulsescope-adaptation-test"));
-        let ids: Vec<_> = report.iter().map(|entry| entry.catalog_id.as_str()).collect();
+        let ids: Vec<_> = report
+            .iter()
+            .map(|entry| entry.catalog_id.as_str())
+            .collect();
         for required in [
             "adsb", "ais", "aprs", "pocsag", "rds", "uat", "acars", "vdl2", "rtl433", "ft8",
             "wspr", "rtty", "navtex", "dmr", "p25", "nxdn", "dstar", "ysf", "m17",
@@ -1173,13 +1197,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
         let decoder = manifest_for_decoder("multimon-ng").expect("multimon-ng manifest");
         let subdir = decoder.extract_subdir.expect("multimon extract subdir");
-        let exe_path = data_dir.join("decoders").join(subdir).join(decoder.exe_name);
+        let exe_path = data_dir
+            .join("decoders")
+            .join(subdir)
+            .join(decoder.exe_name);
         touch_executable(&exe_path);
 
         let mut config = Config::default();
         assert!(!Path::new(&config.digital_decoder.multimon_path).is_file());
         assert!(bootstrap_discovered_decoder_paths(&mut config, &data_dir));
-        assert_eq!(config.digital_decoder.multimon_path, exe_path.to_string_lossy());
+        assert_eq!(
+            config.digital_decoder.multimon_path,
+            exe_path.to_string_lossy()
+        );
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }

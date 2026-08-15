@@ -237,7 +237,10 @@ async fn decode_wspr_period(
         tracing::warn!(%error, "failed to create WSPR WAV period");
         return;
     }
-    let output = tokio::process::Command::new(executable).arg(&path).output().await;
+    let output = tokio::process::Command::new(executable)
+        .arg(&path)
+        .output()
+        .await;
     let _ = fs::remove_file(&path);
     match output {
         Ok(output) if output.status.success() => {
@@ -245,7 +248,14 @@ async fn decode_wspr_period(
                 let line = line.trim();
                 let fields: Vec<_> = line.split_whitespace().collect();
                 if fields.len() >= 7 && fields.iter().any(|field| field.contains('<')) {
-                    publish(db, events, frequency_hz, "wspr", "message", line.to_string());
+                    publish(
+                        db,
+                        events,
+                        frequency_hz,
+                        "wspr",
+                        "message",
+                        line.to_string(),
+                    );
                 }
             }
         }

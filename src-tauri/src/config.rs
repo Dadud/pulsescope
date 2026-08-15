@@ -645,7 +645,7 @@ impl Default for DsdConfig {
         Self {
             enabled: false,
             mode: "auto".into(),
-            dsdneo_path: "dsd-neo".into(),
+            dsdneo_path: "dsd-fme".into(),
         }
     }
 }

@@ -1281,6 +1281,95 @@ pub fn detect_dcs(samples: &[f32], sample_rate: f32) -> Option<String> {
     }
 }
 
+fn append_fsk_symbol(
+    samples: &mut Vec<f32>,
+    bit: bool,
+    count: usize,
+    mark: f32,
+    space: f32,
+    sample_rate: f32,
+    phase: &mut f32,
+) {
+    let frequency = if bit { mark } else { space };
+    let step = TAU * frequency / sample_rate;
+    for _ in 0..count {
+        samples.push(phase.sin() * 0.7);
+        *phase = (*phase + step).rem_euclid(TAU);
+    }
+}
+
+/// ITA-2 "HELLO" at 50 baud for recorded-audio fixtures.
+pub fn synthesize_rtty_hello(sample_rate: f32) -> Vec<f32> {
+    let baud = 50.0;
+    let symbol = (sample_rate / baud) as usize;
+    let (mark, space) = (2125.0, 1955.0);
+    let mut samples = Vec::new();
+    let mut phase = 0.0;
+    append_fsk_symbol(
+        &mut samples,
+        true,
+        symbol * 3,
+        mark,
+        space,
+        sample_rate,
+        &mut phase,
+    );
+    for code in [0x14u8, 0x01, 0x12, 0x12, 0x18] {
+        append_fsk_symbol(
+            &mut samples,
+            false,
+            symbol,
+            mark,
+            space,
+            sample_rate,
+            &mut phase,
+        );
+        for bit in 0..5 {
+            append_fsk_symbol(
+                &mut samples,
+                code & (1 << bit) != 0,
+                symbol,
+                mark,
+                space,
+                sample_rate,
+                &mut phase,
+            );
+        }
+        append_fsk_symbol(
+            &mut samples,
+            true,
+            symbol * 2,
+            mark,
+            space,
+            sample_rate,
+            &mut phase,
+        );
+    }
+    samples
+}
+
+/// CCIR-476 "HELLO" NAVTEX audio for recorded fixtures.
+pub fn synthesize_navtex_hello(sample_rate: f32) -> Vec<f32> {
+    let symbol = (sample_rate / 100.0) as usize;
+    let words = [0x69u8, 0x56, 0x65, 0x65, 0x71];
+    let mut samples = Vec::new();
+    let mut phase = 0.0;
+    for &word in words.iter().chain(words.iter()) {
+        for bit in (0..7).rev() {
+            append_fsk_symbol(
+                &mut samples,
+                word & (1 << bit) != 0,
+                symbol,
+                1785.0,
+                1615.0,
+                sample_rate,
+                &mut phase,
+            );
+        }
+    }
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
