@@ -315,6 +315,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/sidecars/status", get(sidecars_status))
         .route("/sidecars/:name/stderr", get(sidecar_stderr))
         .route("/decoders/scan", get(decoders_scan))
+        .route("/decoders/configure", post(decoders_configure))
+        .route("/decoders/install/:name/guide", get(decoders_install_guide))
         .route("/decoders/install/:name", post(decoders_install))
         .route("/sidecars/start_all", post(sidecars_start_all))
         .route("/receiver_location", get(rx_location).put(rx_location_put))
@@ -2807,15 +2809,50 @@ async fn decoders_scan(State(s): State<ApiState>) -> Json<Value> {
     Json(serde_json::to_value(crate::depmanager::scan_all(&s.0.data_dir)).unwrap())
 }
 
+async fn decoders_configure(State(s): State<ApiState>) -> Json<Value> {
+    let data_dir = s.0.data_dir.clone();
+    let configured = {
+        let mut config = s.0.config.write();
+        let results = crate::depmanager::configure_decoder_paths(&mut config, &data_dir);
+        let _ = config.save(&data_dir);
+        results
+    };
+    Json(json!({"ok": true, "configured": configured}))
+}
+
+async fn decoders_install_guide(Path(name): Path<String>) -> Json<Value> {
+    let guide = crate::depmanager::install_instructions(&name);
+    Json(json!({
+        "ok": guide.is_some(),
+        "name": name,
+        "guide": guide,
+        "can_auto_install": crate::depmanager::can_auto_install_decoder(&name),
+        "direct_download_url": crate::depmanager::download_url_for_decoder(&name),
+    }))
+}
+
 async fn decoders_install(State(s): State<ApiState>, Path(name): Path<String>) -> Json<Value> {
     let data_dir = s.0.data_dir.clone();
     let install_name = name.clone();
+    let mut scratch = s.0.config.read().clone();
     match tokio::task::spawn_blocking(move || {
-        crate::depmanager::download_decoder(&install_name, &data_dir)
+        crate::depmanager::install_decoder(&install_name, &data_dir, &mut scratch)
     })
     .await
     {
-        Ok(Ok(path)) => Json(json!({"ok": true, "name": name, "path": path})),
+        Ok(Ok(configured)) => {
+            let mut config = s.0.config.write();
+            let updated =
+                crate::depmanager::apply_decoder_path(&mut config, &configured.decoder, &configured.path);
+            let _ = config.save(&s.0.data_dir);
+            Json(json!({
+                "ok": true,
+                "name": name,
+                "path": configured.path,
+                "updated": updated,
+                "feature_pack_id": configured.feature_pack_id,
+            }))
+        }
         Ok(Err(error)) => Json(json!({"ok": false, "name": name, "error": error})),
         Err(error) => Json(
             json!({"ok": false, "name": name, "error": format!("installer task failed: {error}")}),
@@ -3695,15 +3732,62 @@ async fn sidecar_stderr(State(s): State<ApiState>, Path(name): Path<String>) -> 
 
 async fn feature_packs(State(s): State<ApiState>) -> impl IntoResponse {
     let c = s.0.config.read();
-    let available = |path: &str| !path.trim().is_empty() && std::path::Path::new(path).is_file();
+    let pack = |pack_id: &str,
+                name: &str,
+                enabled: bool,
+                sidecar: &str,
+                path: &str,
+                protocols: &[&str]| {
+        let available = !path.trim().is_empty() && std::path::Path::new(path).is_file();
+        let decoder_name = crate::depmanager::decoder_for_pack(pack_id);
+        let can_auto_install = decoder_name
+            .map(crate::depmanager::can_auto_install_decoder)
+            .unwrap_or(false);
+        let direct_download_url = decoder_name
+            .and_then(crate::depmanager::download_url_for_decoder);
+        json!({
+            "id": pack_id,
+            "name": name,
+            "enabled": enabled,
+            "running": s.0.sidecars.is_running(sidecar),
+            "path": path,
+            "available": available,
+            "availability_reason": if available { "executable found" } else { "executable missing" },
+            "protocols": protocols,
+            "decoder_name": decoder_name,
+            "can_auto_install": can_auto_install,
+            "direct_download_url": direct_download_url,
+        })
+    };
     let packs = vec![
-        json!({"id":"rtl433","name":"RTL-SDR 433 sensors","enabled":c.rtl433.enabled,"running":s.0.sidecars.is_running("rtl_433"),"path":c.rtl433.path,"available":available(&c.rtl433.path),"availability_reason":if available(&c.rtl433.path){"executable found"}else{"executable missing"},"protocols":["rtl_433"]}),
-        json!({"id":"digital","name":"Digital voice / pager","enabled":c.digital_decoder.enabled,"running":s.0.sidecars.is_running("multimon-ng"),"path":c.digital_decoder.multimon_path,"available":available(&c.digital_decoder.multimon_path),"availability_reason":if available(&c.digital_decoder.multimon_path){"executable found"}else{"executable missing"},"protocols":["pocsag","p25","dmr"]}),
-        json!({"id":"acars","name":"ACARS","enabled":c.acarsdec.enabled,"running":s.0.sidecars.is_running("acarsdec"),"path":c.acarsdec.path,"available":available(&c.acarsdec.path),"availability_reason":if available(&c.acarsdec.path){"executable found"}else{"executable missing"},"protocols":["acars"]}),
-        json!({"id":"vdl2","name":"VDL2","enabled":c.vdl2.enabled,"running":s.0.sidecars.is_running("dumpvdl2"),"path":c.vdl2.path,"available":available(&c.vdl2.path),"availability_reason":if available(&c.vdl2.path){"executable found"}else{"executable missing"},"protocols":["vdl2"]}),
-        json!({"id":"aprs","name":"APRS / Direwolf","enabled":c.aprs.enabled,"running":s.0.sidecars.is_running("direwolf"),"path":c.aprs.path,"available":available(&c.aprs.path),"availability_reason":if available(&c.aprs.path){"executable found"}else{"executable missing"},"protocols":["aprs"]}),
-        json!({"id":"dsd","name":"DSD digital voice","enabled":c.dsd.enabled,"running":s.0.sidecars.is_running("dsd-neo"),"path":c.dsd.dsdneo_path,"available":available(&c.dsd.dsdneo_path),"availability_reason":if available(&c.dsd.dsdneo_path){"executable found"}else{"executable missing"},"protocols":["p25","dmr","nxdn"]}),
-        json!({"id":"radiosonde","name":"RS41 radiosonde","enabled":c.radiosonde.enabled,"running":s.0.sidecars.is_running("rs41mod"),"path":c.radiosonde.path,"available":available(&c.radiosonde.path),"availability_reason":if available(&c.radiosonde.path){"executable found"}else{"executable missing"},"protocols":["rs41"]}),
+        pack("rtl433", "RTL-SDR 433 sensors", c.rtl433.enabled, "rtl_433", &c.rtl433.path, &["rtl_433"]),
+        pack(
+            "digital",
+            "Digital voice / pager",
+            c.digital_decoder.enabled,
+            "multimon-ng",
+            &c.digital_decoder.multimon_path,
+            &["pocsag", "p25", "dmr"],
+        ),
+        pack("acars", "ACARS", c.acarsdec.enabled, "acarsdec", &c.acarsdec.path, &["acars"]),
+        pack("vdl2", "VDL2", c.vdl2.enabled, "dumpvdl2", &c.vdl2.path, &["vdl2"]),
+        pack("aprs", "APRS / Direwolf", c.aprs.enabled, "direwolf", &c.aprs.path, &["aprs"]),
+        pack(
+            "dsd",
+            "DSD digital voice",
+            c.dsd.enabled,
+            "dsd-neo",
+            &c.dsd.dsdneo_path,
+            &["p25", "dmr", "nxdn"],
+        ),
+        pack(
+            "radiosonde",
+            "RS41 radiosonde",
+            c.radiosonde.enabled,
+            "rs41mod",
+            &c.radiosonde.path,
+            &["rs41"],
+        ),
     ];
     Json(json!({"groups": packs, "count": packs.len()}))
 }

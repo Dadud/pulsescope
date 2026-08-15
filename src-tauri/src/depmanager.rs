@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::Config;
+
 /// A decoder tool descriptor.
 #[derive(Clone, Debug)]
 pub struct DecoderManifest {
@@ -232,7 +234,73 @@ pub const KNOWN_DECODERS: &[DecoderManifest] = &[
     },
 ];
 
-/// Result of probing for a decoder.
+/// Maps depmanager decoder names to `feature_packs` ids and config path fields.
+const FEATURE_PACK_BINDINGS: [(&str, &str); 6] = [
+    ("rtl_433", "rtl433"),
+    ("multimon-ng", "digital"),
+    ("acarsdec", "acars"),
+    ("dumpvdl2", "vdl2"),
+    ("direwolf", "aprs"),
+    ("dsd-fme", "dsd"),
+];
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ConfiguredDecoder {
+    pub decoder: String,
+    pub feature_pack_id: Option<String>,
+    pub path: String,
+    pub updated: bool,
+}
+
+fn feature_pack_for_decoder(name: &str) -> Option<&'static str> {
+    FEATURE_PACK_BINDINGS
+        .iter()
+        .find(|(decoder, _)| *decoder == name)
+        .map(|(_, pack)| *pack)
+}
+
+/// Feature-pack id for a depmanager decoder name (inverse of `feature_pack_for_decoder`).
+pub fn decoder_for_pack(pack_id: &str) -> Option<&'static str> {
+    FEATURE_PACK_BINDINGS
+        .iter()
+        .find(|(_, pack)| *pack == pack_id)
+        .map(|(decoder, _)| *decoder)
+}
+
+pub fn manifest_for_decoder(name: &str) -> Option<&'static DecoderManifest> {
+    KNOWN_DECODERS.iter().find(|decoder| decoder.name == name)
+}
+
+pub fn can_auto_install_decoder(name: &str) -> bool {
+    manifest_for_decoder(name)
+        .is_some_and(|decoder| decoder.download_url.is_some())
+}
+
+pub fn download_url_for_decoder(name: &str) -> Option<&'static str> {
+    manifest_for_decoder(name).and_then(|decoder| decoder.download_url)
+}
+
+fn executable_candidates(exe_name: &str) -> Vec<String> {
+    let base = exe_name.trim_end_matches(".exe");
+    if cfg!(windows) {
+        vec![format!("{}.exe", base), base.to_string()]
+    } else {
+        vec![base.to_string(), format!("{}.exe", base)]
+    }
+}
+
+fn file_is_executable(path: &Path) -> bool {
+    path.is_file() && {
+        if cfg!(windows) {
+            true
+        } else {
+            use std::os::unix::fs::PermissionsExt;
+            path.metadata()
+                .map(|meta| meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(true)
+        }
+    }
+}
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct DecoderStatus {
     pub name: String,
@@ -244,6 +312,10 @@ pub struct DecoderStatus {
     pub input_type: String,
     pub github_url: Option<String>,
     pub install_url: Option<String>,
+    /// PulseScope can download and extract this decoder into the data directory.
+    pub can_auto_install: bool,
+    /// Feature-pack id when this decoder backs a normal UI pack.
+    pub feature_pack_id: Option<String>,
 }
 
 /// Scan all known decoder search locations and return status for each.
@@ -277,9 +349,16 @@ pub fn scan_all(data_dir: &Path) -> Vec<DecoderStatus> {
                 github_url: decoder
                     .github
                     .map(|(owner, repo)| format!("https://github.com/{owner}/{repo}")),
-                install_url: decoder.github.map(|(owner, repo)| {
-                    format!("https://github.com/{owner}/{repo}/releases/latest")
-                }),
+                install_url: decoder
+                    .download_url
+                    .map(str::to_string)
+                    .or_else(|| {
+                        decoder.github.map(|(owner, repo)| {
+                            format!("https://github.com/{owner}/{repo}/releases/latest")
+                        })
+                    }),
+                can_auto_install: decoder.download_url.is_some(),
+                feature_pack_id: feature_pack_for_decoder(decoder.name).map(str::to_string),
             }
         })
         .collect()
@@ -290,14 +369,17 @@ fn find_decoder(
     data_dir: &Path,
     pothos_bin: &Path,
 ) -> (bool, Option<PathBuf>, String) {
+    let candidates = executable_candidates(decoder.exe_name);
     // 1. Data dir (downloaded decoders)
     if let Some(subdir) = decoder.extract_subdir {
-        let exe = data_dir
-            .join("decoders")
-            .join(subdir)
-            .join(decoder.exe_name);
-        if exe.exists() {
-            return (true, Some(exe), "pulsescope/decoders".into());
+        for exe_name in &candidates {
+            let exe = data_dir
+                .join("decoders")
+                .join(subdir)
+                .join(exe_name);
+            if file_is_executable(&exe) {
+                return (true, Some(exe), "pulsescope/decoders".into());
+            }
         }
     }
     for subdir in decoder.search_dirs {
@@ -306,16 +388,20 @@ fn find_decoder(
         } else {
             data_dir.join("decoders").join(subdir)
         };
-        let exe = dir.join(decoder.exe_name);
-        if exe.exists() {
-            return (true, Some(exe), "pulsescope/decoders".into());
+        for exe_name in &candidates {
+            let exe = dir.join(exe_name);
+            if file_is_executable(&exe) {
+                return (true, Some(exe), "pulsescope/decoders".into());
+            }
         }
     }
 
     // 2. PothosSDR / SoapySDR bin directory (SOAPY_SDR_ROOT or platform default)
-    let exe = pothos_bin.join(decoder.exe_name);
-    if exe.exists() {
-        return (true, Some(exe), "SoapySDR bin".into());
+    for exe_name in &candidates {
+        let exe = pothos_bin.join(exe_name);
+        if file_is_executable(&exe) {
+            return (true, Some(exe), "SoapySDR bin".into());
+        }
     }
 
     // 3. Standard *nix system binaries, plus PATH.
@@ -325,30 +411,119 @@ fn find_decoder(
         &["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
     };
     for dir in standard_paths {
-        let exe = std::path::PathBuf::from(dir).join(decoder.exe_name);
-        if exe.exists() {
-            return (true, Some(exe), format!("{dir}/"));
+        for exe_name in &candidates {
+            let exe = std::path::PathBuf::from(dir).join(exe_name);
+            if file_is_executable(&exe) {
+                return (true, Some(exe), format!("{dir}/"));
+            }
         }
     }
 
     // 4. PATH lookup via `where`/`which`.
-    let bare = decoder.exe_name.trim_end_matches(".exe");
-    if let Ok(output) = Command::new(if cfg!(windows) { "where" } else { "which" })
-        .arg(bare)
-        .output()
-    {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout);
-            if let Some(first_line) = path_str.lines().next() {
-                let path = PathBuf::from(first_line.trim());
-                if path.exists() {
-                    return (true, Some(path), "PATH".into());
+    for exe_name in &candidates {
+        let bare = exe_name.trim_end_matches(".exe");
+        if let Ok(output) = Command::new(if cfg!(windows) { "where" } else { "which" })
+            .arg(bare)
+            .output()
+        {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout);
+                if let Some(first_line) = path_str.lines().next() {
+                    let path = PathBuf::from(first_line.trim());
+                    if file_is_executable(&path) {
+                        return (true, Some(path), "PATH".into());
+                    }
                 }
             }
         }
     }
 
-    (true, None, "not_found".into())
+    (false, None, "not_found".into())
+}
+
+/// Write discovered decoder executables into config path fields.
+pub fn configure_decoder_paths(config: &mut Config, data_dir: &Path) -> Vec<ConfiguredDecoder> {
+    let mut results = Vec::new();
+    for status in scan_all(data_dir) {
+        if !status.found {
+            continue;
+        }
+        let Some(path) = status.path else {
+            continue;
+        };
+        let updated = apply_decoder_path(config, &status.name, &path);
+        results.push(ConfiguredDecoder {
+            decoder: status.name.clone(),
+            feature_pack_id: status.feature_pack_id.clone(),
+            path,
+            updated,
+        });
+    }
+    results
+}
+
+/// Apply one discovered or installed executable path to config.
+pub fn apply_decoder_path(config: &mut Config, decoder_name: &str, path: &str) -> bool {
+    match decoder_name {
+        "rtl_433" => update_path(&mut config.rtl433.path, path),
+        "multimon-ng" => update_path(&mut config.digital_decoder.multimon_path, path),
+        "acarsdec" => update_path(&mut config.acarsdec.path, path),
+        "direwolf" => update_path(&mut config.aprs.path, path),
+        "dumpvdl2" => update_path(&mut config.vdl2.path, path),
+        "dsd-fme" | "dsd-neo" => update_path(&mut config.dsd.dsdneo_path, path),
+        "dump978" | "dump978-fa" => update_path(&mut config.dump978.path, path),
+        _ => false,
+    }
+}
+
+fn update_path(current: &mut String, path: &str) -> bool {
+    if current == path {
+        return false;
+    }
+    *current = path.to_string();
+    true
+}
+
+/// Download, install when possible, and configure the matching config path.
+pub fn install_decoder(name: &str, data_dir: &Path, config: &mut Config) -> Result<ConfiguredDecoder, String> {
+    let path = if let Some(decoder) = KNOWN_DECODERS.iter().find(|d| d.name == name) {
+        if decoder.download_url.is_some() {
+            download_decoder(name, data_dir)?
+        } else {
+            let (found, discovered, _) = find_decoder(
+                decoder,
+                data_dir,
+                &std::env::var("SOAPY_SDR_ROOT")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        if cfg!(windows) {
+                            std::path::PathBuf::from(r"C:\Program Files\PothosSDR")
+                        } else {
+                            std::path::PathBuf::from("/usr/local")
+                        }
+                    })
+                    .join("bin"),
+            );
+            if !found {
+                return Err(format!(
+                    "{name} is not bundled; install manually or choose a decoder with automatic download"
+                ));
+            }
+            discovered
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+    } else {
+        return Err(format!("unknown decoder: {name}"));
+    };
+    let updated = apply_decoder_path(config, name, &path);
+    Ok(ConfiguredDecoder {
+        decoder: name.to_string(),
+        feature_pack_id: feature_pack_for_decoder(name).map(str::to_string),
+        path,
+        updated,
+    })
 }
 
 /// Download and install a decoder archive into the PulseScope data directory.
@@ -474,4 +649,71 @@ pub fn install_instructions(name: &str) -> Option<String> {
          Protocol: {}",
         decoder.input_type, decoder.protocol
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch_executable(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"").unwrap();
+        if !cfg!(windows) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn find_decoder_returns_not_found_when_missing() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "pulsescope-depmanager-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let decoder = manifest_for_decoder("rtl_433").expect("rtl_433 manifest");
+        let pothos_bin = data_dir.join("empty-pothos-bin");
+        std::fs::create_dir_all(&pothos_bin).unwrap();
+        let (found, path, source) = find_decoder(decoder, &data_dir, &pothos_bin);
+        assert!(!found);
+        assert!(path.is_none());
+        assert_eq!(source, "not_found");
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn configure_applies_discovered_multimon_path() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "pulsescope-depmanager-configure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let decoder = manifest_for_decoder("multimon-ng").expect("multimon-ng manifest");
+        let subdir = decoder.extract_subdir.expect("multimon extract subdir");
+        let exe_path = data_dir.join("decoders").join(subdir).join(decoder.exe_name);
+        touch_executable(&exe_path);
+
+        let mut config = Config::default();
+        let results = configure_decoder_paths(&mut config, &data_dir);
+        assert!(
+            results
+                .iter()
+                .any(|entry| entry.decoder == "multimon-ng" && entry.updated),
+            "expected multimon-ng to be configured: {:?}",
+            results
+        );
+        assert_eq!(config.digital_decoder.multimon_path, exe_path.to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn feature_pack_bindings_are_consistent() {
+        for (decoder, pack) in FEATURE_PACK_BINDINGS {
+            assert_eq!(feature_pack_for_decoder(decoder), Some(pack));
+            assert_eq!(decoder_for_pack(pack), Some(decoder));
+        }
+    }
 }
