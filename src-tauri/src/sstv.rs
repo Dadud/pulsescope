@@ -168,6 +168,98 @@ pub fn spawn_ft8(
     })
 }
 
+/// Decode successive, UTC-aligned two-minute WSPR periods using WSJT-X `wsprd`.
+pub fn spawn_wspr(
+    audio: Arc<AudioSink>,
+    db: Db,
+    events: broadcast::Sender<ScannerEvent>,
+    data_dir: PathBuf,
+    frequency_hz: u64,
+    executable: PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut frames = audio.subscribe();
+        let mut period_start = None::<i64>;
+        let mut samples = Vec::<f32>::with_capacity(12_000 * 120);
+        let temp_dir = data_dir.join("decoders").join("wspr");
+        let _ = fs::create_dir_all(&temp_dir);
+        loop {
+            let frame = match frames.recv().await {
+                Ok(frame) => frame,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    audio.observe_remote_lag(skipped);
+                    samples.clear();
+                    period_start = None;
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            };
+            let bucket = frame.captured_ms - frame.captured_ms.rem_euclid(120_000);
+            if let Some(start) = period_start {
+                if bucket != start {
+                    if samples.len() >= 12_000 * 110 {
+                        decode_wspr_period(
+                            &executable,
+                            &temp_dir,
+                            start,
+                            &samples,
+                            &db,
+                            &events,
+                            frequency_hz,
+                        )
+                        .await;
+                    }
+                    samples.clear();
+                }
+            }
+            period_start = Some(bucket);
+            let channels = frame.channels.max(1) as usize;
+            for (index, chunk) in frame.samples.chunks(channels).enumerate() {
+                if index % 4 == 0 {
+                    samples.push(chunk.iter().copied().sum::<f32>() / chunk.len().max(1) as f32);
+                }
+            }
+        }
+    })
+}
+
+async fn decode_wspr_period(
+    executable: &PathBuf,
+    temp_dir: &Path,
+    period_start: i64,
+    samples: &[f32],
+    db: &Db,
+    events: &broadcast::Sender<ScannerEvent>,
+    frequency_hz: u64,
+) {
+    let path = temp_dir.join(format!("wspr-{period_start}.wav"));
+    if let Err(error) = write_wav_mono_16(&path, 12_000, samples) {
+        tracing::warn!(%error, "failed to create WSPR WAV period");
+        return;
+    }
+    let output = tokio::process::Command::new(executable).arg(&path).output().await;
+    let _ = fs::remove_file(&path);
+    match output {
+        Ok(output) if output.status.success() => {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let line = line.trim();
+                let fields: Vec<_> = line.split_whitespace().collect();
+                if fields.len() >= 7 && fields.iter().any(|field| field.contains('<')) {
+                    publish(db, events, frequency_hz, "wspr", "message", line.to_string());
+                }
+            }
+        }
+        Ok(output) => {
+            tracing::warn!(
+                status = ?output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "WSPR decoder exited unsuccessfully"
+            )
+        }
+        Err(error) => tracing::warn!(%error, "WSPR decoder could not start"),
+    }
+}
+
 async fn decode_ft8_period(
     executable: &PathBuf,
     temp_dir: &Path,

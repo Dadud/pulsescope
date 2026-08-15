@@ -15,7 +15,22 @@
     can_auto_install?: boolean;
     feature_pack_id?: string | null;
   };
+  type Adaptation = {
+    catalog_id: string;
+    name: string;
+    integration: string;
+    readiness: string;
+    native_rust: boolean;
+    depmanager_name?: string | null;
+    system_packages: string[];
+    install_hint: string;
+    discovered: boolean;
+    discovered_path?: string | null;
+    can_auto_install: boolean;
+    notes: string;
+  };
   let decoders = $state<Decoder[]>([]);
+  let adaptations = $state<Adaptation[]>([]);
   let runtime = $state<any[]>([]);
   let error = $state('');
   let installGuide = $state<{ name: string; guide: string } | null>(null);
@@ -23,13 +38,19 @@
 
   async function load() {
     try {
-      const status = await Api.sidecarsStatus();
+      const [status, adaptationData] = await Promise.all([
+        Api.sidecarsStatus(),
+        Api.decoderAdaptations(),
+      ]);
       runtime = status.runtime ?? [];
       decoders = status.discovered ?? [];
+      adaptations = adaptationData.adaptations ?? [];
       error = '';
     } catch (e) {
       try {
         decoders = (await Api.decoderScan()) as Decoder[];
+        const adaptationData = await Api.decoderAdaptations();
+        adaptations = adaptationData.adaptations ?? [];
       } catch (inner) { error = String(inner); }
     }
   }
@@ -101,6 +122,33 @@
               {/if}
               {#if d.github_url}
                 <button class="mini" disabled={busy === `guide-${d.name}`} onclick={() => fetchGuide(d.name)}>Guide</button>
+              {/if}
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Adaptable catalog decoders</h2>
+    <p class="muted">Native Rust paths ship in-tree; sidecars adapt when a distro package or downloaded binary is present.</p>
+    <table>
+      <thead><tr><th>Catalog</th><th>Integration</th><th>Readiness</th><th>System install</th><th>Status</th></tr></thead>
+      <tbody>
+        {#each adaptations as entry (entry.catalog_id)}
+          <tr>
+            <td><b>{entry.name}</b><br /><small>{entry.catalog_id}</small></td>
+            <td><small>{entry.integration}</small>{#if entry.native_rust}<br /><small>native Rust</small>{/if}</td>
+            <td>{entry.readiness}</td>
+            <td><small>{entry.install_hint || '—'}</small></td>
+            <td>
+              {#if entry.native_rust}
+                <b>built-in</b>
+              {:else if entry.discovered}
+                <b>found</b><br /><small>{entry.discovered_path ?? ''}</small>
+              {:else}
+                missing
               {/if}
             </td>
           </tr>

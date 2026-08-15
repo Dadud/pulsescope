@@ -386,6 +386,7 @@ export const Api = {
 
   featurePacks: () => getJson('/feature-packs'),
   decoderScan: () => getJson('/decoders/scan'),
+  decoderAdaptations: () => getJson('/decoders/adaptations'),
   decoderConfigure: () => postJson('/decoders/configure'),
   decoderInstall: (name: string) => postJson(`/decoders/install/${encodeURIComponent(name)}`),
   decoderInstallGuide: (name: string) => getJson(`/decoders/install/${encodeURIComponent(name)}/guide`),

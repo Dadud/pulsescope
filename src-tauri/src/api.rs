@@ -315,6 +315,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/sidecars/status", get(sidecars_status))
         .route("/sidecars/:name/stderr", get(sidecar_stderr))
         .route("/decoders/scan", get(decoders_scan))
+        .route("/decoders/adaptations", get(decoders_adaptations))
         .route("/decoders/configure", post(decoders_configure))
         .route("/decoders/install/:name/guide", get(decoders_install_guide))
         .route("/decoders/install/:name", post(decoders_install))
@@ -1829,8 +1830,8 @@ fn configure_ham_decoders(s: &ApiState, range: &crate::config::ScanRange) {
     stop_ham_decoders(s);
     let frequency_hz = s.0.device.status().center_freq_hz;
     if range.name.starts_with("FT8 ") {
-        match which::which("jt9") {
-            Ok(executable) => {
+        match crate::depmanager::discover_system_binary("jt9") {
+            Some(executable) => {
                 let task = crate::sstv::spawn_ft8(
                     s.0.audio.clone(),
                     s.0.db.clone(),
@@ -1842,8 +1843,36 @@ fn configure_ham_decoders(s: &ApiState, range: &crate::config::ScanRange) {
                 s.0.ham_decoder_tasks.lock().insert("ft8".into(), task);
                 tracing::info!(range = %range.name, "FT8 auto-decoder started");
             }
-            Err(_) => {
-                tracing::warn!(range = %range.name, "FT8 profile selected but jt9 is not installed")
+            None => {
+                tracing::warn!(
+                    range = %range.name,
+                    hint = crate::depmanager::install_hint_for_decoder("jt9"),
+                    "FT8 profile selected but jt9 is not installed"
+                );
+            }
+        }
+        return;
+    }
+    if range.name.starts_with("WSPR ") {
+        match crate::depmanager::discover_system_binary("wsprd") {
+            Some(executable) => {
+                let task = crate::sstv::spawn_wspr(
+                    s.0.audio.clone(),
+                    s.0.db.clone(),
+                    s.0.events.clone(),
+                    s.0.data_dir.clone(),
+                    frequency_hz,
+                    executable,
+                );
+                s.0.ham_decoder_tasks.lock().insert("wspr".into(), task);
+                tracing::info!(range = %range.name, "WSPR auto-decoder started");
+            }
+            None => {
+                tracing::warn!(
+                    range = %range.name,
+                    hint = crate::depmanager::install_hint_for_decoder("wsprd"),
+                    "WSPR profile selected but wsprd is not installed"
+                );
             }
         }
         return;
@@ -2807,6 +2836,15 @@ async fn sidecars_status(State(s): State<ApiState>) -> impl IntoResponse {
 
 async fn decoders_scan(State(s): State<ApiState>) -> Json<Value> {
     Json(serde_json::to_value(crate::depmanager::scan_all(&s.0.data_dir)).unwrap())
+}
+
+async fn decoders_adaptations(State(s): State<ApiState>) -> Json<Value> {
+    let adaptations = crate::depmanager::adaptation_report(&s.0.data_dir);
+    Json(json!({
+        "ok": true,
+        "count": adaptations.len(),
+        "adaptations": adaptations,
+    }))
 }
 
 async fn decoders_configure(State(s): State<ApiState>) -> Json<Value> {
