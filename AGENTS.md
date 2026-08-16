@@ -10,7 +10,7 @@ PulseScope is a trusted-LAN SDR appliance: a Rust server owns hardware, bounded 
 - `ListenerSession` is per browser: VFOs, viewport, audio, mode, filter, squelch, and decoder attachments.
 - SoapySDR is the broad compatibility adapter. Direct adapters are justified by measured lifecycle or performance needs.
 - External decoders remain isolated processes described by signed, checksummed manifests. No client-provided command lines.
-- Encrypted traffic may be identified and logged; it is never decrypted.
+- Encrypted traffic may be identified and logged. Only well-known public default channel keys (Meshtastic `AQ==` / simpleN, MeshCore Public) recover plaintext; private channel keys, PKI direct messages, and LoRaWAN payloads are never decrypted.
 
 ## Source-of-truth order
 

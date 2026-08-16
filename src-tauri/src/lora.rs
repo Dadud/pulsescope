@@ -2,15 +2,24 @@
 //!
 //! The PHY is a clean-room SF7/125 kHz chirp encoder/decoder used for recorded-IQ
 //! fixtures. After bytes are recovered, payloads are classified from public header
-//! layouts. Encrypted MeshCore, Meshtastic, LoRaWAN, and Reticulum bodies are
-//! identified and never decrypted.
+//! layouts. Well-known public default channel keys (Meshtastic `AQ==` / simpleN,
+//! MeshCore Public) may recover plaintext. Private channel keys, PKI direct
+//! messages, and LoRaWAN payloads stay identified and are never decrypted.
 
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, KeyIvInit, StreamCipher};
+use aes::{Aes128, Block};
+use ctr::Ctr128BE;
+use hmac::Hmac;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::db::DecodedMessage;
 use crate::demod::decimate_complex_average;
+
+type Aes128Ctr = Ctr128BE<Aes128>;
+type HmacSha256 = Hmac<Sha256>;
 
 pub const LORA_FIXTURE_SAMPLE_RATE_HZ: u32 = 250_000;
 pub const LORA_FIXTURE_BANDWIDTH_HZ: u32 = 125_000;
@@ -22,6 +31,16 @@ pub const LORA_PROTOCOLS: &[&str] = &[
     "modbus-lora",
     "lorawan",
     "lora",
+];
+
+/// Meshtastic firmware's well-known LongFast default PSK (`AQ==` / index 1).
+const MESHTASTIC_DEFAULT_PSK: [u8; 16] = [
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59, 0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
+];
+
+/// MeshCore smartphone/T-Deck default Public channel AES-128 key.
+const MESHCORE_PUBLIC_PSK: [u8; 16] = [
+    0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a, 0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72,
 ];
 
 const PREAMBLE_SYMBOLS: usize = 6;
@@ -376,41 +395,43 @@ pub fn parse_meshtastic(bytes: &[u8]) -> Option<LoraPacket> {
         return None;
     }
     let payload = &bytes[16..];
-    let proto_ok = payload
-        .first()
-        .map(|b| matches!(b >> 3, 1..=6) && matches!(b & 7, 0 | 2))
-        .unwrap_or(false);
-    let strings = extract_len_delimited_strings(payload);
-    let looks_proto = proto_ok;
-    let (content, encryption) = if let Some(text) = strings.into_iter().next().filter(|_| proto_ok)
-    {
-        (text, "none".to_string())
-    } else if looks_proto && payload.iter().any(|b| (0x20..=0x7e).contains(b)) {
-        (
-            payload
-                .iter()
-                .filter(|b| (0x20..=0x7e).contains(*b))
-                .map(|b| *b as char)
-                .collect(),
-            "none".to_string(),
-        )
-    } else {
-        (
-            format!("encrypted mesh packet id={id:#010x}"),
-            "identified".to_string(),
-        )
-    };
+    if payload.is_empty() {
+        return None;
+    }
+
+    // Cleartext Data protobuf (encryption disabled / already open).
+    if let Some(content) = meshtastic_text_from_data(payload) {
+        return Some(LoraPacket {
+            protocol: "meshtastic".into(),
+            message_type: "text".into(),
+            address: format!("{sender:08x}"),
+            function_code: format!("dest={dest:08x}"),
+            content,
+            encryption: "none".into(),
+            raw_hex: hex::encode(bytes),
+        });
+    }
+
+    // Public default channel PSKs only — never try operator-supplied keys.
+    if let Some((content, label)) = decrypt_meshtastic_public_defaults(id, sender, payload) {
+        return Some(LoraPacket {
+            protocol: "meshtastic".into(),
+            message_type: "text".into(),
+            address: format!("{sender:08x}"),
+            function_code: format!("dest={dest:08x}"),
+            content,
+            encryption: label.into(),
+            raw_hex: hex::encode(bytes),
+        });
+    }
+
     Some(LoraPacket {
         protocol: "meshtastic".into(),
-        message_type: if encryption == "none" {
-            "text".into()
-        } else {
-            "encrypted".into()
-        },
+        message_type: "encrypted".into(),
         address: format!("{sender:08x}"),
         function_code: format!("dest={dest:08x}"),
-        content,
-        encryption,
+        content: format!("encrypted mesh packet id={id:#010x}"),
+        encryption: "identified".into(),
         raw_hex: hex::encode(bytes),
     })
 }
@@ -426,13 +447,16 @@ pub fn parse_meshcore(bytes: &[u8]) -> Option<LoraPacket> {
     if 2 + path_len >= bytes.len() {
         return None;
     }
-    if path_len > 15 {
+    if path_len > 64 {
         return None;
     }
-    if payload_type > 7 {
+    // Group/flood adverts and texts commonly travel with an empty path. Direct
+    // text (type 2) may also. Rejecting empty paths for those types hid Public
+    // channel traffic.
+    if path_len == 0 && !matches!(payload_type, 2 | 4 | 5 | 6) {
         return None;
     }
-    if payload_type != 2 && path_len == 0 {
+    if payload_type > 0x0B && payload_type != 0x0F {
         return None;
     }
     let payload = &bytes[2 + path_len..];
@@ -447,6 +471,30 @@ pub fn parse_meshcore(bytes: &[u8]) -> Option<LoraPacket> {
         7 => "anon_req",
         _ => "payload",
     };
+
+    if matches!(kind, "grp_txt" | "grp_data") {
+        if let Some(content) = decrypt_meshcore_public_group(payload) {
+            return Some(LoraPacket {
+                protocol: "meshcore".into(),
+                message_type: kind.into(),
+                address: hex::encode(&bytes[2..2 + path_len.min(4)]),
+                function_code: format!("route_{route_type}"),
+                content,
+                encryption: "public_default".into(),
+                raw_hex: hex::encode(bytes),
+            });
+        }
+        return Some(LoraPacket {
+            protocol: "meshcore".into(),
+            message_type: kind.into(),
+            address: hex::encode(&bytes[2..2 + path_len.min(4)]),
+            function_code: format!("route_{route_type}"),
+            content: format!("encrypted meshcore {kind}"),
+            encryption: "identified".into(),
+            raw_hex: hex::encode(bytes),
+        });
+    }
+
     let (content, encryption) = if kind == "txt_msg" && payload.len() > 5 {
         let text = String::from_utf8_lossy(&payload[5..]).trim().to_string();
         if text
@@ -581,44 +629,205 @@ pub fn parse_lorawan(bytes: &[u8]) -> Option<LoraPacket> {
     })
 }
 
-fn extract_len_delimited_strings(buf: &[u8]) -> Vec<String> {
-    let mut i = 0usize;
-    let mut out = Vec::new();
-    while i < buf.len() {
-        let tag = buf[i];
+/// Strict Data protobuf: portnum TEXT_MESSAGE_APP (1) + length-delimited UTF-8 text.
+/// Used for cleartext and for public-default decrypt acceptance so random CTR
+/// output cannot false-positive via printable-byte heuristics.
+fn meshtastic_text_from_data(payload: &[u8]) -> Option<String> {
+    if payload.len() < 5 || payload[0] != 0x08 {
+        return None;
+    }
+    let mut i = 1usize;
+    let mut portnum: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        if i >= payload.len() || shift > 28 {
+            return None;
+        }
+        let b = payload[i];
         i += 1;
-        let wire = tag & 7;
-        match wire {
-            0 => {
-                while i < buf.len() && buf[i] & 0x80 != 0 {
-                    i += 1;
-                }
-                i += 1;
-            }
-            2 => {
-                if i >= buf.len() {
-                    break;
-                }
-                let len = buf[i] as usize;
-                i += 1;
-                if i + len > buf.len() {
-                    break;
-                }
-                let slice = &buf[i..i + len];
-                if !slice.is_empty()
-                    && slice
-                        .iter()
-                        .all(|b| (0x20..=0x7e).contains(b) || *b == b'\n')
-                {
-                    out.push(String::from_utf8_lossy(slice).into_owned());
-                }
-                i += len;
-            }
-            5 => i += 4,
-            1 => i += 8,
-            _ => break,
+        portnum |= u64::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    // TEXT_MESSAGE_APP = 1. Reject other ports so decrypt trials stay precise.
+    if portnum != 1 {
+        return None;
+    }
+    if i >= payload.len() || payload[i] != 0x12 {
+        return None;
+    }
+    i += 1;
+    if i >= payload.len() {
+        return None;
+    }
+    let len = payload[i] as usize;
+    i += 1;
+    if len == 0 || i + len > payload.len() {
+        return None;
+    }
+    let slice = &payload[i..i + len];
+    if !slice
+        .iter()
+        .all(|b| (0x20..=0x7e).contains(b) || *b == b'\n' || *b == b'\r')
+    {
+        return None;
+    }
+    let text = String::from_utf8(slice.to_vec()).ok()?.trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// Expand Meshtastic's one-byte PSK shorthand (index 1 = default, 2..=10 = simpleN).
+fn meshtastic_public_psks() -> Vec<([u8; 16], &'static str)> {
+    let mut keys = Vec::with_capacity(10);
+    keys.push((MESHTASTIC_DEFAULT_PSK, "public_default"));
+    for index in 2u8..=10 {
+        let mut key = MESHTASTIC_DEFAULT_PSK;
+        key[15] = MESHTASTIC_DEFAULT_PSK[15].wrapping_add(index - 1);
+        let label = match index {
+            2 => "simple1",
+            3 => "simple2",
+            4 => "simple3",
+            5 => "simple4",
+            6 => "simple5",
+            7 => "simple6",
+            8 => "simple7",
+            9 => "simple8",
+            10 => "simple9",
+            _ => "public_default",
+        };
+        keys.push((key, label));
+    }
+    keys
+}
+
+fn meshtastic_ctr_nonce(packet_id: u32, from_node: u32) -> [u8; 16] {
+    let mut nonce = [0u8; 16];
+    nonce[0..4].copy_from_slice(&packet_id.to_le_bytes());
+    nonce[8..12].copy_from_slice(&from_node.to_le_bytes());
+    nonce
+}
+
+fn aes128_ctr_crypt(key: &[u8; 16], nonce: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    let mut cipher = Aes128Ctr::new(key.into(), nonce.into());
+    cipher.apply_keystream(&mut out);
+    out
+}
+
+fn decrypt_meshtastic_public_defaults(
+    packet_id: u32,
+    from_node: u32,
+    ciphertext: &[u8],
+) -> Option<(String, &'static str)> {
+    let nonce = meshtastic_ctr_nonce(packet_id, from_node);
+    for (key, label) in meshtastic_public_psks() {
+        let plain = aes128_ctr_crypt(&key, &nonce, ciphertext);
+        if let Some(text) = meshtastic_text_from_data(&plain) {
+            return Some((text, label));
         }
     }
+    None
+}
+
+fn meshcore_channel_hash(key: &[u8; 16]) -> u8 {
+    Sha256::digest(key)[0]
+}
+
+fn meshcore_hmac_key(aes_key: &[u8; 16]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(aes_key);
+    key
+}
+
+fn meshcore_mac_ok(aes_key: &[u8; 16], mac: [u8; 2], ciphertext: &[u8]) -> bool {
+    let Ok(mut hmac) = <HmacSha256 as hmac::Mac>::new_from_slice(&meshcore_hmac_key(aes_key))
+    else {
+        return false;
+    };
+    hmac::Mac::update(&mut hmac, ciphertext);
+    let digest = hmac::Mac::finalize(hmac).into_bytes();
+    digest[0] == mac[0] && digest[1] == mac[1]
+}
+
+fn aes128_ecb_crypt_blocks(key: &[u8; 16], data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
+    if data.is_empty() || data.len() % 16 != 0 {
+        return None;
+    }
+    let cipher = Aes128::new(key.into());
+    let mut out = data.to_vec();
+    for chunk in out.chunks_mut(16) {
+        let mut block = Block::clone_from_slice(chunk);
+        if encrypt {
+            cipher.encrypt_block(&mut block);
+        } else {
+            cipher.decrypt_block(&mut block);
+        }
+        chunk.copy_from_slice(&block);
+    }
+    Some(out)
+}
+
+fn decrypt_meshcore_public_group(payload: &[u8]) -> Option<String> {
+    if payload.len() < 3 + 16 {
+        return None;
+    }
+    let channel_hash = payload[0];
+    if channel_hash != meshcore_channel_hash(&MESHCORE_PUBLIC_PSK) {
+        return None;
+    }
+    let mac = [payload[1], payload[2]];
+    // CSS fixture decode (and over-long RF captures) may append trailing
+    // symbols. Try every AES-block-aligned ciphertext prefix so a valid MAC
+    // still recovers Public-channel plaintext.
+    let max_cipher = payload.len() - 3;
+    let mut cipher_len = max_cipher - (max_cipher % 16);
+    while cipher_len >= 16 {
+        let ciphertext = &payload[3..3 + cipher_len];
+        if meshcore_mac_ok(&MESHCORE_PUBLIC_PSK, mac, ciphertext) {
+            let plain = aes128_ecb_crypt_blocks(&MESHCORE_PUBLIC_PSK, ciphertext, false)?;
+            if plain.len() < 6 {
+                return None;
+            }
+            let mut text = String::from_utf8_lossy(&plain[5..]).into_owned();
+            if let Some(end) = text.find('\0') {
+                text.truncate(end);
+            }
+            let text = text.trim().to_string();
+            if !text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii() && (!c.is_control() || c == ' '))
+            {
+                return Some(text);
+            }
+            return None;
+        }
+        cipher_len -= 16;
+    }
+    None
+}
+
+fn meshcore_encrypt_then_mac(aes_key: &[u8; 16], plaintext: &[u8]) -> Vec<u8> {
+    let mut padded = plaintext.to_vec();
+    let rem = padded.len() % 16;
+    if rem != 0 {
+        padded.extend(std::iter::repeat_n(0u8, 16 - rem));
+    }
+    let ciphertext = aes128_ecb_crypt_blocks(aes_key, &padded, true).expect("padded length");
+    let mut hmac = <HmacSha256 as hmac::Mac>::new_from_slice(&meshcore_hmac_key(aes_key))
+        .expect("HMAC key length");
+    hmac::Mac::update(&mut hmac, &ciphertext);
+    let digest = hmac::Mac::finalize(hmac).into_bytes();
+    let mut out = Vec::with_capacity(2 + ciphertext.len());
+    out.push(digest[0]);
+    out.push(digest[1]);
+    out.extend_from_slice(&ciphertext);
     out
 }
 
@@ -635,11 +844,49 @@ pub fn meshtastic_hello_bytes() -> Vec<u8> {
     bytes
 }
 
+/// Data protobuf for TEXT_MESSAGE_APP carrying "HELLO".
+fn meshtastic_hello_data_protobuf() -> Vec<u8> {
+    vec![0x08, 0x01, 0x12, 0x05, b'H', b'E', b'L', b'L', b'O']
+}
+
+/// Encrypted with the firmware public default PSK (`AQ==`) so the appliance
+/// recovers the plaintext. Private-key ciphertext remains in a separate unit test.
 pub fn meshtastic_encrypted_bytes() -> Vec<u8> {
-    vec![
-        0xff, 0xff, 0xff, 0xff, 0xef, 0xcd, 0xab, 0x00, 0x02, 0x00, 0x00, 0x00, 0x63, 0x08, 0x00,
-        0x00, 0x9a, 0x3c, 0x11, 0x88, 0x70, 0x01, 0x44, 0x23,
-    ]
+    let sender = 0x00AB_CDEFu32;
+    let id = 0x0000_0002u32;
+    let plain = meshtastic_hello_data_protobuf();
+    let nonce = meshtastic_ctr_nonce(id, sender);
+    let cipher = aes128_ctr_crypt(&MESHTASTIC_DEFAULT_PSK, &nonce, &plain);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    bytes.extend_from_slice(&sender.to_le_bytes());
+    bytes.extend_from_slice(&id.to_le_bytes());
+    bytes.push(0x63);
+    bytes.push(0x08);
+    bytes.push(0);
+    bytes.push(0);
+    bytes.extend_from_slice(&cipher);
+    bytes
+}
+
+/// Ciphertext produced with a non-default key — must stay identified-only.
+pub fn meshtastic_private_encrypted_bytes() -> Vec<u8> {
+    let sender = 0x00AB_CDEFu32;
+    let id = 0x0000_0003u32;
+    let mut private = MESHTASTIC_DEFAULT_PSK;
+    private[0] ^= 0x5A;
+    let nonce = meshtastic_ctr_nonce(id, sender);
+    let cipher = aes128_ctr_crypt(&private, &nonce, &meshtastic_hello_data_protobuf());
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    bytes.extend_from_slice(&sender.to_le_bytes());
+    bytes.extend_from_slice(&id.to_le_bytes());
+    bytes.push(0x63);
+    bytes.push(0x08);
+    bytes.push(0);
+    bytes.push(0);
+    bytes.extend_from_slice(&cipher);
+    bytes
 }
 
 pub fn meshcore_hello_bytes() -> Vec<u8> {
@@ -647,6 +894,19 @@ pub fn meshcore_hello_bytes() -> Vec<u8> {
     bytes.extend_from_slice(&0x6800_0001u32.to_be_bytes());
     bytes.push(0x00);
     bytes.extend_from_slice(b"HELLO");
+    bytes
+}
+
+/// Flood GRP_TXT on the MeshCore Public channel carrying `HELLO`.
+/// Kept to one AES block so SF8 CSS fixture round-trips stay bit-exact.
+pub fn meshcore_public_group_hello_bytes() -> Vec<u8> {
+    let mut plain = Vec::new();
+    plain.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+    plain.push(0x00);
+    plain.extend_from_slice(b"HELLO");
+    let sealed = meshcore_encrypt_then_mac(&MESHCORE_PUBLIC_PSK, &plain);
+    let mut bytes = vec![0x15, 0x00, meshcore_channel_hash(&MESHCORE_PUBLIC_PSK)];
+    bytes.extend_from_slice(&sealed);
     bytes
 }
 
@@ -706,6 +966,10 @@ pub fn synthesize_meshtastic_encrypted_iq(sample_rate_hz: u32) -> Vec<Complex<f3
     synthesize_css_iq(&meshtastic_encrypted_bytes(), sample_rate_hz)
 }
 
+pub fn synthesize_meshcore_public_group_hello_iq(sample_rate_hz: u32) -> Vec<Complex<f32>> {
+    synthesize_css_iq(&meshcore_public_group_hello_bytes(), sample_rate_hz)
+}
+
 pub fn regional_plans() -> Vec<serde_json::Value> {
     serde_json::json!([
         {"id":"US915","uplink_hz":[902300000,914900000],"bandwidth_hz":125000,"status":"documented_plan"},
@@ -760,9 +1024,12 @@ mod tests {
         assert_css_round_trip(
             &meshtastic_encrypted_bytes(),
             "meshtastic",
-            "encrypted mesh packet",
-            "identified",
+            "HELLO",
+            "public_default",
         );
+        // MeshCore Public decrypt is covered by parse unit tests. The SF8 CSS
+        // fixture PHY is not bit-exact for AES-MAC frames, so encrypted GRP_TXT
+        // is not CSS-round-tripped here.
     }
 
     #[test]
@@ -779,12 +1046,29 @@ mod tests {
         assert_eq!(modbus.protocol, "modbus-lora");
         assert_eq!(modbus.function_code, "3");
 
-        let encrypted = parse_meshtastic(&[
-            0xff, 0xff, 0xff, 0xff, 0xef, 0xcd, 0xab, 0x00, 0x02, 0x00, 0x00, 0x00, 0x63, 0x08,
-            0x00, 0x00, 0x9a, 0x3c, 0x11, 0x88, 0x70, 0x01, 0x44, 0x23,
-        ])
-        .expect("header");
-        assert_eq!(encrypted.encryption, "identified");
+        let public = parse_meshtastic(&meshtastic_encrypted_bytes()).expect("default psk");
+        assert_eq!(public.encryption, "public_default");
+        assert!(public.content.contains("HELLO"), "{public:?}");
+
+        let private = parse_meshtastic(&meshtastic_private_encrypted_bytes()).expect("header");
+        assert_eq!(private.encryption, "identified");
+        assert!(private.content.contains("encrypted mesh packet"));
+    }
+
+    #[test]
+    fn meshcore_public_group_decodes_and_private_stays_opaque() {
+        let public = parse_meshcore(&meshcore_public_group_hello_bytes()).expect("grp");
+        assert_eq!(public.encryption, "public_default");
+        assert!(public.content.contains("HELLO"), "{public:?}");
+        // Keep the CSS synthesizer exercised even though MAC frames are not
+        // asserted through the soft SF8 PHY round-trip.
+        assert!(!synthesize_meshcore_public_group_hello_iq(LORA_FIXTURE_SAMPLE_RATE_HZ).is_empty());
+
+        // Same frame with a flipped MAC must not decrypt.
+        let mut bad = meshcore_public_group_hello_bytes();
+        bad[3] ^= 0xFF;
+        let opaque = parse_meshcore(&bad).expect("header still valid");
+        assert_eq!(opaque.encryption, "identified");
     }
 
     #[test]

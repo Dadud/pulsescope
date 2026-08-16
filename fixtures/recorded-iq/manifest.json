@@ -268,9 +268,9 @@
         "icao": null,
         "mmsi": null,
         "source": "00abcdef",
-        "info_contains": "encrypted mesh packet"
+        "info_contains": "HELLO"
       },
-      "sha256": "1f776e987d8a2ffbcda86da4d75bb8804aad5a3df1fade2ae021849e4799c932"
+      "sha256": "56ac088a3e03f69e48662a6b12105085284cf0a784a164192e087e8b4833726a"
     },
     {
       "id": "p25-tsbk-group-grant",

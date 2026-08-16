@@ -3775,7 +3775,7 @@ async fn scan_lora(State(s): State<ApiState>) -> Json<Value> {
                 "samples": iq.len(),
                 "message_count": packets.len(),
                 "messages": packets,
-                "note": "Encrypted MeshCore/Meshtastic/Reticulum/LoRaWAN payloads are identified only"
+                "note": "Meshtastic/MeshCore public-default channel keys recover plaintext; private keys, PKI DMs, Reticulum, and LoRaWAN stay identified-only"
             }))
         }
         Err(e) => Json(json!({

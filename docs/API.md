@@ -216,7 +216,7 @@ mode; a VFO still inside the window is untouched.
 | GET    | `/lora/messages`    | MeshCore / Meshtastic / Reticulum / Modbus / LoRaWAN identifications |
 | GET    | `/lora/regions`     | documented regional plans, not discovered radios |
 | GET    | `/scan/ble`         | snapshot GFSK decode on the live IQ ring |
-| GET    | `/scan/lora`        | snapshot CSS decode + payload classify; MeshCore/Meshtastic/Reticulum/Modbus/LoRaWAN recorded-IQ fixtures; encrypted bodies stay opaque |
+| GET    | `/scan/lora`        | snapshot CSS decode + payload classify; Meshtastic/MeshCore public-default PSK plaintext; private keys and LoRaWAN stay opaque |
 
 ## Recording / streaming / transcription
 

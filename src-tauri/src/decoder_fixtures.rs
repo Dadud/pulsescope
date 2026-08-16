@@ -938,7 +938,7 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                 "lora-meshtastic-encrypted.iq.json",
                 lora_enc_sha,
                 Some("00abcdef"),
-                Some("encrypted mesh packet"),
+                Some("HELLO"),
             ),
             iq_entry(
                 "p25-tsbk-group-grant",
