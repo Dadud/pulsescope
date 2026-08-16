@@ -59,6 +59,82 @@ export function normalizeDb(db: number, minDb: number, maxDb: number): number {
   return Math.max(0, Math.min(1, (db - minDb) / span));
 }
 
+/** Narrowest span the display will zoom to, and the deepest zoom relative to the
+ *  capture window. FFT bins do not gain resolution past the capture bin width, so
+ *  zooming further would only interpolate. */
+export const MIN_VIEW_SPAN_HZ = 2_000;
+export const MAX_VIEW_ZOOM = 128;
+
+/** Frequency window the operator is looking at. Always a subset of the hardware
+ *  capture window; the server still delivers the full captured span. */
+export type SpectrumViewport = { centerHz: number; spanHz: number };
+
+export function clampViewport(
+  view: SpectrumViewport,
+  captureCenterHz: number,
+  captureSpanHz: number,
+): SpectrumViewport {
+  const capture = Math.max(1, captureSpanHz);
+  const minSpan = Math.min(capture, Math.max(MIN_VIEW_SPAN_HZ, capture / MAX_VIEW_ZOOM));
+  const spanHz = Math.max(minSpan, Math.min(capture, view.spanHz > 0 ? view.spanHz : capture));
+  const half = spanHz / 2;
+  const low = captureCenterHz - capture / 2 + half;
+  const high = captureCenterHz + capture / 2 - half;
+  const requested = view.centerHz > 0 ? view.centerHz : captureCenterHz;
+  return { centerHz: Math.min(high, Math.max(low, requested)), spanHz };
+}
+
+/** Zoom by `factor` keeping the frequency under `anchorFraction` (0..1 across the
+ *  view) pinned, so wheel zoom tracks the cursor. */
+export function zoomViewportAt(
+  view: SpectrumViewport,
+  factor: number,
+  anchorFraction: number,
+  captureCenterHz: number,
+  captureSpanHz: number,
+): SpectrumViewport {
+  const anchor = Math.max(0, Math.min(1, anchorFraction));
+  const anchorHz = view.centerHz - view.spanHz / 2 + anchor * view.spanHz;
+  const target = clampViewport(
+    { centerHz: view.centerHz, spanHz: view.spanHz / Math.max(0.01, factor) },
+    captureCenterHz,
+    captureSpanHz,
+  );
+  return clampViewport(
+    { centerHz: anchorHz - (anchor - 0.5) * target.spanHz, spanHz: target.spanHz },
+    captureCenterHz,
+    captureSpanHz,
+  );
+}
+
+export function viewportZoom(view: SpectrumViewport, captureSpanHz: number): number {
+  return Math.max(1, captureSpanHz) / Math.max(1, view.spanHz);
+}
+
+export function viewportFrequencyAt(view: SpectrumViewport, fraction: number): number {
+  return view.centerHz - view.spanHz / 2 + Math.max(0, Math.min(1, fraction)) * view.spanHz;
+}
+
+export function viewportFractionOf(view: SpectrumViewport, hz: number): number {
+  return (hz - (view.centerHz - view.spanHz / 2)) / Math.max(1, view.spanHz);
+}
+
+/** Position of `hz` inside the captured FFT bin array, as a 0..1 fraction. */
+export function captureFractionOf(hz: number, captureCenterHz: number, captureSpanHz: number): number {
+  const capture = Math.max(1, captureSpanHz);
+  return (hz - (captureCenterHz - capture / 2)) / capture;
+}
+
+export function formatZoom(zoom: number): string {
+  if (zoom < 9.95) return `${zoom.toFixed(1)}×`;
+  return `${Math.round(zoom)}×`;
+}
+
+export function formatSpan(spanHz: number): string {
+  if (spanHz >= 1e6) return `${(spanHz / 1e6).toFixed(spanHz >= 1e7 ? 1 : 3)} MHz`;
+  return `${Math.round(spanHz / 1e3)} kHz`;
+}
+
 export function sampleBinLinear(bins: number[], fraction: number): number {
   if (!bins.length) return minDbFallback();
   const clamped = Math.max(0, Math.min(1, fraction));
