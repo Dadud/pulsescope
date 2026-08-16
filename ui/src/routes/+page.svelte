@@ -80,7 +80,7 @@
   let livePollBusy = false;
   let livePollTick = 0;
   let livePolling = false;
-  let spectrumTool: 'vfo' | 'center' = $state('vfo');
+  let spectrumTool = $state<'vfo' | 'center'>('vfo');
   let pendingCenterHz: number | null = $state(null);
   let centerTuneTimer: ReturnType<typeof setTimeout> | null = null;
   let centerTuneBusy = $state(false);
@@ -97,6 +97,15 @@
   let pinchStartDistance = 0;
   let pinchStartSpanHz = 0;
   let viewRedrawPending = false;
+  let surfaceDragging = $state(false);
+  let retunePending = $state(false);
+  let hoverFreqHz: number | null = $state(null);
+  let hoverClientX = $state(0);
+  let hoverClientY = $state(0);
+  let lastSurfaceClickAt = 0;
+  let lastSurfaceClickHz = 0;
+  let overviewDragging = false;
+  let overviewPointerId: number | null = null;
   let listenerSessionId = '';
   let listenerSessionRevision = 0;
   let banksCollapsed = $state(false);
@@ -134,6 +143,24 @@
   const viewEndHz = $derived(viewport.centerHz + viewport.spanHz / 2);
   const zoomLevel = $derived(viewportZoom(viewport, captureSpanHz));
   const zoomed = $derived(zoomLevel > 1.01);
+  const captureStartHz = $derived(centerFreqHz - captureSpanHz / 2);
+  const captureEndHz = $derived(centerFreqHz + captureSpanHz / 2);
+  const overviewViewLeft = $derived(
+    Math.max(0, Math.min(1, (viewStartHz - captureStartHz) / captureSpanHz)),
+  );
+  const overviewViewWidth = $derived(Math.max(0.01, Math.min(1, viewport.spanHz / captureSpanHz)));
+  const surfaceCursorClass = $derived.by(() => {
+    if (surfaceDragging) return 'dragging';
+    if (zoomed || spectrumTool === 'center') return 'pan-ready';
+    return 'tune-ready';
+  });
+  const gestureStatus = $derived.by(() => {
+    if (retunePending || centerTuneBusy) return 'Retuning…';
+    if (surfaceDragging) return 'Panning…';
+    const clickHint = spectrumTool === 'center' ? 'click moves center' : 'click tunes VFO';
+    if (zoomed) return `Zoomed ${formatZoom(zoomLevel)} · drag to pan · scroll to zoom · ${clickHint}`;
+    return `Drag to pan · scroll to zoom · ${clickHint}`;
+  });
   const activeBank = $derived(banks.find((bank) => bank.name === activeRange));
   const scanProgress = $derived(activeBank && activeBank.end_hz > activeBank.start_hz
     ? Math.max(0, Math.min(100, ((centerFreqHz - activeBank.start_hz) / (activeBank.end_hz - activeBank.start_hz)) * 100))
@@ -285,6 +312,8 @@
     banksCollapsed = localStorage.getItem('pulsescope.ui.banksCollapsed') === '1';
     logExpanded = localStorage.getItem('pulsescope.ui.logExpanded') === '1';
     dismissedOnboarding = localStorage.getItem('pulsescope.ui.onboarding.dismissed') === '1';
+    const savedTool = localStorage.getItem('pulsescope.ui.spectrumTool');
+    spectrumTool = savedTool === 'center' ? 'center' : 'vfo';
     const compactQuery = window.matchMedia('(max-width: 760px)');
     const updateCompact = () => { isCompactLayout = compactQuery.matches; };
     updateCompact();
@@ -1073,10 +1102,12 @@
     if (!connected || !Number.isFinite(frequencyHz) || frequencyHz <= 0) return;
     if (centerTuneBusy) {
       pendingCenterHz = Math.round(frequencyHz);
+      retunePending = true;
       return;
     }
     const requestedHz = Math.round(frequencyHz);
     centerTuneBusy = true;
+    retunePending = true;
     pendingCenterHz = requestedHz;
     try {
       await Api.deviceFrequency(requestedHz);
@@ -1090,12 +1121,16 @@
       centerTuneBusy = false;
       const queuedHz = pendingCenterHz;
       if (queuedHz !== null && queuedHz !== requestedHz) scheduleCenterFrequency(queuedHz, 0);
-      else pendingCenterHz = null;
+      else {
+        pendingCenterHz = null;
+        retunePending = false;
+      }
     }
   }
 
   function scheduleCenterFrequency(frequencyHz: number, delayMs = 180) {
     pendingCenterHz = Math.max(1, Math.round(frequencyHz));
+    retunePending = true;
     if (centerTuneTimer) window.clearTimeout(centerTuneTimer);
     centerTuneTimer = window.setTimeout(() => {
       centerTuneTimer = null;
@@ -1143,6 +1178,22 @@
     }
   }
 
+  function setSpectrumTool(tool: 'vfo' | 'center') {
+    spectrumTool = tool;
+    localStorage.setItem('pulsescope.ui.spectrumTool', tool);
+  }
+
+  function zoomSpanForMode(mode?: string): number {
+    if (mode === 'wfm') return 400_000;
+    if (mode === 'nfm') return 60_000;
+    if (mode === 'am') return 40_000;
+    return 30_000;
+  }
+
+  function zoomAroundFrequency(frequencyHz: number, spanHz?: number) {
+    applyViewport(frequencyHz, spanHz ?? zoomSpanForMode(vfos[0]?.mode));
+  }
+
   function applyViewport(centerHz: number, spanHz: number) {
     const clamped = clampViewport({ centerHz, spanHz }, centerFreqHz, captureSpanHz);
     viewCenterRequestHz = Math.round(clamped.centerHz);
@@ -1169,8 +1220,7 @@
   function zoomToVfo() {
     const vfo = vfos[0];
     if (!vfo) return;
-    const spanHz = vfo.mode === 'wfm' ? 400_000 : vfo.mode === 'nfm' ? 60_000 : 30_000;
-    applyViewport(vfo.frequency_hz, spanHz);
+    zoomAroundFrequency(vfo.frequency_hz, zoomSpanForMode(vfo.mode));
   }
 
   /** Move the visible window. Movement past the capture edge retunes the radio so
@@ -1187,6 +1237,7 @@
       // Remember where the operator dragged to: the clamp reopens and the window
       // lands there once the radio confirms the new center.
       viewCenterRequestHz = Math.max(1, Math.round(requestedCenterHz));
+      retunePending = true;
       scheduleCenterFrequency(centerFreqHz + overflowHz, 90);
     }
   }
@@ -1210,6 +1261,21 @@
     zoomAtFraction(direction < 0 ? 1.35 : 1 / 1.35, anchor);
   }
 
+  function clearHoverFrequency() {
+    hoverFreqHz = null;
+  }
+
+  function updateHoverFrequency(event: PointerEvent) {
+    if (isCompactLayout || surfaceDragging || overviewDragging || pinchPointers.size > 0) {
+      clearHoverFrequency();
+      return;
+    }
+    const target = event.currentTarget as HTMLCanvasElement;
+    hoverFreqHz = frequencyAtSurface(target, event.clientX);
+    hoverClientX = event.clientX;
+    hoverClientY = event.clientY;
+  }
+
   function beginSurfacePan(event: PointerEvent) {
     const target = event.currentTarget as HTMLCanvasElement;
     pinchPointers.set(event.pointerId, event.clientX);
@@ -1219,6 +1285,8 @@
       pinchStartSpanHz = viewport.spanHz;
       panPointerId = null;
       panDragged = true;
+      surfaceDragging = true;
+      clearHoverFrequency();
       return;
     }
     panPointerId = event.pointerId;
@@ -1250,8 +1318,15 @@
     }
     if (panPointerId !== event.pointerId) return;
     const distance = event.clientX - panStartX;
-    if (Math.abs(distance) > 4) panDragged = true;
-    if (!panDragged) return;
+    if (Math.abs(distance) > 4) {
+      panDragged = true;
+      surfaceDragging = true;
+      clearHoverFrequency();
+    }
+    if (!panDragged) {
+      updateHoverFrequency(event);
+      return;
+    }
     const hzPerPixel = viewport.spanHz / Math.max(1, target.clientWidth);
     panToViewCenter(panStartViewCenterHz - distance * hzPerPixel);
   }
@@ -1267,10 +1342,48 @@
     if (pinchPointers.size < 2) pinchStartDistance = 0;
     if (panPointerId !== event.pointerId) return;
     panPointerId = null;
+    surfaceDragging = false;
     if (panDragged) {
       suppressSurfaceClick = true;
       window.setTimeout(() => (suppressSurfaceClick = false), 0);
     }
+  }
+
+  function overviewCenterFromClientX(target: HTMLElement, clientX: number): number {
+    const rect = target.getBoundingClientRect();
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    return captureStartHz + fraction * captureSpanHz;
+  }
+
+  function beginOverviewPan(event: PointerEvent) {
+    if (!zoomed) return;
+    const target = event.currentTarget as HTMLElement;
+    overviewDragging = true;
+    overviewPointerId = event.pointerId;
+    clearHoverFrequency();
+    try {
+      target.setPointerCapture(event.pointerId);
+    } catch {
+      /* pointer already released */
+    }
+    panToViewCenter(overviewCenterFromClientX(target, event.clientX));
+  }
+
+  function moveOverviewPan(event: PointerEvent) {
+    if (!overviewDragging || overviewPointerId !== event.pointerId) return;
+    panToViewCenter(overviewCenterFromClientX(event.currentTarget as HTMLElement, event.clientX));
+  }
+
+  function endOverviewPan(event: PointerEvent) {
+    if (overviewPointerId !== event.pointerId) return;
+    const target = event.currentTarget as HTMLElement;
+    try {
+      if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    } catch {
+      /* pointer already released */
+    }
+    overviewDragging = false;
+    overviewPointerId = null;
   }
 
   async function tuneFromSpectrum(event: MouseEvent) {
@@ -1278,7 +1391,21 @@
     const target = event.currentTarget as HTMLCanvasElement;
     if (sampleRateHz <= 0) return;
     const frequencyHz = frequencyAtSurface(target, event.clientX);
+    const now = performance.now();
+    const isDoubleClick =
+      now - lastSurfaceClickAt < 350
+      && Math.abs(frequencyHz - lastSurfaceClickHz) < Math.max(viewport.spanHz * 0.02, 2_000);
+    lastSurfaceClickAt = now;
+    lastSurfaceClickHz = frequencyHz;
+    if (isDoubleClick) {
+      suppressSurfaceClick = true;
+      window.setTimeout(() => (suppressSurfaceClick = false), 0);
+      if (zoomLevel > 2) resetZoom();
+      else zoomAroundFrequency(frequencyHz);
+      return;
+    }
     if (spectrumTool === 'center') {
+      retunePending = true;
       scheduleCenterFrequency(frequencyHz, 0);
       return;
     }
@@ -1302,6 +1429,7 @@
     }
     const step = event.shiftKey ? 10_000 : 1_000;
     if (spectrumTool === 'center') {
+      retunePending = true;
       scheduleCenterFrequency(displayedCenterHz + direction * step, 0);
       return;
     }
@@ -1675,7 +1803,8 @@
         {#if isCompactLayout}
           <ul>
             <li>Tap spectrum or waterfall to tune · drag to pan · pinch to zoom</li>
-            <li>Select <b>Pan window</b> so a tap moves the receiver center instead of the VFO</li>
+            <li>Select <b>Click: Center</b> so a tap moves the receiver center instead of the VFO</li>
+            <li>Double-tap a peak to zoom in · double-tap again (when zoomed) to fit</li>
             <li>Use <b>RF</b> for gain, AGC, antenna, and Bias-T while listening</li>
             <li><b>Bands</b> and <b>Events</b> jump to the same panels as on desktop</li>
           </ul>
@@ -1686,8 +1815,8 @@
           <li><kbd>S</kbd> Skip this hit · <kbd>L</kbd> Lockout · <kbd>H</kbd> Hold or resume</li>
           <li><kbd>←</kbd> <kbd>→</kbd> Fine-tune when the spectrum is focused</li>
           <li><kbd>Shift</kbd> + arrows — 10 kHz steps on the spectrum</li>
-          <li><kbd>+</kbd> <kbd>−</kbd> Zoom the spectrum · <kbd>0</kbd> Fit the whole span</li>
-          <li><kbd>Alt</kbd> + arrows — pan the zoomed window</li>
+          <li><kbd>+</kbd> <kbd>−</kbd> Zoom · <kbd>0</kbd> Fit · double-click a peak to zoom or fit</li>
+          <li><kbd>Alt</kbd> + arrows — pan the zoomed window · Shift+scroll pans</li>
           <li><kbd>B</kbd> Show or hide saved frequencies</li>
           <li><kbd>?</kbd> Toggle this help panel</li>
         </ul>
@@ -1880,32 +2009,87 @@
       </section>
     {/if}
 
-    <div id="spectrum-display" class="spectrum-wrap card" class:stale={spectrumStale}>
+    <div id="spectrum-display" class="spectrum-wrap card" class:stale={spectrumStale} class:zoomed>
       <div class="spectrum-heading">
         <div class="spectrum-title-block">
           <h2>Live spectrum</h2>
           <p class="fft-status">{spectrumError || (spectrumStale ? 'Reconnecting to FFT stream…' : `${spectrumBins.length} bins · ${Math.max(0, nowMs - lastSpectrumAt)} ms old · ${renderFps} FPS${droppedSpectrumFrames ? ` · ${droppedSpectrumFrames} dropped` : ''}`)}</p>
         </div>
-        <div class="spectrum-tools" role="group" aria-label="Spectrum interaction">
-          <button class:active={spectrumTool === 'vfo'} onclick={() => (spectrumTool = 'vfo')}>Tune VFO</button>
-          <button class:active={spectrumTool === 'center'} onclick={() => (spectrumTool = 'center')}>Pan window</button>
+      </div>
+      <div class="spectrum-toolbar">
+        <div class="spectrum-tools" role="group" aria-label="Click action">
+          <button type="button" class:active={spectrumTool === 'vfo'} onclick={() => setSpectrumTool('vfo')} title="Click the spectrum to tune the listening VFO">Click: Tune</button>
+          <button type="button" class:active={spectrumTool === 'center'} onclick={() => setSpectrumTool('center')} title="Click the spectrum to move the hardware center">Click: Center</button>
+        </div>
+        <label class="toolbar-center"><span>Center</span><span class="frequency-entry"><input type="number" min="0.001" step="0.001" value={(displayedCenterHz / 1e6).toFixed(6)} onchange={setCenterFromInput} aria-label="Hardware center frequency in megahertz" /><b>MHz</b></span></label>
+        <div class="toolbar-nudge" role="group" aria-label="Pan visible window">
+          <button type="button" onclick={() => panCenter(-0.25)} title="Move the visible window left by one quarter of its span. Retunes at the capture edge." aria-label="Pan visible window left">←</button>
+          <button type="button" onclick={centerOnVfo} disabled={!vfos.length} title="Put VFO 0 in the middle of the visible spectrum">VFO</button>
+          <button type="button" onclick={() => panCenter(0.25)} title="Move the visible window right by one quarter of its span. Retunes at the capture edge." aria-label="Pan visible window right">→</button>
+        </div>
+        <div class="zoom-controls" role="group" aria-label="Spectrum zoom">
+          <button type="button" onclick={() => zoomBy(1 / 1.5)} disabled={!zoomed} aria-label="Zoom out">−</button>
+          <span class="zoom-readout" aria-live="polite">{formatZoom(zoomLevel)} · {formatSpan(viewport.spanHz)}</span>
+          <button type="button" onclick={() => zoomBy(1.5)} aria-label="Zoom in">+</button>
+          <button type="button" class="mini" onclick={resetZoom} disabled={!zoomed} title="Show the whole capture window">Fit</button>
+          <button type="button" class="mini" onclick={zoomToVfo} disabled={!vfos.length} title="Zoom to the listening VFO's passband">Zoom VFO</button>
         </div>
       </div>
-      <div class="center-controls">
-        <button onclick={() => panCenter(-0.25)} aria-label="Move the visible window left by one quarter of its span">← ¼ span</button>
-        <label><span>Hardware center frequency</span><span class="frequency-entry"><input type="number" min="0.001" step="0.001" value={(displayedCenterHz / 1e6).toFixed(6)} onchange={setCenterFromInput} aria-label="Hardware center frequency in megahertz" /><b>MHz</b></span></label>
-        <button onclick={centerOnVfo} disabled={!vfos.length} title="Put VFO 0 in the middle of the visible spectrum">Center on VFO</button>
-        <button onclick={() => panCenter(0.25)} aria-label="Move the visible window right by one quarter of its span">¼ span →</button>
+      <p class="gesture-status" class:busy={retunePending || centerTuneBusy || surfaceDragging} aria-live="polite">{gestureStatus}</p>
+      {#if zoomed}
+        <div
+          class="capture-overview"
+          role="slider"
+          tabindex="0"
+          aria-label="Capture overview. Drag to pan the visible window within the capture span."
+          aria-valuemin={Math.round(captureStartHz)}
+          aria-valuemax={Math.round(captureEndHz)}
+          aria-valuenow={Math.round(viewport.centerHz)}
+          onpointerdown={beginOverviewPan}
+          onpointermove={moveOverviewPan}
+          onpointerup={endOverviewPan}
+          onpointercancel={endOverviewPan}
+          onkeydown={(event) => {
+            if (event.key === 'ArrowLeft') { event.preventDefault(); panViewBy(-0.1); }
+            if (event.key === 'ArrowRight') { event.preventDefault(); panViewBy(0.1); }
+          }}
+        >
+          <span class="overview-track"></span>
+          <span class="overview-window" style={`left:${overviewViewLeft * 100}%; width:${overviewViewWidth * 100}%`}></span>
+          {#each vfos as vfo (vfo.id)}
+            {@const mark = (vfo.frequency_hz - captureStartHz) / captureSpanHz}
+            {#if mark >= 0 && mark <= 1}
+              <span class="overview-vfo" class:muted={vfo.muted} style={`left:${mark * 100}%`} title={`VFO ${vfo.id} ${fmtHz(vfo.frequency_hz)}`}></span>
+            {/if}
+          {/each}
+          <span class="overview-labels"><small>{formatSpectrumFrequency(captureStartHz)}</small><small>{formatSpan(captureSpanHz)} capture</small><small>{formatSpectrumFrequency(captureEndHz)}</small></span>
+        </div>
+      {/if}
+      <div class="spectrum-stage">
+        <canvas
+          class={surfaceCursorClass}
+          class:center-mode={spectrumTool === 'center'}
+          use:bindSpectrumCanvas
+          onclick={tuneFromSpectrum}
+          onwheel={spectrumSurfaceWheel}
+          onpointerdown={beginSurfacePan}
+          onpointermove={(event) => { moveSurfacePan(event); if (!surfaceDragging) updateHoverFrequency(event); }}
+          onpointerup={endSurfacePan}
+          onpointercancel={endSurfacePan}
+          onpointerleave={clearHoverFrequency}
+          onkeydown={tuneFromSpectrumKeyboard}
+          tabindex="0"
+          role="slider"
+          aria-valuemin={Math.round(viewStartHz)}
+          aria-valuemax={Math.round(viewEndHz)}
+          aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)}
+          aria-label={`Spectrum tuner showing ${formatSpan(viewport.spanHz)} at ${formatZoom(zoomLevel)}. Drag to pan, scroll to zoom, double-click to zoom or fit. ${spectrumTool === 'center' ? 'Click to move the receiver center.' : 'Click to tune VFO 0.'}`}
+          title="Drag to pan · scroll to zoom · double-click to zoom/fit"
+        ></canvas>
+        {#if hoverFreqHz !== null && !isCompactLayout}
+          <div class="hover-freq" style={`left:${hoverClientX}px; top:${hoverClientY}px`} aria-hidden="true">{formatSpectrumFrequency(hoverFreqHz)}</div>
+        {/if}
       </div>
-      <div class="zoom-controls" role="group" aria-label="Spectrum zoom">
-        <button onclick={() => zoomBy(1 / 1.5)} disabled={!zoomed} aria-label="Zoom out">−</button>
-        <span class="zoom-readout" aria-live="polite">{formatZoom(zoomLevel)} · {formatSpan(viewport.spanHz)} visible</span>
-        <button onclick={() => zoomBy(1.5)} aria-label="Zoom in">+</button>
-        <button class="mini" onclick={resetZoom} disabled={!zoomed} title="Show the whole capture window">Fit span</button>
-        <button class="mini" onclick={zoomToVfo} disabled={!vfos.length} title="Zoom to the listening VFO's passband">Zoom to VFO</button>
-      </div>
-      <p class="interaction-help">Drag to pan{zoomed ? ' inside the capture window — the radio retunes when you reach an edge' : ' the hardware window'}. Scroll to zoom, shift+scroll to pan. {spectrumTool === 'vfo' ? 'Click a peak to tune the listening VFO.' : 'Click to move the receiver center.'} Keys: + − 0.</p>
-      <canvas class:center-mode={spectrumTool === 'center'} use:bindSpectrumCanvas onclick={tuneFromSpectrum} onwheel={spectrumSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} onkeydown={tuneFromSpectrumKeyboard} tabindex="0" role="slider" aria-valuemin={Math.round(viewStartHz)} aria-valuemax={Math.round(viewEndHz)} aria-valuenow={spectrumTool === 'center' ? displayedCenterHz : (vfos[0]?.frequency_hz ?? centerFreqHz)} aria-label={`Spectrum tuner showing ${formatSpan(viewport.spanHz)} at ${formatZoom(zoomLevel)}. Drag to pan, scroll to zoom, plus and minus to zoom, zero to fit. ${spectrumTool === 'center' ? 'Click to move the receiver center.' : 'Click to tune VFO 0.'}`} title="Drag to pan · scroll to zoom · shift+scroll to pan"></canvas>
       {#if spectrumStale}<div class="stale-overlay">Spectrum reconnecting</div>{/if}
       <div class="waterfall-head">
         <div class="waterfall-title-block">
@@ -1927,7 +2111,19 @@
         </div>
       </div>
       <div class="waterfall-stage">
-        <canvas class="waterfall" class:center-mode={spectrumTool === 'center'} use:bindWaterfallCanvas onclick={tuneFromSpectrum} onwheel={spectrumSurfaceWheel} onpointerdown={beginSurfacePan} onpointermove={moveSurfacePan} onpointerup={endSurfacePan} onpointercancel={endSurfacePan} aria-label="Live waterfall. Drag to pan, scroll to zoom, pinch to zoom on touch."></canvas>
+        <canvas
+          class="waterfall {surfaceCursorClass}"
+          class:center-mode={spectrumTool === 'center'}
+          use:bindWaterfallCanvas
+          onclick={tuneFromSpectrum}
+          onwheel={spectrumSurfaceWheel}
+          onpointerdown={beginSurfacePan}
+          onpointermove={(event) => { moveSurfacePan(event); if (!surfaceDragging) updateHoverFrequency(event); }}
+          onpointerup={endSurfacePan}
+          onpointercancel={endSurfacePan}
+          onpointerleave={clearHoverFrequency}
+          aria-label="Live waterfall. Drag to pan, scroll to zoom, pinch to zoom on touch, double-click to zoom or fit."
+        ></canvas>
         {#if !connected}
           <div class="waterfall-empty">Connect an SDR to see the waterfall.</div>
         {:else if spectrumBins.length === 0}
@@ -2320,27 +2516,94 @@
   .spectrum-wrap canvas { display: block; width: 100%; height: 170px; background: #070c12; border-radius: 4px; }
   /* Drag pans and pinch zooms on every surface, so the browser must not claim
      touch gestures for scrolling. */
-  .spectrum-wrap canvas { cursor:crosshair; touch-action:none; }
-  .spectrum-wrap canvas:active { cursor:grabbing; }
-  .spectrum-wrap canvas.center-mode { cursor:grab; }
+  .spectrum-wrap canvas { touch-action:none; }
+  .spectrum-wrap canvas.tune-ready { cursor:crosshair; }
+  .spectrum-wrap canvas.pan-ready, .spectrum-wrap canvas.center-mode { cursor:grab; }
+  .spectrum-wrap canvas.dragging, .spectrum-wrap canvas:active { cursor:grabbing; }
   .spectrum-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
   .spectrum-title-block h2 { margin:0; }
   .spectrum-title-block .fft-status { margin:2px 0 0; color:var(--fg-dim); font:10px var(--mono); }
+  .spectrum-toolbar {
+    display:grid;
+    grid-template-columns: auto minmax(180px, 1.2fr) auto auto;
+    align-items:end;
+    gap:8px;
+    margin:8px 0 4px;
+  }
   .spectrum-tools { display:flex; gap:3px; padding:2px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
-  .spectrum-tools button { min-height:28px; padding:4px 9px; border:0; font-size:11px; }
+  .spectrum-tools button { min-height:32px; padding:4px 9px; border:0; font-size:11px; white-space:nowrap; }
   .spectrum-tools button.active { color:#03120f; background:var(--accent); }
-  .center-controls { display:grid; grid-template-columns:auto minmax(220px, 1fr) auto auto; align-items:end; gap:6px; margin:8px 0 2px; }
-  .center-controls > button { min-height:36px; white-space:nowrap; }
-  .center-controls label { display:flex; flex-direction:column; gap:3px; color:var(--fg-dim); font:10px var(--mono); text-transform:uppercase; letter-spacing:.05em; }
+  .toolbar-center { display:flex; flex-direction:column; gap:3px; color:var(--fg-dim); font:10px var(--mono); text-transform:uppercase; letter-spacing:.05em; }
+  .toolbar-nudge { display:flex; gap:4px; }
+  .toolbar-nudge > button { min-width:36px; min-height:36px; }
   .frequency-entry { display:flex; align-items:center; overflow:hidden; border:1px solid var(--line-strong); border-radius:6px; background:var(--bg); }
   .frequency-entry:focus-within { border-color:var(--accent); box-shadow:0 0 0 2px rgb(45 212 191 / 15%); }
   .frequency-entry input { width:100%; min-height:34px; padding:6px 9px; color:var(--accent); background:transparent; border:0; font:600 15px var(--mono); }
   .frequency-entry input:focus { outline:0; }
   .frequency-entry b { padding:0 9px; color:var(--fg-dim); font:11px var(--mono); }
-  .zoom-controls { display:flex; align-items:center; gap:6px; margin:6px 0 2px; }
-  .zoom-controls > button:first-of-type, .zoom-controls > button:nth-of-type(2) { min-width:34px; min-height:32px; font:600 15px var(--mono); }
-  .zoom-readout { min-width:150px; color:var(--fg-dim); font:11px var(--mono); text-align:center; }
-  .interaction-help { margin:4px 0 7px; color:var(--fg-dim); font-size:11px; }
+  .zoom-controls { display:flex; align-items:center; gap:4px; }
+  .zoom-controls > button:not(.mini) { min-width:34px; min-height:32px; font:600 15px var(--mono); }
+  .zoom-readout { min-width:118px; color:var(--fg-dim); font:11px var(--mono); text-align:center; }
+  .gesture-status { margin:2px 0 6px; color:var(--fg-dim); font:11px var(--mono); min-height:1.2em; }
+  .gesture-status.busy { color:var(--accent); }
+  .capture-overview {
+    position:relative;
+    height:28px;
+    margin:0 0 8px;
+    border:1px solid var(--line);
+    border-radius:6px;
+    background:var(--bg);
+    cursor:grab;
+    touch-action:none;
+    overflow:hidden;
+  }
+  .capture-overview:active { cursor:grabbing; }
+  .overview-track { position:absolute; inset:10px 8px 12px; border-radius:3px; background:var(--line); }
+  .overview-window {
+    position:absolute;
+    top:8px;
+    bottom:10px;
+    min-width:8px;
+    border-radius:3px;
+    background:rgb(45 212 191 / 35%);
+    border:1px solid var(--accent);
+    box-sizing:border-box;
+    pointer-events:none;
+  }
+  .overview-vfo {
+    position:absolute;
+    top:6px;
+    bottom:8px;
+    width:2px;
+    margin-left:-1px;
+    background:#f59e0b;
+    pointer-events:none;
+  }
+  .overview-vfo.muted { background:#64748b; }
+  .overview-labels {
+    position:absolute;
+    inset:auto 6px 1px;
+    display:flex;
+    justify-content:space-between;
+    gap:8px;
+    color:var(--fg-dim);
+    font:9px var(--mono);
+    pointer-events:none;
+  }
+  .spectrum-stage { position:relative; }
+  .hover-freq {
+    position:fixed;
+    z-index:20;
+    transform:translate(12px, -28px);
+    padding:2px 6px;
+    border:1px solid var(--line-strong);
+    border-radius:4px;
+    background:rgb(7 12 18 / 92%);
+    color:var(--accent);
+    font:700 11px var(--mono);
+    pointer-events:none;
+    white-space:nowrap;
+  }
   .fft-status { color: var(--fg-dim); font: 10px var(--mono); font-weight: normal; }
   .waterfall-title { margin: 0 !important; }
   .waterfall-title-block .waterfall-sub { margin:2px 0 0; color:var(--fg-dim); font:10px var(--mono); }
@@ -2475,13 +2738,21 @@
     .spectrum-wrap h2 { display:flex; flex-wrap:wrap; gap:5px; align-items:baseline; }
     .spectrum-heading { align-items:flex-start; }
     .spectrum-heading h2 { flex:1; }
-    .spectrum-tools button { min-height:40px; padding:7px 10px; }
-    .center-controls { grid-template-columns:1fr 1fr; }
-    .center-controls label { grid-column:1 / -1; grid-row:1; }
-    .center-controls > button { min-height:44px; }
-    .center-controls > button:nth-of-type(2) { grid-column:1 / -1; grid-row:3; }
+    .spectrum-tools button { min-height:44px; padding:7px 10px; }
+    .spectrum-toolbar {
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .spectrum-tools { grid-column: 1 / -1; }
+    .toolbar-center { grid-column: 1 / -1; }
+    .toolbar-nudge { grid-column: 1 / -1; justify-content: stretch; }
+    .toolbar-nudge > button { flex: 1; min-height: 44px; }
+    .zoom-controls { grid-column: 1 / -1; flex-wrap: wrap; }
+    .zoom-controls > button:not(.mini), .zoom-controls > button.mini { min-width: 44px; min-height: 44px; }
+    .zoom-readout { flex: 1; min-width: 120px; text-align: left; font-size: 12px; }
+    .gesture-status { font-size: 12px; line-height: 1.4; }
+    .capture-overview { min-height: 36px; height: 36px; }
     .frequency-entry input { min-height:42px; font-size:18px; }
-    .interaction-help { font-size:12px; line-height:1.4; }
     .spectrum-wrap canvas { height:140px; }
     .spectrum-wrap canvas.waterfall { height:max(280px, 42vh); }
     .waterfall-head { flex-direction: column; align-items: stretch; gap: 8px; }
