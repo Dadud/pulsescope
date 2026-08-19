@@ -10,20 +10,23 @@ repository = "https://github.com/pulsescope/pulsescope"
 
 [lib]
 name = "pulsescope_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# PulseScope mobile clients use Capacitor and connect to the server; this Rust
+# library is consumed by the server/Tauri executable and only needs an rlib.
+# Avoiding unused staticlib/cdylib links materially reduces appliance builds.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Tauri 2 — desktop app shell + IPC
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-store = "2"
-tauri-plugin-os = "2"
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
+tauri-plugin-store = { version = "2", optional = true }
+tauri-plugin-os = { version = "2", optional = true }
 
 # Async runtime + utilities
 tokio = { version = "1", features = ["full"] }
@@ -82,9 +85,29 @@ which = "7"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
+sha2 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+ctr = "0.9"
+hex = "0.4"
+base64 = "0.22"
+ed25519-dalek = "2"
+# Native, streaming SSTV decoder. It keeps image decoding in-process and does
+# not require a GUI sound-card application inside the appliance container.
+slowrx = "0.5.3"
 
 [features]
-default = ["mock-source", "soapysdr"]
+default = ["desktop", "mock-source", "soapysdr"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-fs",
+    "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-store",
+    "dep:tauri-plugin-os",
+]
+headless = []
 mock-source = []
 soapysdr = ["dep:soapysdr-sys"]
-custom-protocol = ["tauri/custom-protocol"]
+custom-protocol = ["desktop", "tauri/custom-protocol"]

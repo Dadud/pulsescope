@@ -4,7 +4,12 @@
   "license": "MIT",
   "scripts": {
     "dev": "pnpm --filter pulsescope-ui dev",
-    "build": "pnpm --filter pulsescope-ui build",
+    "check": "pnpm --filter pulsescope-ui check && pnpm verify:release && pnpm verify:contributors",
+    "build": "pnpm --filter pulsescope-ui build && pnpm verify:ui-runtime",
+    "verify:ui-runtime": "node scripts/verify-ui-runtime.mjs",
+    "verify:release": "node scripts/verify-release-contract.mjs && node scripts/generate-feature-status.mjs --check",
+    "verify:contributors": "node scripts/verify-contributor-context.mjs",
+    "generate:feature-status": "node scripts/generate-feature-status.mjs",
     "preview": "pnpm --filter pulsescope-ui preview",
     "tauri": "tauri",
     "tauri:dev": "pnpm exec tauri dev",

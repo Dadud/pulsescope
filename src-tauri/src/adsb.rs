@@ -251,7 +251,7 @@ pub fn decode_mode_s_bits(bits: &[bool]) -> Option<AdsbMessage> {
 }
 
 fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-    let mut out = Vec::with_capacity((bits.len() + 7) / 8);
+    let mut out = Vec::with_capacity(bits.len().div_ceil(8));
     for chunk in bits.chunks(8) {
         let mut b = 0u8;
         for (i, &bit) in chunk.iter().enumerate() {
@@ -358,6 +358,28 @@ pub fn decode_iq_chunk(
     dec.take_messages()
 }
 
+/// Synthetic DF17 IQ for recorded-IQ fixtures and conformance tests.
+pub fn synthesize_df17_iq(
+    icao_bytes: [u8; 3],
+    sample_rate_hz: u32,
+) -> Vec<rustfft::num_complex::Complex<f32>> {
+    let mut payload = vec![false; 88];
+    payload[0] = true;
+    payload[4] = true;
+    for (bi, byte) in icao_bytes.iter().enumerate() {
+        for k in 0..8 {
+            payload[8 + bi * 8 + k] = ((byte >> (7 - k)) & 1) == 1;
+        }
+    }
+    payload[34] = true; // TC=4 identification
+    let full = append_crc(&payload);
+    let sphb = ((sample_rate_hz as f64) * 0.5e-6).round().max(1.0) as usize;
+    synthesize_mode_s_magnitude(&full, sphb)
+        .into_iter()
+        .map(|mag| rustfft::num_complex::Complex::new(mag, 0.0))
+        .collect()
+}
+
 /// Build synthetic Mode S magnitude samples for tests (ideal PPM at `sphb` samples/half-bit).
 pub fn synthesize_mode_s_magnitude(bits: &[bool], sphb: usize) -> Vec<f32> {
     // Preamble: highs at half-bit 0,4,7,9
@@ -373,13 +395,9 @@ pub fn synthesize_mode_s_magnitude(bits: &[bool], sphb: usize) -> Vec<f32> {
         let mut first = vec![0.05f32; sphb];
         let mut second = vec![0.05f32; sphb];
         if bit {
-            for s in &mut first {
-                *s = 1.0;
-            }
+            first.fill(1.0);
         } else {
-            for s in &mut second {
-                *s = 1.0;
-            }
+            second.fill(1.0);
         }
         mags.extend(first);
         mags.extend(second);
@@ -461,7 +479,10 @@ mod tests {
         let mut dec = AdsbDecoder::new(2_000_000).unwrap();
         dec.feed_magnitude(&mags);
         let msgs = dec.take_messages();
-        assert!(!msgs.is_empty(), "preamble+PPM path should recover the frame");
+        assert!(
+            !msgs.is_empty(),
+            "preamble+PPM path should recover the frame"
+        );
         assert_eq!(msgs[0].icao, "ABCDEF");
         assert_eq!(msgs[0].df, 17);
     }

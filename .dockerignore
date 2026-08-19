@@ -1,0 +1,12 @@
+.git
+.github
+.agents
+.codex
+node_modules
+ui/node_modules
+ui/.svelte-kit
+ui/build
+src-tauri/target
+target
+sdr-runtime
+*.log

@@ -16,7 +16,8 @@ export const navSections: NavSection[] = [
     id: 'scan',
     label: 'Scan',
     items: [
-      { label: 'Scanner', href: '#/', description: 'Spectrum, waterfall, VFOs, live decode dock' },
+      { label: 'Receiver', href: '#/', description: 'Spectrum, waterfall, VFOs, tuning' },
+      { label: 'Monitor', href: '#/monitor', description: 'System health and decoder jobs' },
       { label: 'Occupancy', href: '#/occupancy', description: 'Spectrum utilization meters' },
       { label: 'Signal ID', href: '#/signal-id', description: 'Fingerprints and burst segmentation' },
       { label: 'Blacklist', href: '#/blacklist', description: 'Frequency exclusion list' },

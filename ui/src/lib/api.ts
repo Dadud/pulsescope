@@ -67,6 +67,9 @@ export interface VfoState {
   candidates?: ProtocolCandidate[];
   locked?: boolean;
   segment_label?: string;
+  snr_db?: number;
+  noise_floor_db?: number;
+  last_hit_ms?: number;
 }
 
 export interface DecodedMessage {
@@ -102,54 +105,208 @@ export interface ScannerEvent {
   data: any;
 }
 
+export interface PcmAudioFrame {
+  sequence: number;
+  sampleRate: number;
+  channels: number;
+  capturedMs: number;
+  samples: Float32Array;
+}
+
+export interface SpectrumStreamFrame {
+  sequence: number;
+  capturedMs: number;
+  centerFreqHz: number;
+  sampleRateHz: number;
+  usableSpanHz: number;
+  bins: number[];
+  receiverId: number;
+  sessionRevision: number;
+}
+
+export interface ReceiverBookmark {
+  id?: number;
+  label: string;
+  frequency_hz: number;
+  mode: string;
+  bandwidth_hz: number;
+  profile_id?: string | null;
+  color?: string;
+  decoder?: string;
+  notes?: string;
+  enabled?: boolean;
+}
+
+export interface ReceiverProfile {
+  id?: string;
+  name: string;
+  center_frequency_hz: number;
+  sample_rate_hz: number;
+  bandwidth_hz: number;
+  mode: string;
+  region?: string;
+  deemphasis_us?: number | null;
+  gain_policy?: Record<string, unknown>;
+  decoder_policy?: Record<string, unknown>;
+}
+
+const LIVE_REQUEST_TIMEOUT_MS = 5_000;
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly path: string,
+    readonly status: number,
+    readonly retryable: boolean,
+    readonly requestId?: string,
+  ) { super(message); this.name = 'ApiError'; }
+}
+
+async function fetchBounded(input: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), LIVE_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { cache: 'no-store', ...init, signal: controller.signal });
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
+async function throwHttpError(path: string, response: Response): Promise<never> {
+  let message = `HTTP ${response.status}`;
+  try {
+    const payload = await response.clone().json();
+    message = payload?.error || payload?.message || payload?.detail || message;
+  } catch { /* non-JSON error bodies are still represented by status */ }
+  const requestId = response.headers.get('x-request-id') ?? undefined;
+  throw new ApiError(`${path}: ${message}`, path, response.status, response.status >= 500 || response.status === 408 || response.status === 429, requestId);
+}
+
 export async function getJson<T = any>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, { headers: { ...authHeader() } });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  const r = await fetchBounded(`${BASE}${path}`, { headers: { ...authHeader() } });
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
 export async function postJson<T = any>(path: string, body?: any): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetchBounded(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
 export async function putJson<T = any>(path: string, body: any): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetchBounded(`${BASE}${path}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
 export async function deleteJson<T = any>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  const r = await fetchBounded(`${BASE}${path}`, { method: 'DELETE', headers: { ...authHeader() } });
+  if (!r.ok) await throwHttpError(path, r);
   return r.json();
 }
 
-export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
+function websocketUrl(path: string): string {
   // Honor auth if PULSESCOPE_AUTH_TOKEN is set or the URL has ?token=...
   const headers = authHeader();
   // Browser WebSocket constructor doesn't accept headers, so encode the
   // token as a query param. Server accepts both Bearer and ?token=.
-  const base = typeof window !== 'undefined' ? `${WS_BASE}/events` : `${WS_BASE}/events`;
+  const base = `${WS_BASE}${path}`;
   const sep = base.includes('?') ? '&' : '?';
   const auth = headers['authorization'] && headers['authorization'].startsWith('Bearer ');
   const tokenParam = auth ? `${sep}token=${encodeURIComponent(headers['authorization'].slice(7))}` : '';
-  const ws = new WebSocket(`${base}${tokenParam}`);
+  return `${base}${tokenParam}`;
+}
+
+export function openEvents(
+  cb: (ev: ScannerEvent) => void,
+  onState?: (state: 'connecting' | 'open' | 'closed' | 'error') => void,
+): WebSocket {
+  onState?.('connecting');
+  const ws = new WebSocket(websocketUrl('/events'));
+  ws.onopen = () => onState?.('open');
   ws.onmessage = (e) => {
     try { cb(JSON.parse(e.data)); }
     catch (err) { console.warn('bad ws frame', err); }
   };
-  ws.onclose = () => console.log('event ws closed');
-  ws.onerror = (e) => console.warn('event ws error', e);
+  ws.onclose = () => onState?.('closed');
+  ws.onerror = () => onState?.('error');
+  return ws;
+}
+
+export function openSpectrum(
+  onFrame: (frame: SpectrumStreamFrame) => void,
+  onState?: (state: 'connecting' | 'open' | 'closed' | 'error') => void,
+): WebSocket {
+  onState?.('connecting');
+  const ws = new WebSocket(websocketUrl('/api/v2/spectrum/stream'));
+  ws.binaryType = 'arraybuffer';
+  let scratchBins: number[] = [];
+  ws.onopen = () => onState?.('open');
+  ws.onclose = () => onState?.('closed');
+  ws.onerror = () => onState?.('error');
+  ws.onmessage = (event) => {
+    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 64) return;
+    const bytes = new Uint8Array(event.data);
+    if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'PSF3') return;
+    const view = new DataView(event.data);
+    if (view.getUint16(4, true) !== 3) return;
+    const count = view.getUint32(40, true);
+    if (64 + count !== event.data.byteLength) return;
+    const floor = view.getFloat32(44, true);
+    const scale = view.getFloat32(48, true);
+    if (scratchBins.length !== count) scratchBins = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      scratchBins[i] = floor + bytes[64 + i] * scale;
+    }
+    onFrame({
+      sequence: Number(view.getBigUint64(8, true)),
+      capturedMs: Number(view.getBigInt64(16, true)),
+      centerFreqHz: Number(view.getBigUint64(24, true)),
+      sampleRateHz: view.getUint32(32, true),
+      usableSpanHz: view.getUint32(36, true),
+      receiverId: view.getUint32(52, true),
+      sessionRevision: Number(view.getBigUint64(56, true)),
+      bins: scratchBins.slice(0, count),
+    });
+  };
+  return ws;
+}
+
+export function openAudio(
+  onFrame: (frame: PcmAudioFrame) => void,
+  onState?: (state: 'connecting' | 'open' | 'closed' | 'error') => void,
+): WebSocket {
+  onState?.('connecting');
+  const ws = new WebSocket(websocketUrl('/audio/stream'));
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => onState?.('open');
+  ws.onclose = () => onState?.('closed');
+  ws.onerror = () => onState?.('error');
+  ws.onmessage = (event) => {
+    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 32) return;
+    const bytes = new Uint8Array(event.data);
+    if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'PSA2') return;
+    const view = new DataView(event.data);
+    if (view.getUint16(4, true) !== 2) return;
+    const channels = view.getUint16(6, true);
+    const sampleRate = view.getUint32(8, true);
+    const sequence = Number(view.getBigUint64(12, true));
+    const capturedMs = Number(view.getBigInt64(20, true));
+    const sampleCount = view.getUint32(28, true);
+    if (channels < 1 || sampleRate < 8_000 || 32 + sampleCount * 4 !== event.data.byteLength) return;
+    const samples = new Float32Array(sampleCount);
+    for (let i = 0; i < sampleCount; i += 1) samples[i] = view.getFloat32(32 + i * 4, true);
+    onFrame({ sequence, sampleRate, channels, capturedMs, samples });
+  };
   return ws;
 }
 
@@ -157,7 +314,7 @@ export function openEvents(cb: (ev: ScannerEvent) => void): WebSocket {
 // remain small and the backend contract has a single source of truth.
 export const Api = {
   health: () => getJson('/health'),
-  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean }>('/spectrum'),
+  spectrum: () => getJson<{ bins: number[]; range?: string | null; running?: boolean; locked?: boolean; holding?: boolean; frame_sequence?: number; frame_timestamp_ms?: number; noise_floor_db?: number }>('/spectrum'),
   banks: () => getJson<ScanRange[]>('/channels/banks'),
   createBank: (body: any) => postJson('/channels/banks/create', body),
   deleteBank: (name: string) => postJson('/channels/banks/delete', { name }),
@@ -166,8 +323,19 @@ export const Api = {
   scannerPan: (center_hz: number) => postJson('/scanner/pan', { center_hz }),
   scanStart: (range_name: string) => postJson('/channels/scan/start', { range_name }),
   scanStop: () => postJson('/channels/scan/stop'),
+  scanSkip: () => postJson('/scan/skip'),
+  scanLockout: () => postJson('/scan/lockout'),
+  scanLock: () => postJson('/scan/lock'),
+  scanUnlock: () => postJson('/scan/unlock'),
+  scanStatus: () => getJson<{ running: boolean; locked: boolean; holding?: boolean; range?: string | null }>('/scan/status'),
   vfoStates: () => getJson<VfoState[]>('/vfo/states'),
-  vfoMute: (id: number, on: boolean) => postJson(`/vfo/${id}/mute`, { id, on }),
+  scannerMaxVfos: () => getJson<{ max_vfos: number }>('/scanner/max-vfos'),
+  /** Allocate an operator-placed slot. Rejects past the receiver's VFO limit. */
+  vfoAdd: (frequency_hz?: number, mode?: string) =>
+    postJson<{ ok: boolean; max_vfos: number; vfos: number }>('/vfo/add', { frequency_hz, mode }),
+  vfoRemove: (id: number) => postJson(`/vfo/${id}/remove`, { id }),
+  /** `muted: true` is sent as `{ on: true }` — the wire flag means muted, not listen. */
+  vfoMute: (id: number, muted: boolean) => postJson(`/vfo/${id}/mute`, { id, on: muted }),
   vfoVolume: (id: number, value: number) => postJson(`/vfo/${id}/volume`, { id, value }),
   vfoFrequency: (id: number, frequency_hz: number) => postJson(`/vfo/${id}/frequency`, { frequency_hz }),
   vfoMode: (id: number, mode: string) => postJson(`/vfo/${id}/mode`, { mode }),
@@ -175,10 +343,18 @@ export const Api = {
   vfoIdentify: (id: number) => postJson(`/vfo/${id}/identify`, { id }),
   vfoLock: (id: number, locked: boolean) => postJson(`/vfo/${id}/lock`, { locked }),
   vfoDecode: (id: number, decoder?: string) => postJson(`/vfo/${id}/decode`, decoder ? { decoder } : {}),
+  vfoRds: (id: number) => getJson<{ present?: boolean; pi_code?: number | null; program_service?: string | null; radio_text?: string | null; reason?: string }>(`/vfo/${id}/rds`),
+  scanCtcss: () => getJson<{ available?: boolean; ctcss?: { tone_hz: number; confidence: number } | null; dcs?: unknown; reason?: string }>('/scan/ctcss'),
   devices: () => getJson('/devices'),
   deviceConnect: (key: string, label?: string) => postJson('/device/connect', { key, label }),
   deviceDisconnect: () => postJson('/device/disconnect'),
   deviceStatus: () => getJson('/device/status'),
+  deviceFrequency: (frequency_hz: number) => postJson('/device/frequency', { frequency_hz }),
+  receiversV2Tune: (
+    receiverId: string,
+    body: { command_id: string; expected_revision: number; frequency_hz: number },
+  ) => postJson(`/api/v2/receivers/${encodeURIComponent(receiverId)}/tune`, body),
+  deviceSampleRate: (sample_rate: number) => postJson('/device/sample_rate', { sample_rate }),
   deviceCapabilities: () => getJson('/device/capabilities'),
   deviceControl: (control: string, value: string | number | boolean) => postJson('/device/control', { control, value: String(value) }),
   decodedMessages: (limit = 100) => getJson<DecodedMessage[]>(`/decoded_messages?limit=${limit}`),
@@ -225,6 +401,8 @@ export const Api = {
   bleClear: () => postJson('/ble/clear'),
   loraMessages: () => getJson<any[]>('/lora/messages'),
   loraRegions: () => getJson<any[]>('/lora/regions'),
+  scanLora: () => getJson('/scan/lora'),
+  scanBle: () => getJson('/scan/ble'),
 
   signalFingerprints: () => getJson<any[]>('/signal_id/fingerprints'),
   signalSegmentBursts: () => postJson('/signal_id/segment_bursts'),
@@ -239,18 +417,39 @@ export const Api = {
   iqRecordingStop: () => postJson('/iq_recording/stop'),
   cases: () => getJson<any[]>('/cases'),
   createCase: (body: any) => postJson('/cases', body),
-  deleteCase: (id: number) => fetch(`${BASE}/cases/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteCase: (id: number) => deleteJson(`/cases/${id}`),
   recordingAnnotations: () => getJson<any[]>('/recordings/annotations'),
   addRecordingAnnotation: (body: any) => postJson('/recordings/annotations', body),
-  deleteRecordingAnnotation: (id: number) => fetch(`${BASE}/recordings/annotations/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteRecordingAnnotation: (id: number) => deleteJson(`/recordings/annotations/${id}`),
   transcriptionStatus: () => getJson('/transcription/status'),
   transcripts: () => getJson<any[]>('/transcription/transcripts'),
   transcriptionStart: () => postJson('/transcription/start'),
   transcriptionStop: () => postJson('/transcription/stop'),
 
   featurePacks: () => getJson('/feature-packs'),
+  decoderScan: () => getJson('/decoders/scan'),
+  decoderAdaptations: () => getJson('/decoders/adaptations'),
+  decoderConfigure: () => postJson('/decoders/configure'),
+  decoderInstall: (name: string) => postJson(`/decoders/install/${encodeURIComponent(name)}`),
+  decoderInstallGuide: (name: string) => getJson(`/decoders/install/${encodeURIComponent(name)}/guide`),
+  systemHealthV2: () => getJson('/api/v2/system/health'),
+  receiversV2: () => getJson('/api/v2/receivers'),
+  hardwareWindowsV2: () => getJson('/api/v2/hardware-windows'),
+  listenerSessionsV2: () => getJson('/api/v2/listener-sessions'),
+  saveListenerSessionV2: (body: any) => postJson('/api/v2/listener-sessions', body),
+  profilesV2: () => getJson<{ contract_version: number; profiles: ReceiverProfile[] }>('/api/v2/profiles'),
+  saveProfileV2: (body: ReceiverProfile) => postJson('/api/v2/profiles', body),
+  applyProfileV2: (id: string) => postJson(`/api/v2/profiles/${encodeURIComponent(id)}/apply`),
+  deleteProfileV2: (id: string) => deleteJson(`/api/v2/profiles/${encodeURIComponent(id)}`),
+  bookmarksV2: () => getJson<{ contract_version: number; bookmarks: ReceiverBookmark[] }>('/api/v2/bookmarks'),
+  saveBookmarkV2: (body: ReceiverBookmark) => postJson('/api/v2/bookmarks', body),
+  deleteBookmarkV2: (id: number) => deleteJson(`/api/v2/bookmarks/${id}`),
+  bandplansV2: () => getJson('/api/v2/bandplans'),
+  decoderJobsV2: () => getJson('/api/v2/decoder-jobs'),
+  decoderCatalogV2: () => getJson<{ contract_version: number; decoders: any[] }>('/api/v2/decoders/catalog'),
+  featureStatusV2: () => getJson('/api/v2/features'),
   featurePackEnable: (id: string, enabled: boolean) => postJson(`/feature-packs/${encodeURIComponent(id)}/enable`, { enabled }),
-  sidecarsStatus: () => getJson<any[]>('/sidecars/status'),
+  sidecarsStatus: () => getJson<{ runtime: any[]; discovered: any[] }>('/sidecars/status'),
   sidecarStderr: (name: string) => getJson<string[]>(`/sidecars/${encodeURIComponent(name)}/stderr`),
   blacklist: () => getJson('/blacklist'),
   blacklistAdd: (frequency_hz: number, reason = '') => postJson('/blacklist/add', { frequency_hz, reason }),

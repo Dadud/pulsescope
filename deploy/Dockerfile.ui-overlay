@@ -1,0 +1,7 @@
+ARG BASE_IMAGE=pulsescope:local
+FROM ${BASE_IMAGE}
+
+USER root
+COPY ui/build /app/ui
+RUN chown -R pulsescope:pulsescope /app/ui
+USER pulsescope

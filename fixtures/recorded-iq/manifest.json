@@ -1,0 +1,291 @@
+{
+  "schema": "pulsescope.recorded-iq-fixture",
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "adsb-df17-abcdef",
+      "protocol": "adsb",
+      "file": "adsb-df17-abcdef.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "adsb",
+        "icao": "ABCDEF",
+        "mmsi": null,
+        "source": null,
+        "info_contains": null
+      },
+      "sha256": "056c6956fcdaa9ab44255bf29e6e364357fcef0d70ce2df0daf169bc962e6907"
+    },
+    {
+      "id": "ais-type1-position",
+      "protocol": "ais",
+      "file": "ais-type1-position.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "ais",
+        "icao": null,
+        "mmsi": 366123456,
+        "source": null,
+        "info_contains": null
+      },
+      "sha256": "8e36744f15b27a2d26a9e8b9ec741b74f4e289f074c4979bcb92350c79b473ca"
+    },
+    {
+      "id": "aprs-w1aw-hello",
+      "protocol": "aprs",
+      "file": "aprs-w1aw-hello.nrz.json",
+      "kind": "nrz_bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "aprs",
+        "icao": null,
+        "mmsi": null,
+        "source": "W1AW",
+        "info_contains": "Hello world"
+      },
+      "sha256": "d954aa848389c8c5e6b248a1691b9a0c739d455cc1d49d97a88e0fb0cf8c71ce"
+    },
+    {
+      "id": "pocsag-hello",
+      "protocol": "pocsag",
+      "file": "pocsag-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "pocsag",
+        "icao": null,
+        "mmsi": null,
+        "source": "42002",
+        "info_contains": "HELLO"
+      },
+      "sha256": "a25e58faee7de7b5fca7159c94ede2165934f680843e315ddc6d09aa23bfb97b"
+    },
+    {
+      "id": "rtty-hello",
+      "protocol": "rtty",
+      "file": "rtty-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "rtty",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "34056bc9cbaecddada0010d6d9fcf326d14ef413363559b75767f89f2b1393e4"
+    },
+    {
+      "id": "navtex-hello",
+      "protocol": "navtex",
+      "file": "navtex-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "navtex",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "d0e7a258a298bdcd8ed15559cbd2881efae04aa36009b6e47dd4b0feef771cc5"
+    },
+    {
+      "id": "uat-abcdef",
+      "protocol": "uat",
+      "file": "uat-abcdef.bits.json",
+      "kind": "bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "uat",
+        "icao": "ABCDEF",
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "de88af5675052dd2c93e8e5d51aa2c063255bfbd6aab254de6981584224dad7b"
+    },
+    {
+      "id": "acars-n123ab-hello",
+      "protocol": "acars",
+      "file": "acars-n123ab-hello.bits.json",
+      "kind": "bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "acars",
+        "icao": null,
+        "mmsi": null,
+        "source": "N123AB",
+        "info_contains": "HELLO"
+      },
+      "sha256": "144e8ead8c68a9dd4244a0cc6866f3c7be4a4e212890da7b96753661fe50307f"
+    },
+    {
+      "id": "vdl2-hello",
+      "protocol": "vdl2",
+      "file": "vdl2-hello.bits.json",
+      "kind": "bits",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "vdl2",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "8e500277a04ebec795961a0bf28bb568f610572251561b4db88d39f433d0aa01"
+    },
+    {
+      "id": "rds-beef-hello",
+      "protocol": "rds",
+      "file": "rds-beef-hello.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "rds",
+        "icao": null,
+        "mmsi": null,
+        "source": "BEEF",
+        "info_contains": "HELLO"
+      },
+      "sha256": "f11f082999688e46d41e0de30d9cfe1f1f9dfe9e8343365dbc43e2c10227b098"
+    },
+    {
+      "id": "cw-sos",
+      "protocol": "cw",
+      "file": "cw-sos.audio.json",
+      "kind": "audio",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "cw",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "S"
+      },
+      "sha256": "83819eec178a6ff37878edd1361b1fba5d12b0619ea82c2cd6f3ad243a60df4b"
+    },
+    {
+      "id": "ble-pulse-advert",
+      "protocol": "ble",
+      "file": "ble-pulse-advert.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "ble",
+        "icao": null,
+        "mmsi": null,
+        "source": "AA:BB:CC:DD:EE:FF",
+        "info_contains": "PULSE"
+      },
+      "sha256": "496262a65e480ac45611fbdd7f01c61e48f080c17484064da2c7c47e69d4e4c9"
+    },
+    {
+      "id": "lora-meshtastic-hello",
+      "protocol": "meshtastic",
+      "file": "lora-meshtastic-hello.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "meshtastic",
+        "icao": null,
+        "mmsi": null,
+        "source": "00abcdef",
+        "info_contains": "HELLO"
+      },
+      "sha256": "6c8d771abff4d59a2d623d099d1fa9707817eefeff7803c7647ab639916ccea3"
+    },
+    {
+      "id": "lora-meshcore-hello",
+      "protocol": "meshcore",
+      "file": "lora-meshcore-hello.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "meshcore",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "HELLO"
+      },
+      "sha256": "ec859cfe637ddf7a718227e66010983355cab6fd388639b447b2d5a431eef57e"
+    },
+    {
+      "id": "lora-reticulum-announce",
+      "protocol": "reticulum",
+      "file": "lora-reticulum-announce.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "reticulum",
+        "icao": null,
+        "mmsi": null,
+        "source": null,
+        "info_contains": "PULSE"
+      },
+      "sha256": "f3baac7ddeadec3968c3e47cf360250da0162e65abaf3a5a4ebe10c21f9f4529"
+    },
+    {
+      "id": "lora-modbus-read",
+      "protocol": "modbus-lora",
+      "file": "lora-modbus-read.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "modbus-lora",
+        "icao": null,
+        "mmsi": null,
+        "source": "1",
+        "info_contains": "function 3"
+      },
+      "sha256": "64a9cafa69ad6b7a74c5a66d26f940b8a2c90eb7117ce444975d7ac404317f0b"
+    },
+    {
+      "id": "lora-lorawan-identify",
+      "protocol": "lorawan",
+      "file": "lora-lorawan-identify.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "lorawan",
+        "icao": null,
+        "mmsi": null,
+        "source": "44332211",
+        "info_contains": "not decrypted"
+      },
+      "sha256": "a42577d928c25649b7a510cf141b3fdf0b7f396121245597e71735a3cb318ebd"
+    },
+    {
+      "id": "lora-meshtastic-encrypted",
+      "protocol": "meshtastic",
+      "file": "lora-meshtastic-encrypted.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "meshtastic",
+        "icao": null,
+        "mmsi": null,
+        "source": "00abcdef",
+        "info_contains": "HELLO"
+      },
+      "sha256": "56ac088a3e03f69e48662a6b12105085284cf0a784a164192e087e8b4833726a"
+    },
+    {
+      "id": "p25-tsbk-group-grant",
+      "protocol": "p25-tsbk",
+      "file": "p25-tsbk-group-grant.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "p25-tsbk",
+        "icao": null,
+        "mmsi": null,
+        "source": "1234",
+        "info_contains": "56789"
+      },
+      "sha256": "2c7100dba851c94fa011b41a3cbbc40fd62f324630430edda2bf0c7dd9dd9051"
+    }
+  ]
+}

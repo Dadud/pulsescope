@@ -1,0 +1,51 @@
+{
+  "schema": "pulsescope.fixture-manifest",
+  "version": 1,
+  "fixtures": [
+    {
+      "file": "valid.iq.json",
+      "protocol": "transport",
+      "kind": "valid",
+      "expected": "accepted",
+      "provenance": "synthetic clean-room IQ symbol sequence",
+      "license": "MIT",
+      "sha256": "d19dc02fcd6a869fb03fc87d8dedb62181be76ab992f0dcb1ea3bdda07f3fad5"
+    },
+    {
+      "file": "corrupted.iq.json",
+      "protocol": "transport",
+      "kind": "corrupted",
+      "expected": "rejected",
+      "provenance": "synthetic clean-room IQ symbol sequence",
+      "license": "MIT",
+      "sha256": "6c777c2709553472959332e375a8f2974bf4677f47a39db5ff8b4366dc0df1be"
+    },
+    {
+      "file": "weak.iq.json",
+      "protocol": "transport",
+      "kind": "weak",
+      "expected": "rejected",
+      "provenance": "synthetic clean-room IQ symbol sequence",
+      "license": "MIT",
+      "sha256": "981fddd2bfd5404413b33d15b7d72febb464f1f4fc3d34df0b5b2d37b49f691e"
+    },
+    {
+      "file": "truncated.iq.json",
+      "protocol": "transport",
+      "kind": "truncated",
+      "expected": "rejected",
+      "provenance": "synthetic clean-room IQ symbol sequence",
+      "license": "MIT",
+      "sha256": "6e2c36dc24021e88ec690c00296944afae777a9269b758431c1c97c224860a42"
+    },
+    {
+      "file": "back-to-back.iq.json",
+      "protocol": "transport",
+      "kind": "back_to_back",
+      "expected": "accepted",
+      "provenance": "synthetic clean-room IQ symbol sequence",
+      "license": "MIT",
+      "sha256": "3f824fc96c741a6498ce2f7708e19d11f509447682f3417d205aae39b03576ca"
+    }
+  ]
+}

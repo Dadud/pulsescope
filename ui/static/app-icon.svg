@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="PulseScope">
+  <rect width="512" height="512" rx="112" fill="#131b22"/>
+  <circle cx="256" cy="256" r="188" fill="none" stroke="#2dd4bf" stroke-width="28"/>
+  <path d="M76 256h86l35-118 61 240 55-168 35 46h88" fill="none" stroke="#e3eef3" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
