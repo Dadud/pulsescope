@@ -62,6 +62,34 @@
   let autoDecodeEnabled = $state(true);
   let useArrlBandplan = $state(true);
   let decoderPick: Record<number, string> = $state({});
+  let spectrumViewMode = $state<'band' | 'full'>('band');
+  let deviceMinHz = $state(24_000_000);
+  let deviceMaxHz = $state(1_700_000_000);
+  let bandStartHz = $state(0);
+  let bandEndHz = $state(0);
+  let viewStartHz = $state(0);
+  let viewEndHz = $state(0);
+  let panDragging = false;
+  let panStartX = 0;
+  let panStartCenter = 0;
+  let panMoved = false;
+
+  const navigationMinHz = $derived(
+    spectrumViewMode === 'band' && bandEndHz > bandStartHz ? bandStartHz : deviceMinHz
+  );
+  const navigationMaxHz = $derived(
+    spectrumViewMode === 'band' && bandEndHz > bandStartHz ? bandEndHz : deviceMaxHz
+  );
+  const navWindowLeft = $derived(
+    navigationMaxHz > navigationMinHz
+      ? ((viewStartHz - navigationMinHz) / (navigationMaxHz - navigationMinHz)) * 100
+      : 0
+  );
+  const navWindowWidth = $derived(
+    navigationMaxHz > navigationMinHz
+      ? Math.max(2, (sampleRateHz / (navigationMaxHz - navigationMinHz)) * 100)
+      : 100
+  );
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
@@ -103,6 +131,7 @@
       const spectrum = (event as CustomEvent).detail;
       activeRange = spectrum?.range ?? activeRange;
       scanRunning = Boolean(spectrum?.running);
+      applySpectrumMeta(spectrum);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length) {
         spectrumError = '';
         void applySpectrum(spectrum.bins);
@@ -157,6 +186,8 @@
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
+      deviceMinHz = Number(status.min_freq_hz ?? deviceMinHz);
+      deviceMaxHz = Number(status.max_freq_hz ?? deviceMaxHz);
       signalHistory = storedSignals;
       autoDecodeEnabled = Boolean(scanCfg?.auto_decode_all);
       useArrlBandplan = Boolean(scanCfg?.use_arrl_bandplan);
@@ -175,6 +206,8 @@
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
       sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
+      deviceMinHz = Number(status.min_freq_hz ?? deviceMinHz);
+      deviceMaxHz = Number(status.max_freq_hz ?? deviceMaxHz);
       vfos = nextVfos;
     } catch (e) { console.warn('runtime polling failed', e); }
   }
@@ -193,6 +226,7 @@
       // here as well so a dropped event socket cannot leave dead VFO/UI chrome.
       activeRange = spectrum?.range ?? activeRange;
       scanRunning = Boolean(spectrum?.running);
+      applySpectrumMeta(spectrum);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length > 0) {
         spectrumError = '';
         await applySpectrum(spectrum.bins);
@@ -235,6 +269,105 @@
     localStorage.setItem('pulsescope.waterfall.palette', waterfallPalette);
   }
 
+  function applySpectrumMeta(spectrum: any) {
+    if (!spectrum) return;
+    if (spectrum.spectrum_view_mode) {
+      spectrumViewMode = spectrum.spectrum_view_mode === 'full' ? 'full' : 'band';
+    }
+    if (spectrum.center_freq_hz != null) centerFreqHz = Number(spectrum.center_freq_hz);
+    if (spectrum.sample_rate_hz != null) sampleRateHz = Number(spectrum.sample_rate_hz);
+    if (spectrum.view_start_hz != null) viewStartHz = Number(spectrum.view_start_hz);
+    if (spectrum.view_end_hz != null) viewEndHz = Number(spectrum.view_end_hz);
+    if (spectrum.device_min_freq_hz != null) deviceMinHz = Number(spectrum.device_min_freq_hz);
+    if (spectrum.device_max_freq_hz != null) deviceMaxHz = Number(spectrum.device_max_freq_hz);
+    if (spectrum.band_start_hz != null) bandStartHz = Number(spectrum.band_start_hz);
+    if (spectrum.band_end_hz != null) bandEndHz = Number(spectrum.band_end_hz);
+  }
+
+  function clampCenterForView(center: number): number {
+    const half = sampleRateHz / 2;
+    const minCenter = navigationMinHz + half;
+    const maxCenter = navigationMaxHz - half;
+    if (minCenter <= maxCenter) return Math.max(minCenter, Math.min(maxCenter, center));
+    return (navigationMinHz + navigationMaxHz) / 2;
+  }
+
+  function clampFrequencyForView(freq: number): number {
+    if (spectrumViewMode === 'band' && bandEndHz > bandStartHz) {
+      return Math.max(bandStartHz, Math.min(bandEndHz, freq));
+    }
+    return Math.max(deviceMinHz, Math.min(deviceMaxHz, freq));
+  }
+
+  async function setSpectrumViewMode(mode: 'band' | 'full') {
+    spectrumViewMode = mode;
+    try {
+      await Api.scannerSpectrumMode(mode);
+      await pollSpectrum();
+      notice = mode === 'full' ? 'Full spectrum — scroll or drag to pan' : 'Band mode — view locked to scan range';
+      setTimeout(() => (notice = ''), 2500);
+    } catch (e) { notice = String(e); }
+  }
+
+  async function panCenter(centerHz: number) {
+    const clamped = Math.round(clampCenterForView(centerHz));
+    const result = await Api.scannerPan(clamped);
+    centerFreqHz = Number(result.center_freq_hz ?? clamped);
+    viewStartHz = Number(result.view_start_hz ?? viewStartHz);
+    viewEndHz = Number(result.view_end_hz ?? viewEndHz);
+  }
+
+  function panByFraction(fraction: number) {
+    const span = navigationMaxHz - navigationMinHz;
+    if (span <= 0) return;
+    const step = Math.max(sampleRateHz / 4, span / 20);
+    void panCenter(centerFreqHz + fraction * step);
+  }
+
+  function onSpectrumPointerDown(event: PointerEvent) {
+    panDragging = true;
+    panMoved = false;
+    panStartX = event.clientX;
+    panStartCenter = centerFreqHz;
+    (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
+  }
+
+  function onSpectrumPointerMove(event: PointerEvent) {
+    if (!panDragging) return;
+    const rect = (event.currentTarget as HTMLCanvasElement).getBoundingClientRect();
+    const deltaPx = event.clientX - panStartX;
+    if (Math.abs(deltaPx) > 4) panMoved = true;
+    const deltaFraction = -deltaPx / rect.width;
+    centerFreqHz = Math.round(clampCenterForView(panStartCenter + deltaFraction * sampleRateHz));
+    viewStartHz = Math.round(centerFreqHz - sampleRateHz / 2);
+    viewEndHz = Math.round(centerFreqHz + sampleRateHz / 2);
+  }
+
+  async function onSpectrumPointerUp(event: PointerEvent) {
+    if (!panDragging) return;
+    panDragging = false;
+  if (panMoved) {
+      await panCenter(centerFreqHz);
+    } else {
+      await tuneFromSpectrum(event);
+    }
+  }
+
+  function onSpectrumWheel(event: WheelEvent) {
+    event.preventDefault();
+    const dir = event.deltaX !== 0 ? event.deltaX : event.deltaY;
+    panByFraction(dir > 0 ? 0.12 : -0.12);
+  }
+
+  function navigatorClick(event: MouseEvent) {
+    const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const span = navigationMaxHz - navigationMinHz;
+    if (span <= 0) return;
+    const targetCenter = navigationMinHz + fraction * span;
+    void panCenter(targetCenter);
+  }
+
   function toggleLogDock() {
     logDockOpen = !logDockOpen;
     localStorage.setItem('pulsescope.logdock.open', logDockOpen ? '1' : '0');
@@ -258,7 +391,7 @@
 
     // Active VFO markers make tuning context visible even on a wide span.
     for (const vfo of vfos) {
-      const normalized = (vfo.frequency_hz - (centerFreqHz - sampleRateHz / 2)) / sampleRateHz;
+      const normalized = (vfo.frequency_hz - viewStartHz) / sampleRateHz;
       if (normalized < 0 || normalized > 1) continue;
       const x = normalized * w;
       ctx.strokeStyle = vfo.muted ? '#64748b' : '#f59e0b';
@@ -325,6 +458,12 @@
   }
 
   async function startScan(name: string) {
+    const bank = banks.find((b) => b.name === name);
+    if (bank) {
+      bandStartHz = bank.start_hz;
+      bandEndHz = bank.end_hz;
+    }
+    spectrumViewMode = 'band';
     activeRange = name;
     scanRunning = true;
     await Api.scanStart(name);
@@ -339,16 +478,17 @@
     await Api.scanStop();
   }
 
-  async function tuneFromSpectrum(event: MouseEvent) {
+  async function tuneFromSpectrum(event: MouseEvent | PointerEvent) {
     const target = event.currentTarget as HTMLCanvasElement;
     const vfo = vfos.find((v) => v.id === selectedVfoId) ?? vfos[0];
     if (!vfo || sampleRateHz <= 0) return;
     const rect = target.getBoundingClientRect();
     const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    const frequencyHz = Math.round(centerFreqHz - sampleRateHz / 2 + fraction * sampleRateHz);
-    vfos = vfos.map((v) => v.id === vfo.id ? { ...v, frequency_hz: frequencyHz } : v);
-    await Api.vfoFrequency(vfo.id, frequencyHz);
-    notice = `VFO ${vfo.id} tuned to ${fmtHz(frequencyHz)}`;
+    const frequencyHz = Math.round(viewStartHz + fraction * sampleRateHz);
+    const clamped = clampFrequencyForView(frequencyHz);
+    vfos = vfos.map((v) => v.id === vfo.id ? { ...v, frequency_hz: clamped } : v);
+    await Api.vfoFrequency(vfo.id, clamped);
+    notice = `VFO ${vfo.id} tuned to ${fmtHz(clamped)}`;
     window.setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 1800);
   }
 
@@ -515,6 +655,11 @@
   <section class="center">
     {#if notice}<div class="ui-notice" role="status">{notice}</div>{/if}
     <div class="command-strip card">
+      <div class="view-modes">
+        <span class="strip-label">View</span>
+        <button type="button" class="quick" class:on={spectrumViewMode === 'band'} onclick={() => setSpectrumViewMode('band')}>Band</button>
+        <button type="button" class="quick" class:on={spectrumViewMode === 'full'} onclick={() => setSpectrumViewMode('full')}>Full spectrum</button>
+      </div>
       <div class="quick-modes">
         <span class="strip-label">Quick Modes</span>
         {#each quickModes as mode}
@@ -545,7 +690,29 @@
 
     <div class="spectrum-wrap card">
       <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
-      <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune selected VFO"></canvas>
+      <div class="spectrum-nav" onclick={navigatorClick} title="Click to jump; drag spectrum to scroll">
+        <div class="nav-track">
+          <div class="nav-window" style="left: {navWindowLeft}%; width: {navWindowWidth}%"></div>
+        </div>
+        <div class="nav-labels">
+          <span>{fmtHz(navigationMinHz)}</span>
+          <span class="nav-current">{fmtHz(viewStartHz)} – {fmtHz(viewEndHz)}</span>
+          <span>{fmtHz(navigationMaxHz)}</span>
+        </div>
+      </div>
+      <canvas
+        bind:this={canvas}
+        onpointerdown={onSpectrumPointerDown}
+        onpointermove={onSpectrumPointerMove}
+        onpointerup={onSpectrumPointerUp}
+        onwheel={onSpectrumWheel}
+        title="Click to tune · drag or scroll to pan"
+      ></canvas>
+      <div class="freq-axis">
+        <span>{fmtHz(viewStartHz)}</span>
+        <span>{fmtHz(centerFreqHz)}</span>
+        <span>{fmtHz(viewEndHz)}</span>
+      </div>
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
     </div>
@@ -742,7 +909,13 @@
   .history-head h2 { margin-bottom: 0; }
   .history-list { overflow-y: auto; max-height: 145px; }
   .history-row { display: grid; grid-template-columns: 90px 110px 1fr 100px; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); color: var(--fg-dim); font: 10px var(--mono); }
-  .history-row b { color: var(--accent); }
+  .view-modes { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .spectrum-nav { margin-bottom: 6px; cursor: pointer; }
+  .nav-track { position: relative; height: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .nav-window { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent) 35%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 3px; min-width: 4px; }
+  .nav-labels { display: flex; justify-content: space-between; font: 10px var(--mono); color: var(--fg-dim); margin-top: 3px; }
+  .nav-current { color: var(--accent); }
+  .freq-axis { display: flex; justify-content: space-between; font: 10px var(--mono); color: var(--fg-dim); margin-top: 4px; }
   .history-empty { color: var(--fg-dim); padding: 8px 0; font-size: 12px; }
 
   .vfo-grid { order: 2; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }

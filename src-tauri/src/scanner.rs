@@ -35,7 +35,7 @@ pub struct ScannerHandle {
     pub iq_consumers: Vec<IqRing>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScannerRuntimeState {
     pub active_range: Option<String>,
     pub running: bool,
@@ -45,6 +45,28 @@ pub struct ScannerRuntimeState {
     /// Backend capture timestamp for the currently retained FFT frame.
     pub latest_spectrum_ms: i64,
     pub scan_locked: bool,
+    /// `band` = constrain view/tuning to active scan range; `full` = pan device tuning range.
+    #[serde(default = "default_spectrum_view_mode")]
+    pub spectrum_view_mode: String,
+}
+
+fn default_spectrum_view_mode() -> String {
+    "band".into()
+}
+
+impl Default for ScannerRuntimeState {
+    fn default() -> Self {
+        Self {
+            active_range: None,
+            running: false,
+            vfo_states: Vec::new(),
+            latest_spectrum: Vec::new(),
+            frames_processed: 0,
+            latest_spectrum_ms: 0,
+            scan_locked: false,
+            spectrum_view_mode: default_spectrum_view_mode(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,6 +142,8 @@ pub enum ScannerCommand {
     SetVfoVolume { id: u32, volume: f32 },
     ToggleVfoAgc { id: u32, on: bool },
     SetVfoLocked { id: u32, locked: bool },
+    SetSpectrumViewMode { mode: String },
+    PanCenter { center_hz: u64 },
     Shutdown,
 }
 
@@ -244,6 +268,76 @@ fn band_fits_capture_window(range: &ScanRange, sample_rate: u32) -> bool {
     range.end_hz.saturating_sub(range.start_hz) <= sample_rate as u64
 }
 
+fn clamp_center_hz(
+    center_hz: u64,
+    sample_rate: u32,
+    view_mode: &str,
+    band: Option<&ScanRange>,
+    device_min: u64,
+    device_max: u64,
+) -> u64 {
+    let half = sample_rate as u64 / 2;
+    let (limit_min, limit_max) = if view_mode == "full" {
+        (
+            device_min.saturating_add(half).min(device_max),
+            device_max.saturating_sub(half).max(device_min),
+        )
+    } else if let Some(range) = band {
+        let band_half_min = range.start_hz.saturating_add(half);
+        let band_half_max = range.end_hz.saturating_sub(half);
+        if band_half_min <= band_half_max {
+            (
+                band_half_min.max(device_min.saturating_add(half)),
+                band_half_max.min(device_max.saturating_sub(half)),
+            )
+        } else {
+            let mid = range.start_hz + range.end_hz.saturating_sub(range.start_hz) / 2;
+            return mid;
+        }
+    } else {
+        (
+            device_min.saturating_add(half).min(device_max),
+            device_max.saturating_sub(half).max(device_min),
+        )
+    };
+    if limit_min > limit_max {
+        if let Some(range) = band {
+            return range.start_hz + range.end_hz.saturating_sub(range.start_hz) / 2;
+        }
+        return (device_min + device_max) / 2;
+    }
+    center_hz.clamp(limit_min, limit_max)
+}
+
+fn clamp_vfo_frequency_hz(
+    frequency_hz: u64,
+    view_mode: &str,
+    band: Option<&ScanRange>,
+    device_min: u64,
+    device_max: u64,
+) -> u64 {
+    if view_mode == "full" {
+        frequency_hz.clamp(device_min, device_max)
+    } else if let Some(range) = band {
+        frequency_hz.clamp(range.start_hz, range.end_hz)
+    } else {
+        frequency_hz.clamp(device_min, device_max)
+    }
+}
+
+fn peak_search_limits(
+    view_mode: &str,
+    band: &ScanRange,
+    device_min: u64,
+    device_max: u64,
+) -> (u64, u64) {
+    if view_mode == "full" {
+        (device_min, device_max)
+    } else {
+        (band.start_hz, band.end_hz)
+    }
+}
+
 fn frequency_from_bin(bin: usize, bin_count: usize, center_hz: u64, sample_rate: u32) -> u64 {
     if bin_count == 0 || sample_rate == 0 {
         return center_hz;
@@ -266,7 +360,8 @@ fn find_signal_peaks(
     min_bins: usize,
     center_hz: u64,
     sample_rate: u32,
-    range: &ScanRange,
+    search_start_hz: u64,
+    search_end_hz: u64,
 ) -> Vec<DetectedPeak> {
     let threshold = noise_floor + squelch_db;
     let mut peaks = Vec::new();
@@ -293,7 +388,7 @@ fn find_signal_peaks(
             }
         }
         let frequency_hz = frequency_from_bin(best_bin, bins.len(), center_hz, sample_rate);
-        if frequency_hz < range.start_hz || frequency_hz > range.end_hz {
+        if frequency_hz < search_start_hz || frequency_hz > search_end_hz {
             continue;
         }
         peaks.push(DetectedPeak {
@@ -581,6 +676,7 @@ async fn scanner_loop(
                     state.lock().vfo_states = vfos.clone();
                     state.lock().active_range = Some(name.clone());
                     state.lock().running = true;
+                    state.lock().spectrum_view_mode = "band".into();
                     active_range = Some(range);
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                     tracing::info!(range = %name, vfo_count = vfos.len(), "scanner started");
@@ -596,14 +692,23 @@ async fn scanner_loop(
                     tracing::info!("scanner stopped");
                 }
                 ScannerCommand::SetVfoFrequency { id, frequency_hz } => {
+                    let status = device.status();
+                    let view_mode = state.lock().spectrum_view_mode.clone();
+                    let clamped = clamp_vfo_frequency_hz(
+                        frequency_hz,
+                        &view_mode,
+                        active_range.as_ref(),
+                        status.min_freq_hz,
+                        status.max_freq_hz,
+                    );
                     if let Some(v) = state.lock().vfo_states.iter_mut().find(|v| v.id == id) {
-                        v.frequency_hz = frequency_hz;
-                        let center = device.status().center_freq_hz;
-                        let half = device.status().sample_rate / 2;
-                        if frequency_hz < center.saturating_sub(half as u64)
-                            || frequency_hz > center + half as u64
+                        v.frequency_hz = clamped;
+                        let center = status.center_freq_hz;
+                        let half = status.sample_rate / 2;
+                        if clamped < center.saturating_sub(half as u64)
+                            || clamped > center + half as u64
                         {
-                            recenter_device_for_frequency(&device, frequency_hz);
+                            recenter_device_for_frequency(&device, clamped);
                         }
                     }
                     let vfos = state.lock().vfo_states.clone();
@@ -647,6 +752,41 @@ async fn scanner_loop(
                     let vfos = state.lock().vfo_states.clone();
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                 }
+                ScannerCommand::SetSpectrumViewMode { mode } => {
+                    let normalized = if mode.eq_ignore_ascii_case("full") {
+                        "full".to_string()
+                    } else {
+                        "band".to_string()
+                    };
+                    state.lock().spectrum_view_mode = normalized.clone();
+                    let status = device.status();
+                    if normalized == "band" {
+                        if let Some(range) = active_range.as_ref() {
+                            let center = clamp_center_hz(
+                                device.status().center_freq_hz,
+                                status.sample_rate,
+                                "band",
+                                Some(range),
+                                status.min_freq_hz,
+                                status.max_freq_hz,
+                            );
+                            recenter_device_for_frequency(&device, center);
+                        }
+                    }
+                }
+                ScannerCommand::PanCenter { center_hz } => {
+                    let status = device.status();
+                    let view_mode = state.lock().spectrum_view_mode.clone();
+                    let clamped = clamp_center_hz(
+                        center_hz,
+                        status.sample_rate,
+                        &view_mode,
+                        active_range.as_ref(),
+                        status.min_freq_hz,
+                        status.max_freq_hz,
+                    );
+                    recenter_device_for_frequency(&device, clamped);
+                }
                 ScannerCommand::Shutdown => return,
             }
         }
@@ -658,8 +798,9 @@ async fn scanner_loop(
 
         // Narrowband bands: VFO 0 hops the step grid. Wideband (e.g. 40m): full span
         // is visible — peaks are assigned to all VFO slots each FFT frame.
+        let view_mode = state.lock().spectrum_view_mode.clone();
         let wideband = active_range.as_ref().map(|r| band_fits_capture_window(r, device.status().sample_rate)).unwrap_or(false);
-        if !wideband {
+        if view_mode == "band" && !wideband {
             if let Some(range) = active_range.as_ref() {
                 let dwell = Duration::from_millis(range.dwell_ms.max(50) as u64);
                 if last_vfo_hop.elapsed() >= dwell && !scan_grid.is_empty() {
@@ -847,6 +988,13 @@ async fn scanner_loop(
                 vfo.squelch_open = strength - noise_floor >= cfg.squelch_db;
             }
             if let Some(range) = active_range.as_ref() {
+                let status = device.status();
+                let (search_start, search_end) = peak_search_limits(
+                    &runtime.spectrum_view_mode,
+                    range,
+                    status.min_freq_hz,
+                    status.max_freq_hz,
+                );
                 let peaks = find_signal_peaks(
                     &bins,
                     noise_floor,
@@ -854,7 +1002,8 @@ async fn scanner_loop(
                     cfg.min_signal_width_bins.max(2),
                     center,
                     sample_rate,
-                    range,
+                    search_start,
+                    search_end,
                 );
                 if !peaks.is_empty() {
                     assign_peaks_to_vfos(

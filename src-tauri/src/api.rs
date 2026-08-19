@@ -86,6 +86,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/channels/scan/start", post(scan_start))
         .route("/channels/scan/stop", post(scan_stop))
         .route("/scanner/max-vfos", get(scanner_max_vfos))
+        .route("/scanner/spectrum_mode", post(scanner_spectrum_mode))
+        .route("/scanner/pan", post(scanner_pan))
         // ── VFOs ─────────────────────────────────────────────────────────
         .route("/vfo/states", get(vfo_states))
         .route("/vfo/diagnostics", get(vfo_diagnostics))
@@ -518,6 +520,28 @@ async fn scan_config(State(s): State<ApiState>) -> impl IntoResponse {
         "auto_decode_all": cfg.scanner.auto_decode_all,
         "auto_decode_threshold": cfg.scanner.auto_decode_threshold,
         "use_arrl_bandplan": cfg.scanner.use_arrl_bandplan,
+        "spectrum_view_mode": s.0.scanner.read().as_ref()
+            .map(|h| h.state.lock().spectrum_view_mode.clone())
+            .unwrap_or_else(|| "band".into()),
+    }))
+}
+
+#[derive(Deserialize)] struct SpectrumModeReq { mode: String }
+async fn scanner_spectrum_mode(State(s): State<ApiState>, Json(req): Json<SpectrumModeReq>) -> Json<Value> {
+    let mode = if req.mode.eq_ignore_ascii_case("full") { "full" } else { "band" };
+    send_vfo(s, crate::scanner::ScannerCommand::SetSpectrumViewMode { mode: mode.into() });
+    Json(json!({"ok": true, "spectrum_view_mode": mode}))
+}
+
+#[derive(Deserialize)] struct ScannerPanReq { center_hz: u64 }
+async fn scanner_pan(State(s): State<ApiState>, Json(req): Json<ScannerPanReq>) -> Json<Value> {
+    send_vfo(s, crate::scanner::ScannerCommand::PanCenter { center_hz: req.center_hz });
+    let status = s.0.device.status();
+    Json(json!({
+        "ok": true,
+        "center_freq_hz": status.center_freq_hz,
+        "view_start_hz": status.center_freq_hz.saturating_sub(status.sample_rate as u64 / 2),
+        "view_end_hz": status.center_freq_hz + status.sample_rate as u64 / 2,
     }))
 }
 
@@ -646,16 +670,43 @@ async fn vfo_mode(State(s): State<ApiState>, Path(id): Path<u32>, Json(req): Jso
 
 async fn spectrum(State(s): State<ApiState>) -> impl IntoResponse {
     let state = s.0.scanner.read();
+    let status = s.0.device.status();
     let Some(scanner) = state.as_ref() else {
-        return Json(json!({"bins": [], "running": false}));
+        let half = status.sample_rate as u64 / 2;
+        return Json(json!({
+            "bins": [],
+            "running": false,
+            "center_freq_hz": status.center_freq_hz,
+            "sample_rate_hz": status.sample_rate,
+            "device_min_freq_hz": status.min_freq_hz,
+            "device_max_freq_hz": status.max_freq_hz,
+            "view_start_hz": status.center_freq_hz.saturating_sub(half),
+            "view_end_hz": status.center_freq_hz + half,
+            "spectrum_view_mode": "band",
+        }));
     };
     let runtime = scanner.state.lock();
+    let half = status.sample_rate as u64 / 2;
+    let view_start = status.center_freq_hz.saturating_sub(half);
+    let view_end = status.center_freq_hz + half;
+    let band = runtime.active_range.as_ref().and_then(|name| {
+        s.0.config.read().scan_ranges.iter().find(|r| r.name == *name)
+    });
     Json(json!({
         "bins": runtime.latest_spectrum,
         "range": runtime.active_range,
         "running": runtime.running,
         "frame_sequence": runtime.frames_processed,
         "frame_timestamp_ms": runtime.latest_spectrum_ms,
+        "spectrum_view_mode": runtime.spectrum_view_mode,
+        "center_freq_hz": status.center_freq_hz,
+        "sample_rate_hz": status.sample_rate,
+        "device_min_freq_hz": status.min_freq_hz,
+        "device_max_freq_hz": status.max_freq_hz,
+        "view_start_hz": view_start,
+        "view_end_hz": view_end,
+        "band_start_hz": band.map(|r| r.start_hz),
+        "band_end_hz": band.map(|r| r.end_hz),
     }))
 }
 

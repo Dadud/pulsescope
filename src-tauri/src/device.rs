@@ -11,7 +11,31 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiscoveredDevice { pub driver: String, pub label: String, pub key: String, pub hardware_key: String }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DeviceStatus { pub connected: bool, pub driver: String, pub label: String, pub sample_rate: u32, pub center_freq_hz: u64, pub ppm_correction: f32, pub gain: String, pub bias_tee_on: bool, pub saturation: bool }
+pub struct DeviceStatus {
+    pub connected: bool,
+    pub driver: String,
+    pub label: String,
+    pub sample_rate: u32,
+    pub center_freq_hz: u64,
+    pub ppm_correction: f32,
+    pub gain: String,
+    pub bias_tee_on: bool,
+    pub saturation: bool,
+    /// Lower edge of hardware tuning range (Hz).
+    #[serde(default = "default_min_freq_hz")]
+    pub min_freq_hz: u64,
+    /// Upper edge of hardware tuning range (Hz).
+    #[serde(default = "default_max_freq_hz")]
+    pub max_freq_hz: u64,
+}
+
+fn default_min_freq_hz() -> u64 {
+    24_000_000
+}
+
+fn default_max_freq_hz() -> u64 {
+    1_700_000_000
+}
 
 /// Capability report comes from the currently opened SoapySDR RX chain. UI
 /// renders these dynamically; there is no driver-name-specific knob list.
@@ -62,6 +86,14 @@ mod soapy {
             }
             Ok(())
         }}
+        pub fn frequency_range(&self) -> (u64, u64) {
+            unsafe {
+                let r = s::SoapySDRDevice_getFrequencyRange(self.device, s::SOAPY_SDR_RX as i32, 0);
+                let min = r.minimum.max(0.0) as u64;
+                let max = r.maximum.max(r.minimum) as u64;
+                (min, max)
+            }
+        }
         pub fn capabilities(&self) -> DeviceCapabilities { unsafe {
             let mut c=DeviceCapabilities{connected:true,..Default::default()}; let dir=s::SOAPY_SDR_RX as i32;
             c.agc_supported=s::SoapySDRDevice_hasGainMode(self.device,dir,0); c.agc_enabled=c.agc_supported&&s::SoapySDRDevice_getGainMode(self.device,dir,0);
@@ -198,7 +230,7 @@ fn discover_soapy_util() -> Vec<DiscoveredDevice> {
 
 pub struct DeviceLayer { state: Arc<Mutex<DeviceStatus>>, phase: Arc<Mutex<f32>>, #[cfg(feature="soapysdr")] hardware: Arc<Mutex<Option<soapy::Hardware>>> }
 impl DeviceLayer {
-    pub fn new_mock() -> Self { Self { state:Arc::new(Mutex::new(DeviceStatus{connected:false,driver:"mock".into(),label:"Mock Source (Test Tones)".into(),sample_rate:10_000_000,center_freq_hz:100_000_000,ppm_correction:0.0,gain:"auto".into(),bias_tee_on:false,saturation:false})), phase:Arc::new(Mutex::new(0.0)), #[cfg(feature="soapysdr")] hardware:Arc::new(Mutex::new(None)) } }
+    pub fn new_mock() -> Self { Self { state:Arc::new(Mutex::new(DeviceStatus{connected:false,driver:"mock".into(),label:"Mock Source (Test Tones)".into(),sample_rate:10_000_000,center_freq_hz:100_000_000,ppm_correction:0.0,gain:"auto".into(),bias_tee_on:false,saturation:false,min_freq_hz:default_min_freq_hz(),max_freq_hz:default_max_freq_hz()})), phase:Arc::new(Mutex::new(0.0)), #[cfg(feature="soapysdr")] hardware:Arc::new(Mutex::new(None)) } }
     pub fn status(&self)->DeviceStatus { self.state.lock().clone() }
     pub fn discover()->Vec<DiscoveredDevice> { let mut d=vec![DiscoveredDevice{driver:"mock".into(),label:"Mock Source (Test Tones)".into(),key:"driver=mock".into(),hardware_key:"mock".into()}]; #[cfg(feature="soapysdr")] d.extend(discover_soapy_util()); d }
     pub fn auto_connect(&self, preferred: Option<&str>) -> anyhow::Result<()> {
@@ -209,7 +241,7 @@ impl DeviceLayer {
             .or_else(|| devices.into_iter().find(|d| d.driver != "mock").map(|d| d.key));
         if let Some(key) = candidate { self.connect(&key) } else { Ok(()) }
     }
-    pub fn connect(&self,key:&str)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if key!="driver=mock" { let rate=2_000_000; let freq=100_000_000; let mut h=soapy::Hardware::open(&key,rate,freq)?; h.apply_safe_defaults()?; *self.hardware.lock()=Some(h); let mut st=self.state.lock(); st.connected=true; st.sample_rate=rate; st.center_freq_hz=freq; st.driver=key.split(',').find_map(|p|p.trim().strip_prefix("driver=")).unwrap_or("soapy").to_string(); st.label=key.to_string(); return Ok(()); } self.state.lock().connected=true; Ok(()) }
+    pub fn connect(&self,key:&str)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if key!="driver=mock" { let rate=2_000_000; let freq=100_000_000; let mut h=soapy::Hardware::open(&key,rate,freq)?; h.apply_safe_defaults()?; let (min_hz, max_hz)=h.frequency_range(); *self.hardware.lock()=Some(h); let mut st=self.state.lock(); st.connected=true; st.sample_rate=rate; st.center_freq_hz=freq; st.min_freq_hz=min_hz; st.max_freq_hz=max_hz; st.driver=key.split(',').find_map(|p|p.trim().strip_prefix("driver=")).unwrap_or("soapy").to_string(); st.label=key.to_string(); return Ok(()); } let mut st=self.state.lock(); st.connected=true; st.min_freq_hz=default_min_freq_hz(); st.max_freq_hz=default_max_freq_hz(); Ok(()) }
     pub fn disconnect(&self)->anyhow::Result<()> { #[cfg(feature="soapysdr")] { self.hardware.lock().take(); } self.state.lock().connected=false; Ok(()) }
     pub fn set_frequency(&self,freq:u64)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_mut(){h.set_frequency(freq)?;} self.state.lock().center_freq_hz=freq; Ok(()) }
     pub fn set_sample_rate(&self,rate:u32)->anyhow::Result<()> { #[cfg(feature="soapysdr")] if let Some(h)=self.hardware.lock().as_mut(){h.set_rate(rate)?;} self.state.lock().sample_rate=rate; Ok(()) }
