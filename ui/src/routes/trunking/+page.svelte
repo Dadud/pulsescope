@@ -38,7 +38,8 @@
 
 <div class="trunking-page">
   <h1>Trunking</h1>
-  <p class="muted">Follow P25 / NXDN / EDACS / DMR talkgroups across control channels.</p>
+  <p class="muted">Follow P25 talkgroup grants from a control-channel TSBK observer. Encrypted calls are labeled only. NXDN/EDACS/DMR controllers are not claimed.</p>
+  <div class="banner">Beta: P25 FIR + TSBK parse is implemented. Live trunking stays unavailable until a control-channel recorded-IQ / hardware gate passes. No mock talkgroups are invented.</div>
   {#if error}<p class="error">{error}</p>{/if}
 
   <section class="card controls">
@@ -67,6 +68,7 @@
 <style>
   .trunking-page { padding:16px; overflow-y:auto; height:100%; }
   .muted { color:var(--fg-dim); }.error { color:var(--danger); }
+  .banner { margin:8px 0 12px; padding:10px 12px; background:rgb(245 158 11 / 10%); border:1px solid rgb(245 158 11 / 30%); border-radius:7px; color:#fcd38d; font-size:12px; }
   .card { margin:12px 0; padding:14px; background:var(--bg-elev); border:1px solid var(--line); border-radius:8px; }
   .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   button { background:var(--bg); color:var(--fg); border:1px solid var(--line); padding:7px 10px; border-radius:5px; cursor:pointer; }

@@ -4,25 +4,29 @@
 //! mono f32 PCM at the same frame rate; the audio backend/resampler is kept
 //! separate so the DSP remains testable without hardware or Windows audio.
 
-use std::f32::consts::TAU;
 use rustfft::num_complex::Complex;
+use std::f32::consts::TAU;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Am,
+    Sam,
     Nfm,
     Wfm,
     Usb,
     Lsb,
+    Cw,
 }
 
 impl Mode {
     pub fn parse(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
             "am" => Self::Am,
+            "sam" => Self::Sam,
             "wfm" => Self::Wfm,
             "usb" => Self::Usb,
             "lsb" => Self::Lsb,
+            "cw" => Self::Cw,
             _ => Self::Nfm,
         }
     }
@@ -32,8 +36,15 @@ impl Mode {
 /// scanner frames, which matters for FM and prevents clicks at frame edges.
 /// One-pole complex low-pass used as the first channel-filter boundary before demodulation.
 /// `state` must persist between capture blocks so the audio worker has continuous phase/filter state.
-pub fn low_pass_complex(input: &[Complex<f32>], cutoff_hz: f32, sample_rate_hz: u32, state: &mut Complex<f32>) -> Vec<Complex<f32>> {
-    if input.is_empty() || sample_rate_hz == 0 { return Vec::new(); }
+pub fn low_pass_complex(
+    input: &[Complex<f32>],
+    cutoff_hz: f32,
+    sample_rate_hz: u32,
+    state: &mut Complex<f32>,
+) -> Vec<Complex<f32>> {
+    if input.is_empty() || sample_rate_hz == 0 {
+        return Vec::new();
+    }
     let cutoff = cutoff_hz.max(1.0).min(sample_rate_hz as f32 * 0.45);
     let alpha = 1.0 - (-std::f32::consts::TAU * cutoff / sample_rate_hz as f32).exp();
     let mut out = Vec::with_capacity(input.len());
@@ -43,23 +54,31 @@ pub fn low_pass_complex(input: &[Complex<f32>], cutoff_hz: f32, sample_rate_hz: 
     }
     out
 }
-pub fn demodulate(mode: Mode, iq: &[Complex<f32>], previous: &mut Option<Complex<f32>>) -> Vec<f32> {
+pub fn demodulate(
+    mode: Mode,
+    iq: &[Complex<f32>],
+    previous: &mut Option<Complex<f32>>,
+) -> Vec<f32> {
     if iq.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(iq.len());
     match mode {
-        Mode::Am => {
+        Mode::Am | Mode::Sam => {
             let mean = iq.iter().map(|s| s.norm()).sum::<f32>() / iq.len() as f32;
             for s in iq {
                 out.push((s.norm() - mean) * 4.0);
             }
         }
-        Mode::Usb => {
-            for s in iq { out.push((s.re + s.im) * 0.7071); }
+        Mode::Usb | Mode::Cw => {
+            for s in iq {
+                out.push((s.re + s.im) * std::f32::consts::FRAC_1_SQRT_2);
+            }
         }
         Mode::Lsb => {
-            for s in iq { out.push((s.re - s.im) * 0.7071); }
+            for s in iq {
+                out.push((s.re - s.im) * std::f32::consts::FRAC_1_SQRT_2);
+            }
         }
         Mode::Nfm | Mode::Wfm => {
             let mut prev = previous.take().unwrap_or(iq[0]);
@@ -77,9 +96,216 @@ pub fn demodulate(mode: Mode, iq: &[Complex<f32>], previous: &mut Option<Complex
     out
 }
 
+/// Raw FM discriminator samples for digital-voice decoders (dsd-fme, etc.).
+/// Unlike [`demodulate`] for NFM, this does not apply audio soft limiting or
+/// scaling intended for speaker output — only the quadrature phase derivative.
+pub fn discriminator_samples(iq: &[Complex<f32>], previous: &mut Option<Complex<f32>>) -> Vec<f32> {
+    if iq.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(iq.len());
+    let mut prev = previous.take().unwrap_or(iq[0]);
+    for s in iq {
+        let cross = s.im * prev.re - s.re * prev.im;
+        let dot = s.re * prev.re + s.im * prev.im;
+        out.push(cross.atan2(dot));
+        prev = *s;
+    }
+    *previous = Some(prev);
+    out
+}
+
+/// Synchronous AM: a Costas-style PLL tracks the carrier and the in-phase
+/// arm is the audio. Envelope AM remains available as [`Mode::Am`].
+pub fn demodulate_sam(iq: &[Complex<f32>], pll_phase: &mut f64) -> Vec<f32> {
+    if iq.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(iq.len());
+    let mut phase = *pll_phase;
+    for sample in iq {
+        let (sin, cos) = phase.sin_cos();
+        let i = sample.re * cos as f32 + sample.im * sin as f32;
+        let q = -sample.re * sin as f32 + sample.im * cos as f32;
+        phase += (i * q) as f64 * 0.04;
+        out.push(i);
+    }
+    *pll_phase = phase.rem_euclid(std::f64::consts::TAU);
+    soft_limit(&mut out);
+    out
+}
+
+/// CW listen path: beat a baseband carrier against a 700 Hz BFO so Morse is
+/// audible after the audio-worker resampler.
+pub fn demodulate_cw(
+    iq: &[Complex<f32>],
+    sample_rate: u32,
+    bfo_hz: f32,
+    phase: &mut f64,
+) -> Vec<f32> {
+    if iq.is_empty() || sample_rate == 0 {
+        return Vec::new();
+    }
+    let step = std::f64::consts::TAU * bfo_hz.max(1.0) as f64 / sample_rate as f64;
+    let mut out = Vec::with_capacity(iq.len());
+    for sample in iq {
+        let (sin, cos) = phase.sin_cos();
+        out.push(sample.re * cos as f32 - sample.im * sin as f32);
+        *phase = (*phase + step).rem_euclid(std::f64::consts::TAU);
+    }
+    soft_limit(&mut out);
+    out
+}
+
+/// Stateful broadcast-FM stereo multiplex decoder. Pilot phase is estimated
+/// from each 20 ms block, doubled for the 38 kHz DSB-SC channel, and blended
+/// toward mono when the 19 kHz pilot is weak. Four cascaded one-pole sections
+/// provide a stable 15 kHz audio boundary without block-edge state loss.
+#[derive(Clone, Debug)]
+pub struct WfmStereoState {
+    pilot_reference_phase: f64,
+    mono_filter: [f32; 4],
+    difference_filter: [f32; 4],
+    left_deemphasis: f32,
+    right_deemphasis: f32,
+    left_dc: f32,
+    right_dc: f32,
+}
+
+impl Default for WfmStereoState {
+    fn default() -> Self {
+        Self {
+            pilot_reference_phase: 0.0,
+            mono_filter: [0.0; 4],
+            difference_filter: [0.0; 4],
+            left_deemphasis: 0.0,
+            right_deemphasis: 0.0,
+            left_dc: 0.0,
+            right_dc: 0.0,
+        }
+    }
+}
+
+fn cascaded_low_pass(
+    sample: f32,
+    cutoff_hz: f32,
+    sample_rate_hz: u32,
+    states: &mut [f32; 4],
+) -> f32 {
+    let alpha = 1.0 - (-TAU * cutoff_hz / sample_rate_hz.max(1) as f32).exp();
+    let mut value = sample;
+    for state in states {
+        *state += alpha * (value - *state);
+        value = *state;
+    }
+    value
+}
+
+pub fn decode_wfm_stereo(
+    multiplex: &[f32],
+    sample_rate_hz: u32,
+    deemphasis_us: f32,
+    state: &mut WfmStereoState,
+) -> Vec<[f32; 2]> {
+    if multiplex.is_empty() || sample_rate_hz < 114_000 {
+        return Vec::new();
+    }
+    let pilot_step = std::f64::consts::TAU * 19_000.0 / sample_rate_hz as f64;
+    let reference_phase = state.pilot_reference_phase;
+    let mut pilot_i = 0.0;
+    let mut pilot_q = 0.0;
+    let mut power = 0.0;
+    for (index, &sample) in multiplex.iter().enumerate() {
+        let phase = reference_phase + pilot_step * index as f64;
+        pilot_i += sample * phase.cos() as f32;
+        pilot_q += sample * phase.sin() as f32;
+        power += sample * sample;
+    }
+    let pilot_phase = (-pilot_q).atan2(pilot_i);
+    let pilot_amplitude = 2.0 * pilot_i.hypot(pilot_q) / multiplex.len() as f32;
+    let rms = (power / multiplex.len() as f32).sqrt().max(1e-6);
+    let blend = ((pilot_amplitude / rms - 0.025) / 0.12).clamp(0.0, 1.0);
+    let deemphasis_alpha =
+        1.0 - (-1.0 / (sample_rate_hz as f32 * deemphasis_us.max(1.0) * 1e-6)).exp();
+    let mut output = Vec::with_capacity(multiplex.len());
+    for (index, &sample) in multiplex.iter().enumerate() {
+        let phase = reference_phase + pilot_step * index as f64 + pilot_phase as f64;
+        let mono = cascaded_low_pass(sample, 15_000.0, sample_rate_hz, &mut state.mono_filter);
+        let translated = sample * 2.0 * (2.0 * phase).cos() as f32;
+        let difference = cascaded_low_pass(
+            translated,
+            15_000.0,
+            sample_rate_hz,
+            &mut state.difference_filter,
+        ) * blend;
+        let left = mono + difference;
+        let right = mono - difference;
+        state.left_deemphasis += deemphasis_alpha * (left - state.left_deemphasis);
+        state.right_deemphasis += deemphasis_alpha * (right - state.right_deemphasis);
+        let left_dc = state.left_deemphasis - state.left_dc;
+        let right_dc = state.right_deemphasis - state.right_dc;
+        state.left_dc = state.left_deemphasis * 0.995 + state.left_dc * 0.005;
+        state.right_dc = state.right_deemphasis * 0.995 + state.right_dc * 0.005;
+        output.push([left_dc.clamp(-1.0, 1.0), right_dc.clamp(-1.0, 1.0)]);
+    }
+    state.pilot_reference_phase =
+        (reference_phase + pilot_step * multiplex.len() as f64).rem_euclid(std::f64::consts::TAU);
+    output
+}
+
+/// Mix a VFO to baseband, apply a mode-appropriate channel filter, and demodulate.
+/// One-shot identify / CTCSS / RDS / APRS paths use this so they do not decode
+/// the full capture window at DC.
+pub fn channelize_demod(
+    iq: &[Complex<f32>],
+    offset_hz: f64,
+    sample_rate: u32,
+    mode: Mode,
+) -> Vec<f32> {
+    let filtered = channelize_iq(iq, offset_hz, sample_rate, mode);
+    let mut previous = None;
+    match mode {
+        Mode::Sam => {
+            let mut pll = 0.0;
+            demodulate_sam(&filtered, &mut pll)
+        }
+        Mode::Cw => {
+            let mut bfo = 0.0;
+            demodulate_cw(&filtered, sample_rate, 700.0, &mut bfo)
+        }
+        other => demodulate(other, &filtered, &mut previous),
+    }
+}
+
+/// Mix a VFO to baseband and apply the channel filter without demodulating.
+pub fn channelize_iq(
+    iq: &[Complex<f32>],
+    offset_hz: f64,
+    sample_rate: u32,
+    mode: Mode,
+) -> Vec<Complex<f32>> {
+    let mut phase = 0.0;
+    let baseband = mix_down(iq, offset_hz, sample_rate, &mut phase);
+    let cutoff_hz = match mode {
+        Mode::Wfm => 100_000.0,
+        Mode::Nfm => 12_500.0,
+        Mode::Cw => 800.0,
+        _ => 5_000.0,
+    };
+    let mut filter = Complex::new(0.0, 0.0);
+    low_pass_complex(&baseband, cutoff_hz, sample_rate, &mut filter)
+}
+
 /// Translate a VFO offset to zero-IF while preserving oscillator phase.
-pub fn mix_down(input: &[Complex<f32>], offset_hz: f64, sample_rate: u32, phase: &mut f64) -> Vec<Complex<f32>> {
-    if input.is_empty() || sample_rate == 0 { return Vec::new(); }
+pub fn mix_down(
+    input: &[Complex<f32>],
+    offset_hz: f64,
+    sample_rate: u32,
+    phase: &mut f64,
+) -> Vec<Complex<f32>> {
+    if input.is_empty() || sample_rate == 0 {
+        return Vec::new();
+    }
     let step = -std::f64::consts::TAU * offset_hz / sample_rate as f64;
     let mut out = Vec::with_capacity(input.len());
     for sample in input {
@@ -91,38 +317,223 @@ pub fn mix_down(input: &[Complex<f32>], offset_hz: f64, sample_rate: u32, phase:
     out
 }
 
-/// Boxcar low-pass plus decimation for the wideband-to-audio boundary.
-pub fn decimate_complex_average(input: &[Complex<f32>], factor: usize) -> Vec<Complex<f32>> {
-    if factor <= 1 { return input.to_vec(); }
-    input.chunks(factor).map(|chunk| {
-        let sum = chunk.iter().copied().fold(Complex::new(0.0, 0.0), |a, b| a + b);
-        sum / chunk.len() as f32
-    }).collect()
-}
-pub fn decimate_average(input: &[f32], factor: usize) -> Vec<f32> {
-    if factor <= 1 { return input.to_vec(); }
-    input.chunks(factor).filter_map(|chunk| {
-        if chunk.len() < factor { return None; }
-        Some(chunk.iter().sum::<f32>() / factor as f32)
-    }).collect()
+/// Hamming-windowed sinc low-pass. Used by the P25 VFO FIR (63 taps, ~6 kHz).
+pub fn hamming_sinc_lowpass(taps: usize, cutoff_hz: f32, sample_rate_hz: u32) -> Vec<f32> {
+    if taps == 0 || sample_rate_hz == 0 {
+        return Vec::new();
+    }
+    let fc = (cutoff_hz / sample_rate_hz as f32).clamp(0.001, 0.45);
+    let mid = (taps.saturating_sub(1)) as f32 / 2.0;
+    let mut coeffs = Vec::with_capacity(taps);
+    let mut sum = 0.0f32;
+    for n in 0..taps {
+        let x = n as f32 - mid;
+        let sinc = if x.abs() < 1e-6 {
+            2.0 * fc
+        } else {
+            (TAU * fc * x).sin() / (std::f32::consts::PI * x)
+        };
+        let window = if taps == 1 {
+            1.0
+        } else {
+            0.54 - 0.46 * (TAU * n as f32 / (taps - 1) as f32).cos()
+        };
+        let value = sinc * window;
+        sum += value;
+        coeffs.push(value);
+    }
+    if sum.abs() > 1e-9 {
+        for coeff in &mut coeffs {
+            *coeff /= sum;
+        }
+    }
+    coeffs
 }
 
+pub fn apply_fir_complex(input: &[Complex<f32>], taps: &[f32]) -> Vec<Complex<f32>> {
+    if input.is_empty() || taps.is_empty() {
+        return Vec::new();
+    }
+    let delay = taps.len() / 2;
+    let mut out = vec![Complex::new(0.0, 0.0); input.len()];
+    for (i, sample) in out.iter_mut().enumerate() {
+        let mut acc = Complex::new(0.0, 0.0);
+        for (k, &tap) in taps.iter().enumerate() {
+            let j = i as i32 + delay as i32 - k as i32;
+            if j >= 0 && (j as usize) < input.len() {
+                acc += input[j as usize] * tap;
+            }
+        }
+        *sample = acc;
+    }
+    out
+}
+
+/// Boxcar low-pass plus decimation for the wideband-to-audio boundary.
+pub fn decimate_complex_average(input: &[Complex<f32>], factor: usize) -> Vec<Complex<f32>> {
+    if factor <= 1 {
+        return input.to_vec();
+    }
+    input
+        .chunks(factor)
+        .map(|chunk| {
+            let sum = chunk
+                .iter()
+                .copied()
+                .fold(Complex::new(0.0, 0.0), |a, b| a + b);
+            sum / chunk.len() as f32
+        })
+        .collect()
+}
+pub fn decimate_average(input: &[f32], factor: usize) -> Vec<f32> {
+    if factor <= 1 {
+        return input.to_vec();
+    }
+    input
+        .chunks(factor)
+        .filter_map(|chunk| {
+            if chunk.len() < factor {
+                return None;
+            }
+            Some(chunk.iter().sum::<f32>() / factor as f32)
+        })
+        .collect()
+}
 
 /// This keeps the audio sink rate correct for arbitrary SDR/output-rate pairs.
 pub fn resample_linear(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
-    if input.is_empty() || input_rate == 0 || output_rate == 0 { return Vec::new(); }
-    if input.len() == 1 { return vec![input[0]]; }
+    if input.is_empty() || input_rate == 0 || output_rate == 0 {
+        return Vec::new();
+    }
+    if input.len() == 1 {
+        return vec![input[0]];
+    }
     let count = ((input.len() as u64 * output_rate as u64) / input_rate as u64) as usize;
     let count = count.max(1);
     let step = input_rate as f64 / output_rate as f64;
-    (0..count).map(|n| {
-        let pos = n as f64 * step;
-        let i = (pos.floor() as usize).min(input.len() - 2);
-        let frac = (pos - i as f64) as f32;
-        input[i] * (1.0 - frac) + input[i + 1] * frac
-    }).collect()
+    (0..count)
+        .map(|n| {
+            let pos = n as f64 * step;
+            let i = (pos.floor() as usize).min(input.len() - 2);
+            let frac = (pos - i as f64) as f32;
+            input[i] * (1.0 - frac) + input[i + 1] * frac
+        })
+        .collect()
 }
 
+/// Stateful band-limited sample-rate conversion for continuous receiver audio.
+///
+/// The former block-local linear interpolation reset its phase every 20 ms and
+/// did not reject content above the output Nyquist limit. This windowed-sinc
+/// converter retains both phase and filter history across blocks.
+#[derive(Debug)]
+pub struct SincResampler {
+    buffer: Vec<f32>,
+    position: f64,
+    input_rate: u32,
+    output_rate: u32,
+    half_taps: usize,
+}
+
+impl Default for SincResampler {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            position: 0.0,
+            input_rate: 0,
+            output_rate: 0,
+            half_taps: 16,
+        }
+    }
+}
+
+impl SincResampler {
+    pub fn process(&mut self, input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
+        if input.is_empty() || input_rate == 0 || output_rate == 0 {
+            return Vec::new();
+        }
+        if self.input_rate != input_rate || self.output_rate != output_rate {
+            self.buffer = vec![0.0; self.half_taps];
+            self.position = self.half_taps as f64;
+            self.input_rate = input_rate;
+            self.output_rate = output_rate;
+        }
+        self.buffer.extend_from_slice(input);
+
+        let step = input_rate as f64 / output_rate as f64;
+        let cutoff = 0.45 * (output_rate as f64 / input_rate as f64).min(1.0);
+        let taps = self.half_taps * 2;
+        let mut output = Vec::with_capacity(
+            ((input.len() as u64 * output_rate as u64) / input_rate as u64) as usize + 2,
+        );
+
+        while self.position + (self.half_taps as f64) < self.buffer.len() as f64 {
+            let center = self.position.floor() as isize;
+            let mut sample = 0.0_f64;
+            let mut weight = 0.0_f64;
+            for tap in 0..taps {
+                let index = center + tap as isize - self.half_taps as isize + 1;
+                let distance = index as f64 - self.position;
+                let sinc_arg = 2.0 * cutoff * distance;
+                let sinc = if sinc_arg.abs() < 1.0e-12 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * sinc_arg).sin() / (std::f64::consts::PI * sinc_arg)
+                };
+                let window =
+                    0.5 - 0.5 * (std::f64::consts::TAU * tap as f64 / (taps - 1) as f64).cos();
+                let coefficient = 2.0 * cutoff * sinc * window;
+                sample += self.buffer[index as usize] as f64 * coefficient;
+                weight += coefficient;
+            }
+            output.push(if weight.abs() > 1.0e-12 {
+                (sample / weight) as f32
+            } else {
+                0.0
+            });
+            self.position += step;
+        }
+
+        let discard = (self.position.floor() as usize).saturating_sub(self.half_taps);
+        if discard > 0 {
+            self.buffer.drain(..discard);
+            self.position -= discard as f64;
+        }
+        output
+    }
+}
+
+pub fn low_pass_real(
+    input: &[f32],
+    cutoff_hz: f32,
+    sample_rate_hz: u32,
+    state: &mut f32,
+) -> Vec<f32> {
+    if input.is_empty() || sample_rate_hz == 0 {
+        return Vec::new();
+    }
+    let cutoff = cutoff_hz.max(1.0).min(sample_rate_hz as f32 * 0.45);
+    let alpha = 1.0 - (-TAU * cutoff / sample_rate_hz as f32).exp();
+    input
+        .iter()
+        .map(|sample| {
+            *state += (*sample - *state) * alpha;
+            *state
+        })
+        .collect()
+}
+
+pub fn deemphasis(input: &mut [f32], sample_rate_hz: u32, time_constant_us: f32, state: &mut f32) {
+    if sample_rate_hz == 0 || time_constant_us <= 0.0 {
+        return;
+    }
+    let tau = time_constant_us * 1.0e-6;
+    let alpha = 1.0 - (-1.0 / (sample_rate_hz as f32 * tau)).exp();
+    for sample in input {
+        *state += (*sample - *state) * alpha;
+        *sample = *state;
+    }
+}
 
 pub fn dc_block(samples: &mut [f32], state: &mut f32, coefficient: f32) {
     let coefficient = coefficient.clamp(0.0, 0.99999);
@@ -142,23 +553,66 @@ fn soft_limit(samples: &mut [f32]) {
 
 /// International Morse code lookup: dit/dah pattern → character.
 const MORSE_TABLE: &[(&str, char)] = &[
-    (".-", 'A'), ("-...", 'B'), ("-.-.", 'C'), ("-..", 'D'), (".", 'E'),
-    ("..-.", 'F'), ("--.", 'G'), ("....", 'H'), ("..", 'I'), (".---", 'J'),
-    ("-.-", 'K'), (".-..", 'L'), ("--", 'M'), ("-.", 'N'), ("---", 'O'),
-    (".--.", 'P'), ("--.-", 'Q'), (".-.", 'R'), ("...", 'S'), ("-", 'T'),
-    ("..-", 'U'), ("...-", 'V'), (".--", 'W'), ("-..-", 'X'), ("-.--", 'Y'),
+    (".-", 'A'),
+    ("-...", 'B'),
+    ("-.-.", 'C'),
+    ("-..", 'D'),
+    (".", 'E'),
+    ("..-.", 'F'),
+    ("--.", 'G'),
+    ("....", 'H'),
+    ("..", 'I'),
+    (".---", 'J'),
+    ("-.-", 'K'),
+    (".-..", 'L'),
+    ("--", 'M'),
+    ("-.", 'N'),
+    ("---", 'O'),
+    (".--.", 'P'),
+    ("--.-", 'Q'),
+    (".-.", 'R'),
+    ("...", 'S'),
+    ("-", 'T'),
+    ("..-", 'U'),
+    ("...-", 'V'),
+    (".--", 'W'),
+    ("-..-", 'X'),
+    ("-.--", 'Y'),
     ("--..", 'Z'),
-    ("-----", '0'), (".----", '1'), ("..---", '2'), ("...--", '3'), ("....-", '4'),
-    (".....", '5'), ("-....", '6'), ("--...", '7'), ("---..", '8'), ("----.", '9'),
-    (".-.-.-", '.'), ("--..--", ','), ("..--..", '?'), (".----.", '\''),
-    ("-.-.--", '!'), ("-..-.", '/'), ("-.--.", '('), ("-.--.-", ')'),
-    (".-...", '&'), ("---...", ':'), ("-.-.-.", ';'), ("-...-", '='),
-    (".-.-.", '+'), ("-....-", '-'), ("..--.-", '_'), (".-..-.", '"'),
+    ("-----", '0'),
+    (".----", '1'),
+    ("..---", '2'),
+    ("...--", '3'),
+    ("....-", '4'),
+    (".....", '5'),
+    ("-....", '6'),
+    ("--...", '7'),
+    ("---..", '8'),
+    ("----.", '9'),
+    (".-.-.-", '.'),
+    ("--..--", ','),
+    ("..--..", '?'),
+    (".----.", '\''),
+    ("-.-.--", '!'),
+    ("-..-.", '/'),
+    ("-.--.", '('),
+    ("-.--.-", ')'),
+    (".-...", '&'),
+    ("---...", ':'),
+    ("-.-.-.", ';'),
+    ("-...-", '='),
+    (".-.-.", '+'),
+    ("-....-", '-'),
+    ("..--.-", '_'),
+    (".-..-.", '"'),
     (".--.-.", '@'),
 ];
 
 fn morse_decode(pattern: &str) -> Option<char> {
-    MORSE_TABLE.iter().find(|(p, _)| *p == pattern).map(|(_, c)| *c)
+    MORSE_TABLE
+        .iter()
+        .find(|(p, _)| *p == pattern)
+        .map(|(_, c)| *c)
 }
 
 /// Decode CW Morse from a tone-detected envelope.
@@ -166,32 +620,46 @@ fn morse_decode(pattern: &str) -> Option<char> {
 /// Detects on/off keying via band-energy threshold.
 /// Returns decoded text.
 pub fn decode_cw(samples: &[f32], sample_rate: f32, target_tone_hz: f32) -> Option<String> {
-    if samples.len() < (sample_rate * 0.1) as usize { return None; }
+    if samples.len() < (sample_rate * 0.1) as usize {
+        return None;
+    }
 
     let block_size = (sample_rate * 0.005) as usize;
-    if block_size < 4 { return None; }
+    if block_size < 4 {
+        return None;
+    }
     let total_energy: f32 = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
-    if total_energy < 1e-10 { return None; }
+    if total_energy < 1e-10 {
+        return None;
+    }
 
     let mut envelope: Vec<bool> = Vec::new();
     for chunk in samples.chunks(block_size) {
         let mag = goertzel_magnitude(chunk, target_tone_hz, sample_rate);
         let chunk_energy: f32 = chunk.iter().map(|x| x * x).sum::<f32>() / chunk.len() as f32;
-        let snr = if chunk_energy > 1e-12 { 10.0 * (mag / (chunk.len() as f32 * chunk_energy)).log10() } else { -100.0 };
+        let snr = if chunk_energy > 1e-12 {
+            10.0 * (mag / (chunk.len() as f32 * chunk_energy)).log10()
+        } else {
+            -100.0
+        };
         envelope.push(snr >= 6.0);
     }
 
-    let block_ms = 5.0_f32;
     let mut runs: Vec<(bool, usize)> = Vec::new();
     for &on in &envelope {
         if let Some(last) = runs.last_mut() {
-            if last.0 == on { last.1 += 1; continue; }
+            if last.0 == on {
+                last.1 += 1;
+                continue;
+            }
         }
         runs.push((on, 1));
     }
 
     let tone_runs: Vec<usize> = runs.iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
-    if tone_runs.is_empty() { return None; }
+    if tone_runs.is_empty() {
+        return None;
+    }
     let dit_blocks = tone_runs.iter().copied().min().unwrap_or(1).max(1);
     let dah_blocks = dit_blocks * 3;
 
@@ -207,20 +675,30 @@ pub fn decode_cw(samples: &[f32], sample_rate: f32, target_tone_hz: f32) -> Opti
             }
         } else {
             if *count >= dit_blocks * 7 / 2 {
-                if let Some(c) = morse_decode(&current_pattern) { text.push(c); }
+                if let Some(c) = morse_decode(&current_pattern) {
+                    text.push(c);
+                }
                 text.push(' ');
                 current_pattern.clear();
             } else if *count >= dit_blocks * 5 / 2 {
-                if let Some(c) = morse_decode(&current_pattern) { text.push(c); }
+                if let Some(c) = morse_decode(&current_pattern) {
+                    text.push(c);
+                }
                 current_pattern.clear();
             }
         }
     }
     if !current_pattern.is_empty() {
-        if let Some(c) = morse_decode(&current_pattern) { text.push(c); }
+        if let Some(c) = morse_decode(&current_pattern) {
+            text.push(c);
+        }
     }
 
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 // ── DTMF decoder ───────────────────────────────────────────────────────────
@@ -238,40 +716,55 @@ const DTMF_KEYS: [[char; 4]; 4] = [
 /// Returns decoded digit string.
 pub fn detect_dtmf(samples: &[f32], sample_rate: f32) -> Option<String> {
     let block_size = (sample_rate * 0.04) as usize;
-    if samples.len() < block_size { return None; }
+    if samples.len() < block_size {
+        return None;
+    }
 
     let total_energy: f32 = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
-    if total_energy < 1e-10 { return None; }
+    if total_energy < 1e-10 {
+        return None;
+    }
 
     let mut result = String::new();
     let mut last_digit: Option<char> = None;
 
     for chunk in samples.chunks(block_size) {
-        if chunk.len() < block_size / 2 { break; }
+        if chunk.len() < block_size / 2 {
+            break;
+        }
         let chunk_energy: f32 = chunk.iter().map(|x| x * x).sum::<f32>() / chunk.len() as f32;
-        if chunk_energy < 1e-8 { last_digit = None; continue; }
+        if chunk_energy < 1e-8 {
+            last_digit = None;
+            continue;
+        }
 
         let mut best_low = (0usize, 0.0f32);
         let mut best_high = (0usize, 0.0f32);
         for (i, &freq) in DTMF_LOW.iter().enumerate() {
             let mag = goertzel_magnitude(chunk, freq, sample_rate);
-            if mag > best_low.1 { best_low = (i, mag); }
+            if mag > best_low.1 {
+                best_low = (i, mag);
+            }
         }
         for (i, &freq) in DTMF_HIGH.iter().enumerate() {
             let mag = goertzel_magnitude(chunk, freq, sample_rate);
-            if mag > best_high.1 { best_high = (i, mag); }
+            if mag > best_high.1 {
+                best_high = (i, mag);
+            }
         }
 
         // Goertzel magnitude for a matching tone ≈ N²·A²/4, for noise ≈ N·E.
         // Threshold: tone must be at least 3x above the per-bin noise floor.
         let threshold = chunk_energy * chunk.len() as f32 * 3.0;
         if best_low.1 < threshold || best_high.1 < threshold {
-            last_digit = None; continue;
+            last_digit = None;
+            continue;
         }
         // Twist test: ratio of strong to weak tone (power) should be < 10x (~10 dB)
         let ratio = best_low.1.max(best_high.1) / best_low.1.min(best_high.1).max(1e-12);
         if ratio > 10.0 {
-            last_digit = None; continue;
+            last_digit = None;
+            continue;
         }
 
         let digit = DTMF_KEYS[best_low.0][best_high.0];
@@ -281,18 +774,22 @@ pub fn detect_dtmf(samples: &[f32], sample_rate: f32) -> Option<String> {
         }
     }
 
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 // ── RTTY / SSTV / NAVTEX ───────────────────────────────────────────────────
 
 const ITA2_LETTERS: [char; 32] = [
-    '\0', 'E', '\n', 'A', ' ', 'S', 'I', 'U', '\r', 'D', 'R', 'J', 'N', 'F', 'C', 'K',
-    'T', 'Z', 'L', 'W', 'H', 'Y', 'P', 'Q', 'O', 'B', 'G', '\0', 'M', 'X', 'V', '\0',
+    '\0', 'E', '\n', 'A', ' ', 'S', 'I', 'U', '\r', 'D', 'R', 'J', 'N', 'F', 'C', 'K', 'T', 'Z',
+    'L', 'W', 'H', 'Y', 'P', 'Q', 'O', 'B', 'G', '\0', 'M', 'X', 'V', '\0',
 ];
 const ITA2_FIGURES: [char; 32] = [
-    '\0', '3', '\n', '-', ' ', '\'', '8', '7', '\r', '$', '4', '\'', ',', '!', ':', '(',
-    '5', '+', ')', '2', '#', '6', '0', '1', '9', '?', '&', '\0', '.', '/', ';', '\0',
+    '\0', '3', '\n', '-', ' ', '\'', '8', '7', '\r', '$', '4', '\'', ',', '!', ':', '(', '5', '+',
+    ')', '2', '#', '6', '0', '1', '9', '?', '&', '\0', '.', '/', ';', '\0',
 ];
 
 fn ita2_push(out: &mut String, code: u8, figures: &mut bool) {
@@ -300,49 +797,109 @@ fn ita2_push(out: &mut String, code: u8, figures: &mut bool) {
         0x1b => *figures = true,
         0x1f => *figures = false,
         value => {
-            let c = if *figures { ITA2_FIGURES[value as usize] } else { ITA2_LETTERS[value as usize] };
-            if c != '\0' && c != '\r' { out.push(c); }
+            let c = if *figures {
+                ITA2_FIGURES[value as usize]
+            } else {
+                ITA2_LETTERS[value as usize]
+            };
+            if c != '\0' && c != '\r' {
+                out.push(c);
+            }
         }
     }
 }
 
-fn fsk_bit_at(samples: &[f32], center: f32, samples_per_bit: f32, mark: f32, space: f32, sample_rate: f32) -> Option<bool> {
+fn fsk_bit_at(
+    samples: &[f32],
+    center: f32,
+    samples_per_bit: f32,
+    mark: f32,
+    space: f32,
+    sample_rate: f32,
+) -> Option<bool> {
     let width = (samples_per_bit * 0.72).round().max(8.0) as usize;
     let middle = center.round() as isize;
     let start = middle - width as isize / 2;
-    if start < 0 || start as usize + width > samples.len() { return None; }
+    if start < 0 || start as usize + width > samples.len() {
+        return None;
+    }
     let block = &samples[start as usize..start as usize + width];
-    Some(goertzel_magnitude(block, mark, sample_rate) > goertzel_magnitude(block, space, sample_rate))
+    Some(
+        goertzel_magnitude(block, mark, sample_rate)
+            > goertzel_magnitude(block, space, sample_rate),
+    )
 }
 
 /// Decode asynchronous Baudot/ITA-2 RTTY audio. Mark and space may be any
 /// pair (the common shifts are 170, 450 and 850 Hz); standard 45.45, 50 and
 /// 75 baud signals are supported, including fractional samples per symbol.
-pub fn decode_rtty(samples: &[f32], sample_rate: f32, mark_freq: f32, space_freq: f32, baud_rate: f32) -> Option<String> {
-    if sample_rate <= 0.0 || baud_rate <= 0.0 || mark_freq <= 0.0 || space_freq <= 0.0 || mark_freq == space_freq { return None; }
+pub fn decode_rtty(
+    samples: &[f32],
+    sample_rate: f32,
+    mark_freq: f32,
+    space_freq: f32,
+    baud_rate: f32,
+) -> Option<String> {
+    if sample_rate <= 0.0
+        || baud_rate <= 0.0
+        || mark_freq <= 0.0
+        || space_freq <= 0.0
+        || mark_freq == space_freq
+    {
+        return None;
+    }
     let spb = sample_rate / baud_rate;
-    if spb < 8.0 || (samples.len() as f32) < spb * 8.0 { return None; }
+    if spb < 8.0 || (samples.len() as f32) < spb * 8.0 {
+        return None;
+    }
     let energy = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
-    if energy < 1e-9 { return None; }
+    if energy < 1e-9 {
+        return None;
+    }
 
     // RTTY idles on mark. Search a fine timing grid for mark-to-space start
     // transitions, then sample the five LSB-first data bits at their centres.
     let step = (spb / 8.0).max(1.0);
     let mut cursor = spb * 0.5;
-    let mut previous = fsk_bit_at(samples, cursor, spb, mark_freq, space_freq, sample_rate).unwrap_or(true);
+    let mut previous =
+        fsk_bit_at(samples, cursor, spb, mark_freq, space_freq, sample_rate).unwrap_or(true);
     let mut codes = Vec::new();
     while cursor + spb * 7.0 < samples.len() as f32 {
         cursor += step;
-        let current = match fsk_bit_at(samples, cursor, spb, mark_freq, space_freq, sample_rate) { Some(v) => v, None => break };
+        let current = match fsk_bit_at(samples, cursor, spb, mark_freq, space_freq, sample_rate) {
+            Some(v) => v,
+            None => break,
+        };
         if previous && !current {
             let start = cursor - step * 0.5;
-            let start_ok = fsk_bit_at(samples, start + spb * 0.5, spb, mark_freq, space_freq, sample_rate) == Some(false);
-            let stop_ok = fsk_bit_at(samples, start + spb * 6.5, spb, mark_freq, space_freq, sample_rate) == Some(true);
+            let start_ok = fsk_bit_at(
+                samples,
+                start + spb * 0.5,
+                spb,
+                mark_freq,
+                space_freq,
+                sample_rate,
+            ) == Some(false);
+            let stop_ok = fsk_bit_at(
+                samples,
+                start + spb * 6.5,
+                spb,
+                mark_freq,
+                space_freq,
+                sample_rate,
+            ) == Some(true);
             if start_ok && stop_ok {
                 let mut code = 0u8;
                 let mut complete = true;
                 for bit in 0..5 {
-                    match fsk_bit_at(samples, start + spb * (1.5 + bit as f32), spb, mark_freq, space_freq, sample_rate) {
+                    match fsk_bit_at(
+                        samples,
+                        start + spb * (1.5 + bit as f32),
+                        spb,
+                        mark_freq,
+                        space_freq,
+                        sample_rate,
+                    ) {
                         Some(true) => code |= 1 << bit,
                         Some(false) => {}
                         None => complete = false,
@@ -361,9 +918,15 @@ pub fn decode_rtty(samples: &[f32], sample_rate: f32, mark_freq: f32, space_freq
 
     let mut out = String::new();
     let mut figures = false;
-    for code in codes { ita2_push(&mut out, code, &mut figures); }
+    for code in codes {
+        ita2_push(&mut out, code, &mut figures);
+    }
     let text = out.trim_matches('\0').to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,7 +948,9 @@ pub enum SstvMode {
 /// 1900 grey and 2300 white Hz) are compared in each analysis window; mode
 /// classification uses both sync length and measured line period.
 pub fn detect_sstv_mode(samples: &[f32], sample_rate: f32) -> Option<SstvMode> {
-    if sample_rate < 6000.0 || samples.len() < (sample_rate * 0.25) as usize { return None; }
+    if sample_rate < 6000.0 || samples.len() < (sample_rate * 0.25) as usize {
+        return None;
+    }
     let window = (sample_rate * 0.0025).round().max(12.0) as usize;
     let hop = (sample_rate * 0.001).round().max(1.0) as usize;
     let tones = [1200.0, 1500.0, 1900.0, 2300.0];
@@ -395,9 +960,15 @@ pub fn detect_sstv_mode(samples: &[f32], sample_rate: f32) -> Option<SstvMode> {
     while offset + window <= samples.len() {
         let block = &samples[offset..offset + window];
         let mut powers = [0.0f32; 4];
-        for (i, &tone) in tones.iter().enumerate() { powers[i] = goertzel_magnitude(block, tone, sample_rate); }
+        for (i, &tone) in tones.iter().enumerate() {
+            powers[i] = goertzel_magnitude(block, tone, sample_rate);
+        }
         let mut order = [0usize, 1, 2, 3];
-        order.sort_by(|&a, &b| powers[b].partial_cmp(&powers[a]).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            powers[b]
+                .partial_cmp(&powers[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         sync_flags.push(order[0] == 0 && powers[0] > powers[order[1]] * 1.8);
         positions.push(offset + window / 2);
         offset += hop;
@@ -406,18 +977,34 @@ pub fn detect_sstv_mode(samples: &[f32], sample_rate: f32) -> Option<SstvMode> {
     let mut pulses: Vec<(f32, f32)> = Vec::new(); // start seconds, duration seconds
     let mut i = 0usize;
     while i < sync_flags.len() {
-        if !sync_flags[i] { i += 1; continue; }
+        if !sync_flags[i] {
+            i += 1;
+            continue;
+        }
         let begin = i;
-        while i < sync_flags.len() && sync_flags[i] { i += 1; }
+        while i < sync_flags.len() && sync_flags[i] {
+            i += 1;
+        }
         let run_hops = i - begin;
         if run_hops >= 2 {
-            pulses.push((positions[begin] as f32 / sample_rate, run_hops as f32 * hop as f32 / sample_rate));
+            pulses.push((
+                positions[begin] as f32 / sample_rate,
+                run_hops as f32 * hop as f32 / sample_rate,
+            ));
         }
     }
-    if pulses.len() < 2 { return None; }
+    if pulses.len() < 2 {
+        return None;
+    }
 
-    let mut periods: Vec<f32> = pulses.windows(2).map(|p| p[1].0 - p[0].0).filter(|p| *p > 0.05 && *p < 0.6).collect();
-    if periods.is_empty() { return None; }
+    let mut periods: Vec<f32> = pulses
+        .windows(2)
+        .map(|p| p[1].0 - p[0].0)
+        .filter(|p| *p > 0.05 && *p < 0.6)
+        .collect();
+    if periods.is_empty() {
+        return None;
+    }
     periods.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let period = periods[periods.len() / 2];
     let mut durations: Vec<f32> = pulses.iter().map(|p| p.1).collect();
@@ -426,33 +1013,65 @@ pub fn detect_sstv_mode(samples: &[f32], sample_rate: f32) -> Option<SstvMode> {
 
     // Nominal line periods and sync widths in seconds.
     let candidates = [
-        (SstvMode::Scottie1, 0.42822, 0.009), (SstvMode::Scottie2, 0.27769, 0.009),
-        (SstvMode::Martin1, 0.446446, 0.004862), (SstvMode::Martin2, 0.226798, 0.004862),
-        (SstvMode::Robot36, 0.1500, 0.009), (SstvMode::Robot72, 0.3000, 0.009),
-        (SstvMode::Pd120, 0.1216, 0.020), (SstvMode::Pd180, 0.18304, 0.020),
-        (SstvMode::Pd240, 0.24448, 0.020), (SstvMode::Pd290, 0.2880, 0.020),
+        (SstvMode::Scottie1, 0.42822, 0.009),
+        (SstvMode::Scottie2, 0.27769, 0.009),
+        (SstvMode::Martin1, 0.446446, 0.004862),
+        (SstvMode::Martin2, 0.226798, 0.004862),
+        (SstvMode::Robot36, 0.1500, 0.009),
+        (SstvMode::Robot72, 0.3000, 0.009),
+        (SstvMode::Pd120, 0.1216, 0.020),
+        (SstvMode::Pd180, 0.18304, 0.020),
+        (SstvMode::Pd240, 0.24448, 0.020),
+        (SstvMode::Pd290, 0.2880, 0.020),
     ];
-    candidates.iter().map(|&(mode, line, sync)| {
-        let line_error = (period - line).abs() / line;
-        // The short analysis window broadens pulse edges, so line timing is
-        // weighted more heavily than measured sync width.
-        let sync_error = (duration - sync).abs() / sync;
-        (mode, line_error + sync_error * 0.15, line_error)
-    }).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-      .and_then(|(mode, _, line_error)| if line_error <= 0.12 { Some(mode) } else { None })
+    candidates
+        .iter()
+        .map(|&(mode, line, sync)| {
+            let line_error = (period - line).abs() / line;
+            // The short analysis window broadens pulse edges, so line timing is
+            // weighted more heavily than measured sync width.
+            let sync_error = (duration - sync).abs() / sync;
+            (mode, line_error + sync_error * 0.15, line_error)
+        })
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .and_then(|(mode, _, line_error)| if line_error <= 0.12 { Some(mode) } else { None })
 }
 
 fn ccir476_to_ita2(code: u8) -> Option<u8> {
     // CCIR 476 is the constant-weight (four marks) recoding of ITA-2.
     Some(match code {
-        0x6a => 0x00, 0x56 => 0x01, 0x6c => 0x02, 0x47 => 0x03,
-        0x5c => 0x04, 0x4b => 0x05, 0x4d => 0x06, 0x4e => 0x07,
-        0x78 => 0x08, 0x53 => 0x09, 0x55 => 0x0a, 0x17 => 0x0b,
-        0x59 => 0x0c, 0x1b => 0x0d, 0x1d => 0x0e, 0x1e => 0x0f,
-        0x74 => 0x10, 0x63 => 0x11, 0x65 => 0x12, 0x27 => 0x13,
-        0x69 => 0x14, 0x2b => 0x15, 0x2d => 0x16, 0x2e => 0x17,
-        0x71 => 0x18, 0x72 => 0x19, 0x35 => 0x1a, 0x36 => 0x1b,
-        0x39 => 0x1c, 0x3a => 0x1d, 0x3c => 0x1e, 0x5a => 0x1f,
+        0x6a => 0x00,
+        0x56 => 0x01,
+        0x6c => 0x02,
+        0x47 => 0x03,
+        0x5c => 0x04,
+        0x4b => 0x05,
+        0x4d => 0x06,
+        0x4e => 0x07,
+        0x78 => 0x08,
+        0x53 => 0x09,
+        0x55 => 0x0a,
+        0x17 => 0x0b,
+        0x59 => 0x0c,
+        0x1b => 0x0d,
+        0x1d => 0x0e,
+        0x1e => 0x0f,
+        0x74 => 0x10,
+        0x63 => 0x11,
+        0x65 => 0x12,
+        0x27 => 0x13,
+        0x69 => 0x14,
+        0x2b => 0x15,
+        0x2d => 0x16,
+        0x2e => 0x17,
+        0x71 => 0x18,
+        0x72 => 0x19,
+        0x35 => 0x1a,
+        0x36 => 0x1b,
+        0x39 => 0x1c,
+        0x3a => 0x1d,
+        0x3c => 0x1e,
+        0x5a => 0x1f,
         _ => return None, // SIA/SIB/RPT and invalid constant-weight words
     })
 }
@@ -465,9 +1084,13 @@ pub fn decode_navtex(samples: &[f32], sample_rate: f32) -> Option<String> {
     const BAUD: f32 = 100.0;
     const MARK: f32 = 1785.0;
     const SPACE: f32 = 1615.0;
-    if sample_rate < 5000.0 || samples.len() < (sample_rate * 0.15) as usize { return None; }
+    if sample_rate < 5000.0 || samples.len() < (sample_rate * 0.15) as usize {
+        return None;
+    }
     let energy = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
-    if energy < 1e-9 { return None; }
+    if energy < 1e-9 {
+        return None;
+    }
     let spb = sample_rate / BAUD;
 
     let mut best: Vec<u8> = Vec::new();
@@ -491,48 +1114,65 @@ pub fn decode_navtex(samples: &[f32], sample_rate: f32) -> Option<String> {
                         for bit in 0..7 {
                             let value = bits[p + bit] ^ inverted;
                             let shift = if reversed { bit } else { 6 - bit };
-                            if value { word |= 1 << shift; }
+                            if value {
+                                word |= 1 << shift;
+                            }
                         }
-                        if word.count_ones() == 4 && ccir476_to_ita2(word).is_some() { valid += 1; }
+                        if word.count_ones() == 4 && ccir476_to_ita2(word).is_some() {
+                            valid += 1;
+                        }
                         words.push(word);
                         p += 7;
                     }
-                    if valid > best_score { best_score = valid; best = words; }
+                    if valid > best_score {
+                        best_score = valid;
+                        best = words;
+                    }
                 }
             }
         }
     }
-    if best_score < 2 || best_score * 2 < best.len() { return None; }
+    if best_score < 2 || best_score * 2 < best.len() {
+        return None;
+    }
 
     let mut selected = Vec::new();
     for (i, &word) in best.iter().enumerate() {
-        if ccir476_to_ita2(word).is_none() { continue; }
+        if ccir476_to_ita2(word).is_none() {
+            continue;
+        }
         // In the SITOR-B interleave a character's second transmission is five
         // character intervals later. Keep the first valid copy; use the second
         // when the first was damaged.
-        if i >= 5 && best[i - 5] == word { continue; }
+        if i >= 5 && best[i - 5] == word {
+            continue;
+        }
         selected.push(word);
     }
     let mut out = String::new();
     let mut figures = false;
     for word in selected {
-        if let Some(code) = ccir476_to_ita2(word) { ita2_push(&mut out, code, &mut figures); }
+        if let Some(code) = ccir476_to_ita2(word) {
+            ita2_push(&mut out, code, &mut figures);
+        }
     }
-    let text = out.trim_matches(|c: char| c == '\0' || c == '\r' || c == '\n').to_string();
-    if text.is_empty() { None } else { Some(text) }
+    let text = out
+        .trim_matches(|c: char| c == '\0' || c == '\r' || c == '\n')
+        .to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 // ── CTCSS / DCS ────────────────────────────────────────────────────────────
 
 /// Downconvert and decode RDS from a WFM-demodulated multiplex signal.
-/// RDS sits on a 57 kHz suppressed-carrier AM/PM subcarrier with ±2 kHz
-/// deviation. Data rate is 1187.5 bps, differentially encoded (BPSK).
-/// This decoder performs:
-///   1. Quadrature downconvert from 57 kHz
-///   2. Low-pass to isolate the 1.1875 kHz baseband
-///   3. Clock recovery via zero crossings
-///   4. Differential decoding
-/// Returns decoded groups as a JSON-serializable struct.
+///
+/// RDS is 1187.5 bit/s differential biphase on a 57 kHz subcarrier. Blocks are
+/// 26 bits (16 data + 10 check) identified by IEC 62106 offset words. Sample
+/// rate must be above 114 kHz so the 57 kHz carrier is not aliased.
 pub struct RdsResult {
     pub bits_decoded: usize,
     pub groups_found: usize,
@@ -542,132 +1182,310 @@ pub struct RdsResult {
     pub pi_code: Option<u16>,
 }
 
-/// Decode RDS from demodulated WFM audio (multiplex).
-/// `sample_rate` must be the audio rate (typically 96 kHz after resampling).
-/// Returns None if no RDS subcarrier is present.
+const RDS_CARRIER_HZ: f32 = 57_000.0;
+const RDS_BIT_RATE: f32 = 1187.5;
+const RDS_OFFSET_A: u16 = 0x0FC;
+const RDS_OFFSET_B: u16 = 0x198;
+const RDS_OFFSET_C: u16 = 0x168;
+const RDS_OFFSET_CP: u16 = 0x350;
+const RDS_OFFSET_D: u16 = 0x1B4;
+const RDS_POLY11: u32 = 0x5B9; // x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
+
+fn rds_mod(bits: u32, bit_count: u8) -> u16 {
+    let mut value = bits;
+    for i in (10..bit_count).rev() {
+        if ((value >> i) & 1) == 1 {
+            value ^= RDS_POLY11 << (i - 10);
+        }
+    }
+    (value & 0x3FF) as u16
+}
+
+fn rds_checkword(data: u16) -> u16 {
+    rds_mod(u32::from(data) << 10, 26)
+}
+
+fn rds_encode_block(data: u16, offset: u16) -> u32 {
+    ((u32::from(data)) << 10) | u32::from(rds_checkword(data) ^ offset)
+}
+
+fn rds_syndrome(block: u32) -> u16 {
+    rds_mod(block, 26)
+}
+
+fn rds_block_offset(syndrome: u16) -> Option<char> {
+    match syndrome {
+        RDS_OFFSET_A => Some('A'),
+        RDS_OFFSET_B => Some('B'),
+        RDS_OFFSET_C | RDS_OFFSET_CP => Some('C'),
+        RDS_OFFSET_D => Some('D'),
+        _ => None,
+    }
+}
+
+fn rds_bits_of_block(block: u32) -> [u8; 26] {
+    let mut bits = [0u8; 26];
+    for (index, bit) in bits.iter_mut().enumerate() {
+        *bit = ((block >> (25 - index)) & 1) as u8;
+    }
+    bits
+}
+
+fn rds_word_from_bits(bits: &[u8]) -> u32 {
+    bits.iter()
+        .take(26)
+        .fold(0u32, |acc, bit| (acc << 1) | u32::from(*bit))
+}
+
+fn rds_differential_encode(bits: &[u8]) -> Vec<u8> {
+    let mut previous = 0u8;
+    bits.iter()
+        .map(|&bit| {
+            previous ^= bit;
+            previous
+        })
+        .collect()
+}
+
+fn rds_differential_decode(bits: &[u8]) -> Vec<u8> {
+    bits.windows(2).map(|pair| pair[0] ^ pair[1]).collect()
+}
+
+fn rds_group_0a_bits(pi: u16, pty: u8, segment: u8, chars: [u8; 2]) -> Vec<u8> {
+    let block_b = (u16::from(pty & 0x1F) << 5) | u16::from(segment & 0x03);
+    let block_c = 0xE0E0;
+    let block_d = u16::from(chars[0]) << 8 | u16::from(chars[1]);
+    let mut bits = Vec::with_capacity(104);
+    for (data, offset) in [
+        (pi, RDS_OFFSET_A),
+        (block_b, RDS_OFFSET_B),
+        (block_c, RDS_OFFSET_C),
+        (block_d, RDS_OFFSET_D),
+    ] {
+        bits.extend(rds_bits_of_block(rds_encode_block(data, offset)));
+    }
+    bits
+}
+
+/// 57 kHz multiplex carrying PI `0xBEEF` and PS `HELLO`.
+pub fn synthesize_rds_hello_multiplex(sample_rate: f32) -> Vec<f32> {
+    let ps = b"HELLO   ";
+    let mut payload = Vec::new();
+    for _ in 0..2 {
+        for segment in 0..4u8 {
+            let at = (segment as usize) * 2;
+            payload.extend(rds_group_0a_bits(0xBEEF, 10, segment, [ps[at], ps[at + 1]]));
+        }
+    }
+    let encoded = rds_differential_encode(&payload);
+    let samples_per_chip = sample_rate / (RDS_BIT_RATE * 2.0);
+    let mut samples = Vec::new();
+    let mut phase = 0.0f32;
+    let carrier_step = TAU * RDS_CARRIER_HZ / sample_rate;
+    for bit in encoded {
+        let first = if bit != 0 { 1.0 } else { -1.0 };
+        for chip in [first, -first] {
+            let mut consumed = 0.0;
+            while consumed + 0.5 < samples_per_chip {
+                samples.push(chip * 0.2 * phase.cos());
+                phase = (phase + carrier_step).rem_euclid(TAU);
+                consumed += 1.0;
+            }
+        }
+    }
+    samples
+}
+
+/// Decode RDS from demodulated WFM multiplex audio.
+/// Returns None if the 57 kHz subcarrier is absent.
 pub fn decode_rds(multiplex: &[f32], sample_rate: f32) -> Option<RdsResult> {
-    const RDS_CARRIER: f32 = 57_000.0;
-    const BIT_RATE: f32 = 1187.5;
-    const RDS_BW: f32 = 2_500.0;
-
-    // Need at least 0.5 seconds for meaningful RDS decode
-    if multiplex.len() < (sample_rate * 0.5) as usize { return None; }
-
-    // 1. Quadrature mix-down from 57 kHz
-    let mut baseband_i = Vec::with_capacity(multiplex.len());
-    let mut baseband_q = Vec::with_capacity(multiplex.len());
-    for (n, &sample) in multiplex.iter().enumerate() {
-        let phase = TAU * RDS_CARRIER * n as f32 / sample_rate;
-        baseband_i.push(sample * phase.cos());
-        baseband_q.push(sample * -phase.sin());
+    if sample_rate < 114_000.0 || multiplex.len() < (sample_rate * 0.25) as usize {
+        return None;
     }
 
-    // 2. One-pole low-pass at ~2.5 kHz to isolate baseband RDS
-    let alpha = 1.0 - (-TAU * RDS_BW / sample_rate).exp();
+    let alpha = 1.0 - (-TAU * 4_000.0 / sample_rate).exp();
     let mut lp_i = 0.0f32;
-    let mut lp_q = 0.0f32;
-    let filtered: Vec<f32> = baseband_i.iter().zip(baseband_q.iter()).map(|(&i, &q)| {
-        lp_i += (i - lp_i) * alpha;
-        lp_q += (q - lp_q) * alpha;
-        (lp_i * lp_i + lp_q * lp_q).sqrt()
-    }).collect();
+    let baseband: Vec<f32> = multiplex
+        .iter()
+        .enumerate()
+        .map(|(index, &sample)| {
+            let phase = TAU * RDS_CARRIER_HZ * index as f32 / sample_rate;
+            let mixed = sample * phase.cos();
+            lp_i += (mixed - lp_i) * alpha;
+            lp_i
+        })
+        .collect();
 
-    // 3. Check signal presence: RMS of the filtered signal
-    let rms = filtered.iter().map(|x| x * x).sum::<f32>() / filtered.len() as f32;
-    if rms < 1e-8 { return None; }
+    let rms = baseband.iter().map(|x| x * x).sum::<f32>() / baseband.len() as f32;
+    if rms < 1e-10 {
+        return None;
+    }
 
-    // 4. Clock recovery via zero-crossing on the shaped signal
-    // Average and threshold to get bipolar data
-    let dc = filtered.iter().sum::<f32>() / filtered.len() as f32;
-    let bipolar: Vec<f32> = filtered.iter().map(|x| x - dc).collect();
-
-    let samples_per_bit = sample_rate / BIT_RATE;
-    let mut bits: Vec<u8> = Vec::new();
+    let samples_per_chip = sample_rate / (RDS_BIT_RATE * 2.0);
+    let mut chips = Vec::new();
     let mut pos = 0.0f32;
-    while (pos as usize + samples_per_bit as usize / 2) < bipolar.len() {
-        let idx = pos as usize;
-        let center = idx + (samples_per_bit / 2.0) as usize;
-        if center < bipolar.len() {
-            bits.push(if bipolar[center] >= 0.0 { 1 } else { 0 });
+    while (pos as usize + (samples_per_chip as usize / 2)) < baseband.len() {
+        let center = pos as usize + (samples_per_chip / 2.0) as usize;
+        if center < baseband.len() {
+            chips.push(if baseband[center] >= 0.0 { 1u8 } else { 0 });
         }
-        pos += samples_per_bit;
+        pos += samples_per_chip;
+    }
+    if chips.len() < 8 {
+        return Some(RdsResult {
+            bits_decoded: 0,
+            groups_found: 0,
+            program_service: None,
+            radio_text: None,
+            pty: None,
+            pi_code: None,
+        });
     }
 
-    if bits.len() < 104 { return Some(RdsResult { bits_decoded: bits.len(), groups_found: 0, program_service: None, radio_text: None, pty: None, pi_code: None }); }
+    let mut best = RdsResult {
+        bits_decoded: 0,
+        groups_found: 0,
+        program_service: None,
+        radio_text: None,
+        pty: None,
+        pi_code: None,
+    };
+    for offset in 0..2 {
+        if chips.len() <= offset + 1 {
+            continue;
+        }
+        let manchester: Vec<u8> = chips[offset..]
+            .chunks_exact(2)
+            .map(|pair| u8::from(pair[0] != pair[1] && pair[0] == 1))
+            .collect();
+        let inverted: Vec<u8> = manchester.iter().map(|bit| 1 - bit).collect();
+        for stream in [manchester, inverted] {
+            let candidate = decode_rds_bitstream(&stream);
+            if candidate.groups_found > best.groups_found {
+                best = candidate;
+            }
+        }
+    }
+    Some(best)
+}
 
-    // 5. Differential decode
-    let diff_bits: Vec<u8> = bits.windows(2).map(|w| w[0] ^ w[1]).collect();
-
-    // 6. Search for RDS sync word (block A offset word: 0b00111111000 = 0x3D8)
-    // After differential decoding, we look for the known sync pattern.
-    // We scan for block alignment by checking the 10-bit offset word.
+fn decode_rds_bitstream(manchester_bits: &[u8]) -> RdsResult {
+    let data_bits = rds_differential_decode(manchester_bits);
     let mut groups = Vec::new();
-    let sync_pattern: [u8; 10] = [0, 0, 1, 1, 1, 1, 1, 1, 0, 0];
-
+    let mut ps = [None; 8];
     let mut i = 0;
-    while i + 104 <= diff_bits.len() {
-        // Check for sync pattern at this position
-        let matches: usize = (0..10).map(|j| if diff_bits[i + j] == sync_pattern[j] { 1 } else { 0 }).sum();
-        if matches >= 8 {
-            // Extract 26-bit words for each of the 4 blocks
-            let extract_word = |start: usize| -> u32 {
-                diff_bits[start..start.min(diff_bits.len())]
-                    .iter()
-                    .take(26)
-                    .fold(0u32, |acc, &b| (acc << 1) | b as u32)
-            };
-            let word_a = extract_word(i);
-            // PI code is the first 16 bits of block A
-            let pi = (word_a >> 10) as u16;
-            // PTY is bits 15-19 of block B
-            let word_b = extract_word(i + 26);
-            let pty = ((word_b >> 5) & 0x1F) as u8;
-            groups.push((pi, pty, i));
-            i += 104;
-        } else {
+    while i + 104 <= data_bits.len() {
+        let a = rds_word_from_bits(&data_bits[i..]);
+        if rds_block_offset(rds_syndrome(a)) != Some('A') {
             i += 1;
+            continue;
         }
+        let b = rds_word_from_bits(&data_bits[i + 26..]);
+        let c = rds_word_from_bits(&data_bits[i + 52..]);
+        let d = rds_word_from_bits(&data_bits[i + 78..]);
+        if rds_block_offset(rds_syndrome(b)) != Some('B')
+            || rds_block_offset(rds_syndrome(c)) != Some('C')
+            || rds_block_offset(rds_syndrome(d)) != Some('D')
+        {
+            i += 1;
+            continue;
+        }
+        let pi = (a >> 10) as u16;
+        let block_b = (b >> 10) as u16;
+        let pty = ((block_b >> 5) & 0x1F) as u8;
+        let group_type = block_b >> 12;
+        if group_type == 0 {
+            let segment = (block_b & 0x03) as usize;
+            let chars = (d >> 10) as u16;
+            ps[segment * 2] = Some((chars >> 8) as u8);
+            ps[segment * 2 + 1] = Some(chars as u8);
+        }
+        groups.push((pi, pty));
+        i += 104;
     }
 
-    if groups.is_empty() {
-        return Some(RdsResult { bits_decoded: diff_bits.len(), groups_found: 0, program_service: None, radio_text: None, pty: None, pi_code: None });
-    }
-
-    // Aggregate the most common PI and PTY
     use std::collections::HashMap;
     let mut pi_counts: HashMap<u16, usize> = HashMap::new();
     let mut pty_counts: HashMap<u8, usize> = HashMap::new();
-    for (pi, pty, _) in &groups {
+    for (pi, pty) in &groups {
         *pi_counts.entry(*pi).or_default() += 1;
         *pty_counts.entry(*pty).or_default() += 1;
     }
-    let pi_code = pi_counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k);
-    let pty = pty_counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k);
+    let program_service = if ps.iter().all(Option::is_some) {
+        Some(
+            ps.iter()
+                .filter_map(|ch| *ch)
+                .map(|ch| {
+                    if (0x20..=0x7e).contains(&ch) {
+                        ch as char
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
-    Some(RdsResult {
-        bits_decoded: diff_bits.len(),
+    RdsResult {
+        bits_decoded: data_bits.len(),
         groups_found: groups.len(),
-        program_service: None, // Requires full block-by-block PS decoding (8-char display, sent over 4 groups)
+        program_service: program_service.filter(|text| !text.is_empty()),
         radio_text: None,
-        pty,
-        pi_code,
-    })
+        pty: pty_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(k, _)| k),
+        pi_code: pi_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(k, _)| k),
+    }
 }
 
-
+/// 700 Hz Morse "SOS" for recorded-audio fixtures.
+pub fn synthesize_cw_sos(sample_rate: f32, tone_hz: f32) -> Vec<f32> {
+    let dit = (sample_rate * 0.1) as usize;
+    let dah = dit * 3;
+    let gap = dit;
+    let letter_gap = dit * 3;
+    let mut samples = Vec::new();
+    let key = |samples: &mut Vec<f32>, duration: usize| {
+        for i in 0..duration {
+            samples.push((TAU * tone_hz * i as f32 / sample_rate).sin() * 0.5);
+        }
+        samples.extend(std::iter::repeat_n(0.0, gap));
+    };
+    for _ in 0..3 {
+        key(&mut samples, dit);
+    }
+    samples.extend(std::iter::repeat_n(0.0, letter_gap));
+    for _ in 0..3 {
+        key(&mut samples, dah);
+    }
+    samples.extend(std::iter::repeat_n(0.0, letter_gap));
+    for _ in 0..3 {
+        key(&mut samples, dit);
+    }
+    samples
+}
 
 /// Standard CTCSS tones (EIA) in Hz.
 pub const CTCSS_TONES: [f32; 50] = [
-    67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5,
-    94.8, 97.4, 100.0, 103.5, 107.2, 110.9, 114.8, 118.8, 123.0, 127.3,
-    131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2, 165.5, 167.9,
-    171.3, 173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5,
-    203.5, 206.5, 210.7, 218.1, 225.7, 229.1, 233.6, 241.8, 250.3, 254.1,
+    67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2,
+    110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2,
+    165.5, 167.9, 171.3, 173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5, 203.5,
+    206.5, 210.7, 218.1, 225.7, 229.1, 233.6, 241.8, 250.3, 254.1,
 ];
 
 /// Goertzel magnitude for a single frequency over a block of samples.
 fn goertzel_magnitude(samples: &[f32], freq: f32, sample_rate: f32) -> f32 {
-    if samples.is_empty() { return 0.0; }
+    if samples.is_empty() {
+        return 0.0;
+    }
     let k = freq * samples.len() as f32 / sample_rate;
     let omega = TAU * k / samples.len() as f32;
     let coeff = 2.0 * omega.cos();
@@ -686,9 +1504,13 @@ fn goertzel_magnitude(samples: &[f32], freq: f32, sample_rate: f32) -> f32 {
 /// Returns the tone frequency and a 0.0–1.0 confidence.
 /// At least 200 ms of audio is required for reliable sub-audible detection.
 pub fn detect_ctcss(samples: &[f32], sample_rate: f32) -> Option<(f32, f32)> {
-    if samples.len() < (sample_rate * 0.2) as usize { return None; }
+    if samples.len() < (sample_rate * 0.2) as usize {
+        return None;
+    }
     let total_energy: f32 = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
-    if total_energy < 1e-10 { return None; }
+    if total_energy < 1e-10 {
+        return None;
+    }
     let mut best: Option<(f32, f32)> = None;
     for &tone in &CTCSS_TONES {
         let mag = goertzel_magnitude(samples, tone, sample_rate);
@@ -700,7 +1522,11 @@ pub fn detect_ctcss(samples: &[f32], sample_rate: f32) -> Option<(f32, f32)> {
     // Confidence: ratio of best tone energy to total audio energy.
     best.and_then(|(tone, ratio)| {
         let snr_db = 10.0 * ratio.max(1e-12).log10();
-        if snr_db >= 6.0 { Some((tone, (snr_db / 20.0).min(1.0))) } else { None }
+        if snr_db >= 6.0 {
+            Some((tone, (snr_db / 20.0).min(1.0)))
+        } else {
+            None
+        }
     })
 }
 
@@ -715,14 +1541,110 @@ pub fn detect_dcs(samples: &[f32], sample_rate: f32) -> Option<String> {
     // Without a bit synchronizer this can't reliably extract the Golay code
     // from band-limited audio. We do a band-energy check at the expected
     // DCS fundamental to flag presence, but do NOT fabricate a code.
-    if samples.len() < (sample_rate * 0.3) as usize { return None; }
+    if samples.len() < (sample_rate * 0.3) as usize {
+        return None;
+    }
     let dcs_band = goertzel_magnitude(samples, 134.4, sample_rate);
     let total_energy: f32 = samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32;
-    if total_energy < 1e-10 { return None; }
+    if total_energy < 1e-10 {
+        return None;
+    }
     let ratio = dcs_band / (samples.len() as f32 * total_energy + 1e-12);
     let snr_db = 10.0 * ratio.max(1e-12).log10();
-    if snr_db >= 10.0 { Some(format!("DCS signal detected (SNR {:.1} dB) — code extraction requires raw discriminator bitstream", snr_db)) }
-    else { None }
+    if snr_db >= 10.0 {
+        Some(format!("DCS signal detected (SNR {:.1} dB) — code extraction requires raw discriminator bitstream", snr_db))
+    } else {
+        None
+    }
+}
+
+fn append_fsk_symbol(
+    samples: &mut Vec<f32>,
+    bit: bool,
+    count: usize,
+    mark: f32,
+    space: f32,
+    sample_rate: f32,
+    phase: &mut f32,
+) {
+    let frequency = if bit { mark } else { space };
+    let step = TAU * frequency / sample_rate;
+    for _ in 0..count {
+        samples.push(phase.sin() * 0.7);
+        *phase = (*phase + step).rem_euclid(TAU);
+    }
+}
+
+/// ITA-2 "HELLO" at 50 baud for recorded-audio fixtures.
+pub fn synthesize_rtty_hello(sample_rate: f32) -> Vec<f32> {
+    let baud = 50.0;
+    let symbol = (sample_rate / baud) as usize;
+    let (mark, space) = (2125.0, 1955.0);
+    let mut samples = Vec::new();
+    let mut phase = 0.0;
+    append_fsk_symbol(
+        &mut samples,
+        true,
+        symbol * 3,
+        mark,
+        space,
+        sample_rate,
+        &mut phase,
+    );
+    for code in [0x14u8, 0x01, 0x12, 0x12, 0x18] {
+        append_fsk_symbol(
+            &mut samples,
+            false,
+            symbol,
+            mark,
+            space,
+            sample_rate,
+            &mut phase,
+        );
+        for bit in 0..5 {
+            append_fsk_symbol(
+                &mut samples,
+                code & (1 << bit) != 0,
+                symbol,
+                mark,
+                space,
+                sample_rate,
+                &mut phase,
+            );
+        }
+        append_fsk_symbol(
+            &mut samples,
+            true,
+            symbol * 2,
+            mark,
+            space,
+            sample_rate,
+            &mut phase,
+        );
+    }
+    samples
+}
+
+/// CCIR-476 "HELLO" NAVTEX audio for recorded fixtures.
+pub fn synthesize_navtex_hello(sample_rate: f32) -> Vec<f32> {
+    let symbol = (sample_rate / 100.0) as usize;
+    let words = [0x69u8, 0x56, 0x65, 0x65, 0x71];
+    let mut samples = Vec::new();
+    let mut phase = 0.0;
+    for &word in words.iter().chain(words.iter()) {
+        for bit in (0..7).rev() {
+            append_fsk_symbol(
+                &mut samples,
+                word & (1 << bit) != 0,
+                symbol,
+                1785.0,
+                1615.0,
+                sample_rate,
+                &mut phase,
+            );
+        }
+    }
+    samples
 }
 
 #[cfg(test)]
@@ -730,20 +1652,29 @@ mod tests {
     use super::*;
 
     fn tone(n: usize, cycles: f32) -> Vec<Complex<f32>> {
-        (0..n).map(|i| Complex::from_polar(1.0, TAU * cycles * i as f32 / n as f32)).collect()
+        (0..n)
+            .map(|i| Complex::from_polar(1.0, TAU * cycles * i as f32 / n as f32))
+            .collect()
     }
 
     #[test]
     fn complex_low_pass_attenuates_out_of_channel_tone() {
-        let input: Vec<_> = (0..20_000).map(|i| {
-            let phase = TAU * 200_000.0 * i as f32 / 2_000_000.0;
-            Complex::from_polar(1.0, phase)
-        }).collect();
+        let input: Vec<_> = (0..20_000)
+            .map(|i| {
+                let phase = TAU * 200_000.0 * i as f32 / 2_000_000.0;
+                Complex::from_polar(1.0, phase)
+            })
+            .collect();
         let mut state = Complex::new(0.0, 0.0);
         let output = low_pass_complex(&input, 12_500.0, 2_000_000, &mut state);
-        let input_rms = (input[2_000..].iter().map(|x| x.norm_sqr()).sum::<f32>() / 18_000.0).sqrt();
-        let output_rms = (output[2_000..].iter().map(|x| x.norm_sqr()).sum::<f32>() / 18_000.0).sqrt();
-        assert!(output_rms < input_rms * 0.2, "filter attenuation too weak: {output_rms} vs {input_rms}");
+        let input_rms =
+            (input[2_000..].iter().map(|x| x.norm_sqr()).sum::<f32>() / 18_000.0).sqrt();
+        let output_rms =
+            (output[2_000..].iter().map(|x| x.norm_sqr()).sum::<f32>() / 18_000.0).sqrt();
+        assert!(
+            output_rms < input_rms * 0.2,
+            "filter attenuation too weak: {output_rms} vs {input_rms}"
+        );
     }
 
     #[test]
@@ -768,6 +1699,54 @@ mod tests {
     }
 
     #[test]
+    fn mode_parse_keeps_sam_and_cw_distinct_from_nfm() {
+        assert_eq!(Mode::parse("sam"), Mode::Sam);
+        assert_eq!(Mode::parse("cw"), Mode::Cw);
+        assert_eq!(Mode::parse("nfm"), Mode::Nfm);
+    }
+
+    #[test]
+    fn sam_pll_recovers_am_on_an_offset_carrier() {
+        let sample_rate = 48_000.0;
+        let n = 48_000usize;
+        let iq: Vec<_> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                let envelope = 1.0 + 0.6 * (TAU * 1_000.0 * t).cos();
+                Complex::from_polar(envelope, TAU * 180.0 * t)
+            })
+            .collect();
+        let mut phase = 0.0;
+        let audio = demodulate_sam(&iq, &mut phase);
+        let settled = &audio[n / 4..];
+        let mean = settled.iter().sum::<f32>() / settled.len() as f32;
+        let ac: Vec<f32> = settled.iter().map(|v| v - mean).collect();
+        let energy = ac.iter().map(|v| v * v).sum::<f32>() / ac.len() as f32;
+        assert!(energy > 0.01, "SAM audio energy too low: {energy}");
+        assert!(phase.abs() > 0.0);
+    }
+
+    #[test]
+    fn cw_bfo_beats_a_baseband_carrier_to_700_hz() {
+        let sample_rate = 8_000u32;
+        let iq = vec![Complex::new(0.8, 0.0); sample_rate as usize];
+        let mut phase = 0.0;
+        let audio = demodulate_cw(&iq, sample_rate, 700.0, &mut phase);
+        let settled = &audio[200..];
+        let mut crossings = 0usize;
+        for pair in settled.windows(2) {
+            if pair[0] <= 0.0 && pair[1] > 0.0 {
+                crossings += 1;
+            }
+        }
+        let expected = 700.0 * settled.len() as f32 / sample_rate as f32;
+        assert!(
+            (crossings as f32 - expected).abs() < 25.0,
+            "expected ~{expected:.0} Hz beat, got {crossings} crossings"
+        );
+    }
+
+    #[test]
     fn fractional_resampler_hits_requested_rate() {
         let input: Vec<f32> = (0..2000).map(|i| i as f32 / 2000.0).collect();
         let output = resample_linear(&input, 2_000_000, 96_000);
@@ -784,6 +1763,25 @@ mod tests {
     }
 
     #[test]
+    fn channelize_demod_at_dc_matches_direct_demod() {
+        let input = tone(2048, 8.0);
+        let mut previous = None;
+        let direct = demodulate(Mode::Nfm, &input, &mut previous);
+        let channelized = channelize_demod(&input, 0.0, 48_000, Mode::Nfm);
+        assert_eq!(direct.len(), channelized.len());
+        let mean_error = direct
+            .iter()
+            .zip(channelized.iter())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / direct.len() as f32;
+        assert!(
+            mean_error < 0.05,
+            "channelize at DC should match NFM demod, mean error {mean_error}"
+        );
+    }
+
+    #[test]
     fn decimation_applies_bounded_boxcar() {
         let input: Vec<f32> = (0..16).map(|v| v as f32).collect();
         assert_eq!(decimate_average(&input, 4), vec![1.5, 5.5, 9.5, 13.5]);
@@ -796,14 +1794,71 @@ mod tests {
         let pcm = demodulate(Mode::Am, &iq, &mut p);
         assert!(pcm.iter().all(|v| v.abs() <= 1.0));
     }
+    #[test]
+    fn sinc_resampler_is_continuous_across_blocks() {
+        let input_rate = 500_000;
+        let output_rate = 48_000;
+        let input: Vec<f32> = (0..10_000)
+            .map(|index| (TAU * 1_000.0 * index as f32 / input_rate as f32).sin())
+            .collect();
+        let mut resampler = SincResampler::default();
+        let mut output = Vec::new();
+        for block in input.chunks(1_337) {
+            output.extend(resampler.process(block, input_rate, output_rate));
+        }
+        assert!(
+            (output.len() as isize - 960).abs() <= 2,
+            "unexpected output length: {}",
+            output.len()
+        );
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn sinc_resampler_rejects_above_nyquist_energy() {
+        let input_rate = 96_000;
+        let output_rate = 48_000;
+        let input: Vec<f32> = (0..9_600)
+            .map(|index| (TAU * 36_000.0 * index as f32 / input_rate as f32).sin())
+            .collect();
+        let mut resampler = SincResampler::default();
+        let output = resampler.process(&input, input_rate, output_rate);
+        let steady = &output[64.min(output.len())..];
+        let rms = (steady.iter().map(|sample| sample * sample).sum::<f32>()
+            / steady.len().max(1) as f32)
+            .sqrt();
+        assert!(rms < 0.08, "aliased energy was not rejected: {rms}");
+    }
+
+    #[test]
+    fn broadcast_deemphasis_attenuates_high_frequency_content() {
+        let rate = 192_000u32;
+        let mut state = 0.0;
+        let mut alternating: Vec<f32> = (0..4096)
+            .map(|index| if index % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        deemphasis(&mut alternating, rate, 75.0, &mut state);
+        let rms = (alternating[512..]
+            .iter()
+            .map(|sample| sample * sample)
+            .sum::<f32>()
+            / (alternating.len() - 512) as f32)
+            .sqrt();
+        assert!(
+            rms < 0.1,
+            "de-emphasis did not suppress high-frequency energy: {rms}"
+        );
+    }
 
     #[test]
     fn dtmf_detects_single_digit() {
         let sample_rate = 8000.0;
         let block = (sample_rate * 0.08) as usize;
         let mut samples = vec![0.0f32; block];
-        for i in 0..block {
-            samples[i] = ((TAU * 697.0 * i as f32 / sample_rate).sin() + (TAU * 1209.0 * i as f32 / sample_rate).sin()) * 0.3;
+        for (i, sample) in samples.iter_mut().enumerate() {
+            *sample = ((TAU * 697.0 * i as f32 / sample_rate).sin()
+                + (TAU * 1209.0 * i as f32 / sample_rate).sin())
+                * 0.3;
         }
         let result = detect_dtmf(&samples, sample_rate).expect("should detect DTMF digit");
         assert!(result.contains('1'), "expected '1', got '{result}'");
@@ -818,47 +1873,41 @@ mod tests {
         let keys: [(f32, f32); 3] = [(697.0, 1209.0), (770.0, 1336.0), (852.0, 1477.0)];
         for &(low, high) in &keys {
             for i in 0..tone_dur {
-                samples.push(((TAU * low * i as f32 / sample_rate).sin() + (TAU * high * i as f32 / sample_rate).sin()) * 0.3);
+                samples.push(
+                    ((TAU * low * i as f32 / sample_rate).sin()
+                        + (TAU * high * i as f32 / sample_rate).sin())
+                        * 0.3,
+                );
             }
             samples.extend(std::iter::repeat_n(0.0, gap_dur));
         }
         let result = detect_dtmf(&samples, sample_rate);
         assert!(result.is_some(), "should detect DTMF sequence");
         let result = result.unwrap();
-        assert!(result.len() >= 2, "expected at least 2 digits, got '{result}'");
+        assert!(
+            result.len() >= 2,
+            "expected at least 2 digits, got '{result}'"
+        );
     }
 
     #[test]
     fn dtmf_rejects_noise() {
         let sample_rate = 8000.0;
         let n = (sample_rate * 0.2) as usize;
-        let samples: Vec<f32> = (0..n).map(|i| (((i * 7919) % 1000) as f32 / 500.0 - 1.0) * 0.1).collect();
-        assert!(detect_dtmf(&samples, sample_rate).is_none(), "should not detect DTMF in noise");
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (((i * 7919) % 1000) as f32 / 500.0 - 1.0) * 0.1)
+            .collect();
+        assert!(
+            detect_dtmf(&samples, sample_rate).is_none(),
+            "should not detect DTMF in noise"
+        );
     }
 
     #[test]
     fn cw_decodes_sos() {
         let sample_rate = 8000.0;
         let tone_hz = 700.0;
-        let dit_samples = (sample_rate * 0.1) as usize; // 100ms per dit
-        let dah_samples = dit_samples * 3;
-        let gap_samples = dit_samples;
-        let letter_gap = dit_samples * 3;
-        let mut samples: Vec<f32> = Vec::new();
-        let mut key = |samples: &mut Vec<f32>, dur: usize| {
-            for i in 0..dur {
-                samples.push((TAU * tone_hz * i as f32 / sample_rate).sin() * 0.5);
-            }
-            samples.extend(std::iter::repeat_n(0.0, gap_samples));
-        };
-        // S = ...
-        key(&mut samples, dit_samples); key(&mut samples, dit_samples); key(&mut samples, dit_samples);
-        samples.extend(std::iter::repeat_n(0.0, letter_gap));
-        // O = ---
-        key(&mut samples, dah_samples); key(&mut samples, dah_samples); key(&mut samples, dah_samples);
-        samples.extend(std::iter::repeat_n(0.0, letter_gap));
-        // S = ...
-        key(&mut samples, dit_samples); key(&mut samples, dit_samples); key(&mut samples, dit_samples);
+        let samples = synthesize_cw_sos(sample_rate, tone_hz);
         let result = decode_cw(&samples, sample_rate, tone_hz).expect("should decode CW");
         assert!(result.contains('S'), "expected S, got '{result}'");
         assert!(result.contains('O'), "expected O, got '{result}'");
@@ -874,22 +1923,47 @@ mod tests {
     fn rds_rejects_silence() {
         let samples = vec![0.0f32; 48_000];
         assert!(decode_rds(&samples, 96_000.0).is_none());
+        assert!(decode_rds(&samples, 190_000.0).is_none());
+    }
+
+    #[test]
+    fn rds_block_crc_identifies_offset_words() {
+        for offset in [RDS_OFFSET_A, RDS_OFFSET_B, RDS_OFFSET_C, RDS_OFFSET_D] {
+            let block = rds_encode_block(0xBEEF, offset);
+            assert_eq!(
+                rds_block_offset(rds_syndrome(block)),
+                rds_block_offset(offset)
+            );
+        }
+    }
+
+    #[test]
+    fn rds_hello_multiplex_recovers_pi_and_ps() {
+        let sample_rate = 190_000.0;
+        let samples = synthesize_rds_hello_multiplex(sample_rate);
+        let result = decode_rds(&samples, sample_rate).expect("RDS subcarrier");
+        assert!(result.groups_found >= 4, "groups={}", result.groups_found);
+        assert_eq!(result.pi_code, Some(0xBEEF));
+        assert_eq!(result.pty, Some(10));
+        let ps = result.program_service.unwrap_or_default();
+        assert!(ps.contains("HELLO"), "ps={ps}");
     }
 
     #[test]
     fn rds_downconverts_57khz_subcarrier() {
-        // Generate a 57 kHz tone (simulates RDS subcarrier presence)
-        let sample_rate = 96_000.0f32;
-        let n = (sample_rate * 0.5) as usize;
-        let samples: Vec<f32> = (0..n).map(|i| {
-            (TAU * 57_000.0 * i as f32 / sample_rate).sin() * 0.1
-        }).collect();
+        let sample_rate = 190_000.0f32;
+        let n = (sample_rate * 0.3) as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (TAU * 57_000.0 * i as f32 / sample_rate).sin() * 0.1)
+            .collect();
         let result = decode_rds(&samples, sample_rate);
-        // Should detect energy at 57 kHz but won't find valid groups from a pure tone
-        // It should at least not return None (signal present)
-        assert!(result.is_some(), "RDS decoder should detect 57 kHz subcarrier energy");
+        assert!(
+            result.is_some(),
+            "RDS decoder should detect 57 kHz subcarrier energy"
+        );
         let r = result.unwrap();
-        assert!(r.bits_decoded > 0, "should have decoded some bits");
+        assert_eq!(r.groups_found, 0, "a pure tone is not a valid RDS group");
+        assert!(r.pi_code.is_none());
     }
 
     #[test]
@@ -897,11 +1971,15 @@ mod tests {
         let sample_rate = 8000.0;
         let target = 131.8; // common CTCSS tone
         let n = (sample_rate * 0.3) as usize; // 300 ms
-        let samples: Vec<f32> = (0..n).map(|i| {
-            (TAU * target * i as f32 / sample_rate).sin() * 0.5
-        }).collect();
-        let (tone, confidence) = detect_ctcss(&samples, sample_rate).expect("should detect 131.8 Hz");
-        assert!((tone - target).abs() < 2.0, "detected {tone:.1} expected {target}, confidence {confidence:.2}");
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (TAU * target * i as f32 / sample_rate).sin() * 0.5)
+            .collect();
+        let (tone, confidence) =
+            detect_ctcss(&samples, sample_rate).expect("should detect 131.8 Hz");
+        assert!(
+            (tone - target).abs() < 2.0,
+            "detected {tone:.1} expected {target}, confidence {confidence:.2}"
+        );
         assert!(confidence > 0.3, "confidence too low: {confidence:.2}");
     }
 
@@ -910,8 +1988,13 @@ mod tests {
         let sample_rate = 8000.0;
         let n = (sample_rate * 0.3) as usize;
         // Pseudo-noise: deterministic but non-tonal
-        let samples: Vec<f32> = (0..n).map(|i| (((i * 7919) % 1000) as f32 / 500.0 - 1.0) * 0.1).collect();
-        assert!(detect_ctcss(&samples, sample_rate).is_none(), "should not detect a CTCSS tone in noise");
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (((i * 7919) % 1000) as f32 / 500.0 - 1.0) * 0.1)
+            .collect();
+        assert!(
+            detect_ctcss(&samples, sample_rate).is_none(),
+            "should not detect a CTCSS tone in noise"
+        );
     }
 
     #[test]
@@ -919,14 +2002,25 @@ mod tests {
         let sample_rate = 8000.0;
         let target = 67.0;
         let n = (sample_rate * 0.3) as usize;
-        let samples: Vec<f32> = (0..n).map(|i| {
-            (TAU * target * i as f32 / sample_rate).sin() * 0.5
-        }).collect();
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (TAU * target * i as f32 / sample_rate).sin() * 0.5)
+            .collect();
         let (tone, _) = detect_ctcss(&samples, sample_rate).expect("should detect 67 Hz");
-        assert!((tone - target).abs() < 2.0, "detected {tone:.1} expected {target}");
+        assert!(
+            (tone - target).abs() < 2.0,
+            "detected {tone:.1} expected {target}"
+        );
     }
 
-    fn append_fsk_symbol(samples: &mut Vec<f32>, bit: bool, count: usize, mark: f32, space: f32, sample_rate: f32, phase: &mut f32) {
+    fn append_fsk_symbol(
+        samples: &mut Vec<f32>,
+        bit: bool,
+        count: usize,
+        mark: f32,
+        space: f32,
+        sample_rate: f32,
+        phase: &mut f32,
+    ) {
         let frequency = if bit { mark } else { space };
         let step = TAU * frequency / sample_rate;
         for _ in 0..count {
@@ -943,13 +2037,49 @@ mod tests {
         let (mark, space) = (2125.0, 1955.0);
         let mut samples = Vec::new();
         let mut phase = 0.0;
-        append_fsk_symbol(&mut samples, true, symbol * 3, mark, space, sample_rate, &mut phase);
-        for code in [0x14u8, 0x01, 0x12, 0x12, 0x18] { // HELLO
-            append_fsk_symbol(&mut samples, false, symbol, mark, space, sample_rate, &mut phase);
-            for bit in 0..5 { append_fsk_symbol(&mut samples, code & (1 << bit) != 0, symbol, mark, space, sample_rate, &mut phase); }
-            append_fsk_symbol(&mut samples, true, symbol * 2, mark, space, sample_rate, &mut phase);
+        append_fsk_symbol(
+            &mut samples,
+            true,
+            symbol * 3,
+            mark,
+            space,
+            sample_rate,
+            &mut phase,
+        );
+        for code in [0x14u8, 0x01, 0x12, 0x12, 0x18] {
+            // HELLO
+            append_fsk_symbol(
+                &mut samples,
+                false,
+                symbol,
+                mark,
+                space,
+                sample_rate,
+                &mut phase,
+            );
+            for bit in 0..5 {
+                append_fsk_symbol(
+                    &mut samples,
+                    code & (1 << bit) != 0,
+                    symbol,
+                    mark,
+                    space,
+                    sample_rate,
+                    &mut phase,
+                );
+            }
+            append_fsk_symbol(
+                &mut samples,
+                true,
+                symbol * 2,
+                mark,
+                space,
+                sample_rate,
+                &mut phase,
+            );
         }
-        let decoded = decode_rtty(&samples, sample_rate, mark, space, baud).expect("RTTY should decode");
+        let decoded =
+            decode_rtty(&samples, sample_rate, mark, space, baud).expect("RTTY should decode");
         assert!(decoded.contains("HELLO"), "decoded '{decoded}'");
     }
 
@@ -959,13 +2089,26 @@ mod tests {
         let period = 0.27769f32;
         let duration = period * 3.2;
         let n = (sample_rate * duration) as usize;
-        let samples: Vec<f32> = (0..n).map(|i| {
-            let t = i as f32 / sample_rate;
-            let within_line = t.rem_euclid(period);
-            let freq = if within_line < 0.009 { 1200.0 } else if within_line < 0.020 { 1500.0 } else if within_line < 0.12 { 1900.0 } else { 2300.0 };
-            (TAU * freq * t).sin() * 0.6
-        }).collect();
-        assert_eq!(detect_sstv_mode(&samples, sample_rate), Some(SstvMode::Scottie2));
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                let within_line = t.rem_euclid(period);
+                let freq = if within_line < 0.009 {
+                    1200.0
+                } else if within_line < 0.020 {
+                    1500.0
+                } else if within_line < 0.12 {
+                    1900.0
+                } else {
+                    2300.0
+                };
+                (TAU * freq * t).sin() * 0.6
+            })
+            .collect();
+        assert_eq!(
+            detect_sstv_mode(&samples, sample_rate),
+            Some(SstvMode::Scottie2)
+        );
     }
 
     #[test]
@@ -975,12 +2118,48 @@ mod tests {
         let words = [0x69u8, 0x56, 0x65, 0x65, 0x71]; // HELLO in CCIR 476
         let mut samples = Vec::new();
         let mut phase = 0.0;
-        for &word in words.iter().chain(words.iter()) { // repeat after five characters
+        for &word in words.iter().chain(words.iter()) {
+            // repeat after five characters
             for bit in (0..7).rev() {
-                append_fsk_symbol(&mut samples, word & (1 << bit) != 0, symbol, 1785.0, 1615.0, sample_rate, &mut phase);
+                append_fsk_symbol(
+                    &mut samples,
+                    word & (1 << bit) != 0,
+                    symbol,
+                    1785.0,
+                    1615.0,
+                    sample_rate,
+                    &mut phase,
+                );
             }
         }
         let decoded = decode_navtex(&samples, sample_rate).expect("NAVTEX should decode");
         assert_eq!(decoded, "HELLO", "decoded '{decoded}'");
+    }
+
+    #[test]
+    fn wfm_stereo_fixture_recovers_left_channel_with_separation() {
+        let rate = 192_000u32;
+        let count = rate as usize / 5;
+        let multiplex = (0..count)
+            .map(|index| {
+                let t = index as f32 / rate as f32;
+                let left = (TAU * 1_000.0 * t).sin() * 0.5;
+                let mono = left * 0.5;
+                let difference = left * 0.5;
+                mono + difference * (TAU * 38_000.0 * t).cos() + 0.1 * (TAU * 19_000.0 * t).cos()
+            })
+            .collect::<Vec<_>>();
+        let stereo = decode_wfm_stereo(&multiplex, rate, 75.0, &mut WfmStereoState::default());
+        let settled = &stereo[rate as usize / 20..];
+        let left_rms = (settled.iter().map(|frame| frame[0] * frame[0]).sum::<f32>()
+            / settled.len() as f32)
+            .sqrt();
+        let right_rms = (settled.iter().map(|frame| frame[1] * frame[1]).sum::<f32>()
+            / settled.len() as f32)
+            .sqrt();
+        assert!(
+            left_rms > right_rms * 10.0,
+            "stereo separation too low: left={left_rms} right={right_rms}"
+        );
     }
 }

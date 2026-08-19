@@ -1,0 +1,7 @@
+ARG BASE_IMAGE=pulsescope:local
+FROM ${BASE_IMAGE}
+
+USER root
+COPY pulsescope /usr/local/bin/pulsescope
+RUN chmod 0755 /usr/local/bin/pulsescope
+USER pulsescope

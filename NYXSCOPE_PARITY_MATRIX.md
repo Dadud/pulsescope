@@ -1,4 +1,6 @@
-# NyxScope parity matrix
+# NyxScope parity matrix (historical audit)
+
+> This is the original migration audit and is not release truth. Counts and individual statuses below may be stale. See the generated [PulseScope Feature Status](docs/FEATURE_STATUS.md), backed by `release/acceptance-matrix.json`, for current maturity and verification gates.
 
 Source reviewed: `https://github.com/ICBizLabs/NyxScope` README and MANUAL, retrieved 2026-07-15. This is a clean-room behavioral inventory only; no NyxScope source, proprietary assets, or implementation details are copied.
 

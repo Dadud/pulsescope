@@ -56,36 +56,288 @@ struct BandPrior {
 }
 
 const BAND_PRIORS: &[BandPrior] = &[
-    BandPrior { start: 540_000, end: 1_700_000, protocol: "am_broadcast", family: "analog", decoder: "native_am", confidence: 0.75, reason: "AM broadcast band", proprietary: false },
-    BandPrior { start: 490_000, end: 518_000, protocol: "navtex", family: "marine", decoder: "native_navtex", confidence: 0.70, reason: "NAVTEX 490/518 kHz", proprietary: false },
-    BandPrior { start: 88_000_000, end: 108_000_000, protocol: "fm_broadcast", family: "analog", decoder: "native_wfm_rds", confidence: 0.85, reason: "FM broadcast band", proprietary: false },
-    BandPrior { start: 118_000_000, end: 137_000_000, protocol: "aircraft_am", family: "aviation", decoder: "native_am", confidence: 0.80, reason: "VHF airband", proprietary: false },
-    BandPrior { start: 129_000_000, end: 132_000_000, protocol: "acars", family: "aviation", decoder: "native_acars", confidence: 0.78, reason: "ACARS channel allocation", proprietary: false },
-    BandPrior { start: 136_000_000, end: 137_000_000, protocol: "vdl2", family: "aviation", decoder: "native_vdl2", confidence: 0.72, reason: "VDL Mode 2 band", proprietary: false },
-    BandPrior { start: 137_000_000, end: 138_000_000, protocol: "noaa_apt", family: "satellite", decoder: "noaa-apt", confidence: 0.82, reason: "NOAA APT band", proprietary: false },
-    BandPrior { start: 144_000_000, end: 148_000_000, protocol: "amateur_vhf", family: "amateur", decoder: "direwolf", confidence: 0.55, reason: "2m amateur (voice/APRS)", proprietary: false },
-    BandPrior { start: 144_390_000, end: 144_400_000, protocol: "aprs", family: "amateur", decoder: "direwolf", confidence: 0.90, reason: "APRS 144.390 MHz", proprietary: false },
-    BandPrior { start: 156_000_000, end: 162_000_000, protocol: "marine_vhf", family: "marine", decoder: "native_nfm", confidence: 0.70, reason: "Marine VHF", proprietary: false },
-    BandPrior { start: 161_975_000, end: 162_025_000, protocol: "ais", family: "marine", decoder: "native_ais", confidence: 0.92, reason: "AIS channels", proprietary: false },
-    BandPrior { start: 162_400_000, end: 162_550_000, protocol: "noaa_weather", family: "weather", decoder: "native_nfm", confidence: 0.88, reason: "NOAA Weather Radio", proprietary: false },
-    BandPrior { start: 400_000_000, end: 406_000_000, protocol: "radiosonde", family: "weather", decoder: "rtl_433", confidence: 0.75, reason: "Radiosonde band", proprietary: false },
-    BandPrior { start: 433_050_000, end: 434_790_000, protocol: "ism_433", family: "ism", decoder: "rtl_433", confidence: 0.80, reason: "ISM 433 MHz", proprietary: false },
-    BandPrior { start: 454_000_000, end: 461_000_000, protocol: "pocsag", family: "paging", decoder: "native_pocsag", confidence: 0.65, reason: "UHF pager allocation", proprietary: false },
-    BandPrior { start: 462_550_000, end: 467_725_000, protocol: "frs_gmrs", family: "land_mobile", decoder: "native_nfm", confidence: 0.70, reason: "FRS/GMRS", proprietary: false },
-    BandPrior { start: 851_000_000, end: 869_000_000, protocol: "p25_trunked", family: "land_mobile", decoder: "dsd-fme", confidence: 0.72, reason: "800 MHz trunked public safety", proprietary: false },
-    BandPrior { start: 902_000_000, end: 928_000_000, protocol: "ism_915", family: "ism", decoder: "rtl_433", confidence: 0.75, reason: "ISM 915 MHz", proprietary: false },
-    BandPrior { start: 929_000_000, end: 932_000_000, protocol: "pocsag", family: "paging", decoder: "multimon-ng", confidence: 0.78, reason: "900 MHz paging", proprietary: false },
-    BandPrior { start: 978_000_000, end: 978_200_000, protocol: "uat978", family: "aviation", decoder: "native_uat978", confidence: 0.90, reason: "ADS-B UAT 978", proprietary: false },
-    BandPrior { start: 1_090_000_000, end: 1_090_200_000, protocol: "adsb", family: "aviation", decoder: "native_adsb", confidence: 0.95, reason: "ADS-B 1090 MHz", proprietary: false },
-    BandPrior { start: 1_525_000_000, end: 1_559_000_000, protocol: "inmarsat", family: "satellite", decoder: "satdump", confidence: 0.70, reason: "Inmarsat L-band DL", proprietary: false },
-    BandPrior { start: 1_574_000_000, end: 1_577_000_000, protocol: "gps_l1", family: "satellite", decoder: "satdump", confidence: 0.80, reason: "GPS L1 / Galileo E1", proprietary: false },
-    BandPrior { start: 1_616_000_000, end: 1_626_500_000, protocol: "iridium", family: "satellite", decoder: "iridiumlive", confidence: 0.82, reason: "Iridium band", proprietary: false },
-    BandPrior { start: 1_691_000_000, end: 1_695_000_000, protocol: "goes_hrit", family: "satellite", decoder: "satdump", confidence: 0.88, reason: "GOES HRIT/LRIT", proprietary: false },
+    BandPrior {
+        start: 540_000,
+        end: 1_700_000,
+        protocol: "am_broadcast",
+        family: "analog",
+        decoder: "native_am",
+        confidence: 0.75,
+        reason: "AM broadcast band",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 490_000,
+        end: 518_000,
+        protocol: "navtex",
+        family: "marine",
+        decoder: "native_navtex",
+        confidence: 0.70,
+        reason: "NAVTEX 490/518 kHz",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 88_000_000,
+        end: 108_000_000,
+        protocol: "fm_broadcast",
+        family: "analog",
+        decoder: "native_wfm_rds",
+        confidence: 0.85,
+        reason: "FM broadcast band",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 118_000_000,
+        end: 137_000_000,
+        protocol: "aircraft_am",
+        family: "aviation",
+        decoder: "native_am",
+        confidence: 0.80,
+        reason: "VHF airband",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 129_000_000,
+        end: 132_000_000,
+        protocol: "acars",
+        family: "aviation",
+        decoder: "native_acars",
+        confidence: 0.78,
+        reason: "ACARS channel allocation",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 136_000_000,
+        end: 137_000_000,
+        protocol: "vdl2",
+        family: "aviation",
+        decoder: "native_vdl2",
+        confidence: 0.72,
+        reason: "VDL Mode 2 band",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 137_000_000,
+        end: 138_000_000,
+        protocol: "noaa_apt",
+        family: "satellite",
+        decoder: "noaa-apt",
+        confidence: 0.82,
+        reason: "NOAA APT band",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 144_000_000,
+        end: 148_000_000,
+        protocol: "amateur_vhf",
+        family: "amateur",
+        decoder: "direwolf",
+        confidence: 0.55,
+        reason: "2m amateur (voice/APRS)",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 144_390_000,
+        end: 144_400_000,
+        protocol: "aprs",
+        family: "amateur",
+        decoder: "direwolf",
+        confidence: 0.90,
+        reason: "APRS 144.390 MHz",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 156_000_000,
+        end: 162_000_000,
+        protocol: "marine_vhf",
+        family: "marine",
+        decoder: "native_nfm",
+        confidence: 0.70,
+        reason: "Marine VHF",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 161_975_000,
+        end: 162_025_000,
+        protocol: "ais",
+        family: "marine",
+        decoder: "native_ais",
+        confidence: 0.92,
+        reason: "AIS channels",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 162_400_000,
+        end: 162_550_000,
+        protocol: "noaa_weather",
+        family: "weather",
+        decoder: "native_nfm",
+        confidence: 0.88,
+        reason: "NOAA Weather Radio",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 400_000_000,
+        end: 406_000_000,
+        protocol: "radiosonde",
+        family: "weather",
+        decoder: "rtl_433",
+        confidence: 0.75,
+        reason: "Radiosonde band",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 433_050_000,
+        end: 434_790_000,
+        protocol: "ism_433",
+        family: "ism",
+        decoder: "rtl_433",
+        confidence: 0.80,
+        reason: "ISM 433 MHz",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 454_000_000,
+        end: 461_000_000,
+        protocol: "pocsag",
+        family: "paging",
+        decoder: "native_pocsag",
+        confidence: 0.65,
+        reason: "UHF pager allocation",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 462_550_000,
+        end: 467_725_000,
+        protocol: "frs_gmrs",
+        family: "land_mobile",
+        decoder: "native_nfm",
+        confidence: 0.70,
+        reason: "FRS/GMRS",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 851_000_000,
+        end: 869_000_000,
+        protocol: "p25_trunked",
+        family: "land_mobile",
+        decoder: "dsd-fme",
+        confidence: 0.72,
+        reason: "800 MHz trunked public safety",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 902_000_000,
+        end: 928_000_000,
+        protocol: "ism_915",
+        family: "ism",
+        decoder: "rtl_433",
+        confidence: 0.75,
+        reason: "ISM 915 MHz",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 929_000_000,
+        end: 932_000_000,
+        protocol: "pocsag",
+        family: "paging",
+        decoder: "multimon-ng",
+        confidence: 0.78,
+        reason: "900 MHz paging",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 978_000_000,
+        end: 978_200_000,
+        protocol: "uat978",
+        family: "aviation",
+        decoder: "native_uat978",
+        confidence: 0.90,
+        reason: "ADS-B UAT 978",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 1_090_000_000,
+        end: 1_090_200_000,
+        protocol: "adsb",
+        family: "aviation",
+        decoder: "native_adsb",
+        confidence: 0.95,
+        reason: "ADS-B 1090 MHz",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 1_525_000_000,
+        end: 1_559_000_000,
+        protocol: "inmarsat",
+        family: "satellite",
+        decoder: "satdump",
+        confidence: 0.70,
+        reason: "Inmarsat L-band DL",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 1_574_000_000,
+        end: 1_577_000_000,
+        protocol: "gps_l1",
+        family: "satellite",
+        decoder: "satdump",
+        confidence: 0.80,
+        reason: "GPS L1 / Galileo E1",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 1_616_000_000,
+        end: 1_626_500_000,
+        protocol: "iridium",
+        family: "satellite",
+        decoder: "iridiumlive",
+        confidence: 0.82,
+        reason: "Iridium band",
+        proprietary: false,
+    },
+    BandPrior {
+        start: 1_691_000_000,
+        end: 1_695_000_000,
+        protocol: "goes_hrit",
+        family: "satellite",
+        decoder: "satdump",
+        confidence: 0.88,
+        reason: "GOES HRIT/LRIT",
+        proprietary: false,
+    },
     // HD Radio overlays the FM band; lower confidence, only if features suggest digital
-    BandPrior { start: 88_000_000, end: 108_000_000, protocol: "hd_radio", family: "digital_broadcast", decoder: "nrsc5", confidence: 0.35, reason: "FM band may carry HD Radio", proprietary: false },
+    BandPrior {
+        start: 88_000_000,
+        end: 108_000_000,
+        protocol: "hd_radio",
+        family: "digital_broadcast",
+        decoder: "nrsc5",
+        confidence: 0.35,
+        reason: "FM band may carry HD Radio",
+        proprietary: false,
+    },
     // European TETRA
-    BandPrior { start: 380_000_000, end: 400_000_000, protocol: "tetra", family: "land_mobile", decoder: "tetraear", confidence: 0.65, reason: "TETRA allocation", proprietary: true },
-    BandPrior { start: 410_000_000, end: 430_000_000, protocol: "tetra", family: "land_mobile", decoder: "tetraear", confidence: 0.55, reason: "TETRA secondary", proprietary: true },
+    BandPrior {
+        start: 380_000_000,
+        end: 400_000_000,
+        protocol: "tetra",
+        family: "land_mobile",
+        decoder: "tetraear",
+        confidence: 0.65,
+        reason: "TETRA allocation",
+        proprietary: true,
+    },
+    BandPrior {
+        start: 410_000_000,
+        end: 430_000_000,
+        protocol: "tetra",
+        family: "land_mobile",
+        decoder: "tetraear",
+        confidence: 0.55,
+        reason: "TETRA secondary",
+        proprietary: true,
+    },
 ];
 
 /// Range-name keyword boosts.
@@ -127,7 +379,7 @@ fn range_boost(range_name: &str) -> Vec<(&'static str, f32)> {
 fn bandwidth_hints(bw_hz: u32, mode: &str) -> Vec<(&'static str, f32, &'static str)> {
     let mut h = Vec::new();
     let m = mode.to_ascii_lowercase();
-    if bw_hz >= 150_000 && bw_hz <= 250_000 {
+    if (150_000..=250_000).contains(&bw_hz) {
         h.push(("fm_broadcast", 0.15, "≈200 kHz FM channel"));
     }
     if bw_hz >= 800_000 {
@@ -263,11 +515,10 @@ fn tone_energy(samples: &[f32], sample_rate: f32, freq: f32) -> f32 {
     let k = (0.5 + (samples.len() as f32 * freq / sample_rate)) as usize;
     let w = std::f32::consts::TAU * k as f32 / samples.len() as f32;
     let coeff = 2.0 * w.cos();
-    let mut s0 = 0.0f32;
     let mut s1 = 0.0f32;
     let mut s2 = 0.0f32;
     for &x in samples {
-        s0 = x + coeff * s1 - s2;
+        let s0 = x + coeff * s1 - s2;
         s2 = s1;
         s1 = s0;
     }
@@ -437,13 +688,15 @@ pub fn classify(
     // Sort candidates
     let mut candidates: Vec<ProtocolCandidate> = scores
         .into_iter()
-        .map(|(protocol, (confidence, family, decoder, reason, _prop))| ProtocolCandidate {
-            protocol,
-            family,
-            confidence,
-            decoder,
-            reason,
-        })
+        .map(
+            |(protocol, (confidence, family, decoder, reason, _prop))| ProtocolCandidate {
+                protocol,
+                family,
+                confidence,
+                decoder,
+                reason,
+            },
+        )
         .collect();
     candidates.sort_by(|a, b| {
         b.confidence
@@ -494,9 +747,8 @@ fn family_for(proto: &str) -> &'static str {
     match proto {
         "adsb" | "uat978" | "acars" | "vdl2" | "aircraft_am" => "aviation",
         "ais" | "marine_vhf" | "navtex" => "marine",
-        "noaa_apt" | "goes_hrit" | "iridium" | "inmarsat" | "gps_l1" | "radiosonde" | "noaa_weather" => {
-            "satellite"
-        }
+        "noaa_apt" | "goes_hrit" | "iridium" | "inmarsat" | "gps_l1" | "radiosonde"
+        | "noaa_weather" => "satellite",
         "fm_broadcast" | "am_broadcast" | "hd_radio" | "analog_nfm" | "analog_wfm" => "analog",
         "p25" | "dmr" | "p25_trunked" | "tetra" | "frs_gmrs" => "land_mobile",
         "pocsag" | "flex" => "paging",

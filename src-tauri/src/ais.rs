@@ -302,23 +302,34 @@ pub struct IqDecoder {
 
 impl IqDecoder {
     pub fn new(sample_rate_hz: f64) -> Result<Self, &'static str> {
-        Ok(Self { discriminator: DiscriminatorDecoder::new(sample_rate_hz)?, previous: None })
+        Ok(Self {
+            discriminator: DiscriminatorDecoder::new(sample_rate_hz)?,
+            previous: None,
+        })
     }
 
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) -> Vec<Result<AisMessage, AisDecodeError>> {
         let mut out = Vec::new();
         for &(i, q) in samples {
-            if !i.is_finite() || !q.is_finite() { self.previous = None; continue; }
+            if !i.is_finite() || !q.is_finite() {
+                self.previous = None;
+                continue;
+            }
             if let Some((pi, pq)) = self.previous {
                 let discriminator = (q * pi - i * pq).atan2(i * pi + q * pq);
-                if let Some(result) = self.discriminator.push_sample(discriminator) { out.push(result); }
+                if let Some(result) = self.discriminator.push_sample(discriminator) {
+                    out.push(result);
+                }
             }
             self.previous = Some((i, q));
         }
         out
     }
 
-    pub fn reset(&mut self) { self.previous = None; self.discriminator.reset(); }
+    pub fn reset(&mut self) {
+        self.previous = None;
+        self.discriminator.reset();
+    }
 }
 
 /// Minimal fixed-clock slicer for zero-centred discriminator samples.
@@ -542,6 +553,16 @@ fn get_i(bits: &[bool], start: usize, width: usize) -> i64 {
     }
 }
 
+fn set_u(bits: &mut [bool], start: usize, width: usize, value: u64) {
+    for i in 0..width {
+        bits[start + i] = value & (1 << (width - 1 - i)) != 0;
+    }
+}
+
+fn set_i(bits: &mut [bool], start: usize, width: usize, value: i64) {
+    set_u(bits, start, width, (value as u64) & ((1u64 << width) - 1));
+}
+
 fn text(bits: &[bool], start: usize, width: usize) -> String {
     const TABLE: &[u8; 64] = b"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?";
     let mut value = String::new();
@@ -724,6 +745,99 @@ fn parse_type_24(bits: &[bool]) -> Result<StaticDataReport, AisDecodeError> {
     }
 }
 
+const AIS_FLAG: [bool; 8] = [false, true, true, true, true, true, true, false];
+
+fn ais_stuff(raw: &[bool]) -> Vec<bool> {
+    let mut out = Vec::with_capacity(raw.len() + raw.len() / 5);
+    let mut ones = 0usize;
+    for &bit in raw {
+        out.push(bit);
+        if bit {
+            ones += 1;
+            if ones == 5 {
+                out.push(false);
+                ones = 0;
+            }
+        } else {
+            ones = 0;
+        }
+    }
+    out
+}
+
+fn ais_wire_frame(app_bits: &[bool]) -> Vec<bool> {
+    let mut bytes = Vec::new();
+    for chunk in app_bits.chunks_exact(8) {
+        let mut byte = 0u8;
+        for (i, &bit) in chunk.iter().enumerate() {
+            if bit {
+                byte |= 1 << i;
+            }
+        }
+        bytes.push(byte);
+    }
+    let crc = crc16_x25(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    let raw: Vec<bool> = bytes
+        .iter()
+        .flat_map(|b| (0..8).map(move |i| b & (1 << i) != 0))
+        .collect();
+    let mut wire = Vec::new();
+    wire.extend(AIS_FLAG);
+    wire.extend(ais_stuff(&raw));
+    wire.extend(AIS_FLAG);
+    wire
+}
+
+fn ais_type1_fixture_bits() -> Vec<bool> {
+    let mut b = vec![false; 168];
+    set_u(&mut b, 0, 6, 1);
+    set_u(&mut b, 6, 2, 0);
+    set_u(&mut b, 8, 30, 366_123_456);
+    set_u(&mut b, 38, 4, 5);
+    set_i(&mut b, 42, 8, 10);
+    set_u(&mut b, 50, 10, 123);
+    b[60] = true;
+    set_i(&mut b, 61, 28, (-70.25f64 * 600_000.0) as i64);
+    set_i(&mut b, 89, 27, (41.5f64 * 600_000.0) as i64);
+    set_u(&mut b, 116, 12, 876);
+    set_u(&mut b, 128, 9, 90);
+    set_u(&mut b, 137, 6, 37);
+    set_u(&mut b, 143, 2, 1);
+    b[148] = true;
+    set_u(&mut b, 149, 19, 0x12345);
+    b
+}
+
+fn ais_nrzi_levels(data: &[bool], initial: bool) -> Vec<bool> {
+    let mut level = initial;
+    let mut levels = vec![level];
+    for &bit in data {
+        if !bit {
+            level = !level;
+        }
+        levels.push(level);
+    }
+    levels
+}
+
+/// Synthetic AIS type-1 GMSK IQ for recorded-IQ fixtures (48 kHz default).
+pub fn synthesize_type1_position_iq(sample_rate_hz: f64) -> Vec<(f32, f32)> {
+    let wire = ais_wire_frame(&ais_type1_fixture_bits());
+    let levels = ais_nrzi_levels(&wire, true);
+    let samples_per_symbol = (sample_rate_hz / 9_600.0).round().max(1.0) as usize;
+    let mut theta = 0.0f32;
+    let mut iq = Vec::new();
+    for level in levels {
+        let disc = if level { 0.8f32 } else { -0.8f32 };
+        for _ in 0..samples_per_symbol {
+            theta += disc / samples_per_symbol as f32;
+            iq.push((theta.cos(), theta.sin()));
+        }
+    }
+    iq
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -842,6 +956,43 @@ mod tests {
         b[148] = true;
         set_u(&mut b, 149, 19, 0x12345);
         b
+    }
+
+    #[test]
+    fn wire_frame_matches_unit_fixture() {
+        let wire = ais_wire_frame(&ais_type1_fixture_bits());
+        let unit = framed(&type1_fixture());
+        assert_eq!(wire, unit);
+    }
+
+    #[test]
+    fn synthesized_type1_discriminator_decodes() {
+        let wire = ais_wire_frame(&ais_type1_fixture_bits());
+        let levels = ais_nrzi_levels(&wire, true);
+        let samples: Vec<f32> = levels
+            .iter()
+            .flat_map(|&v| std::iter::repeat_n(if v { 0.8 } else { -0.8 }, 5))
+            .collect();
+        let mut decoder = DiscriminatorDecoder::new(48_000.0).unwrap();
+        let output = decoder.push_samples(&samples);
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].as_ref().unwrap().mmsi(), 366_123_456);
+    }
+
+    #[test]
+    fn synthesized_type1_iq_round_trips_through_iq_decoder() {
+        let pairs = synthesize_type1_position_iq(48_000.0);
+        let mut decoder = IqDecoder::new(48_000.0).unwrap();
+        let mut all = pairs.clone();
+        all.extend(pairs);
+        let output = decoder.push_iq(&all);
+        assert!(
+            output
+                .iter()
+                .any(|r| r.as_ref().is_ok_and(|m| m.mmsi() == 366_123_456)),
+            "expected MMSI in {:?}",
+            output
+        );
     }
 
     #[test]

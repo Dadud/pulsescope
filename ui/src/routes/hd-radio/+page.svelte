@@ -1,9 +1,59 @@
 <script lang="ts">
- import {onMount} from 'svelte'; import {Api} from '$lib/api';
- let status=$state<any>({});let messages=$state<any[]>([]);let error=$state('');let available=$derived(Boolean(status.available??status.detected??status.running));
- async function load(){try{[status,messages]=await Promise.all([Api.hdRadioStatus(),Api.hdRadioMessages()]);error=''}catch(e){error=String(e)}} onMount(load);
- async function check(){await Api.hdRadioCheck();await load()}
- async function toggle(){try{await Api.hdRadioEnable(!status.enabled);await load()}catch(e){error=String(e)}}
+  import { onMount } from 'svelte';
+  import { Api } from '$lib/api';
+  let status = $state<any>({});
+  let messages = $state<any[]>([]);
+  let error = $state('');
+  let available = $derived(Boolean(status.available ?? status.detected ?? status.running));
+  async function load() {
+    try {
+      [status, messages] = await Promise.all([Api.hdRadioStatus(), Api.hdRadioMessages()]);
+      error = '';
+    } catch (e) { error = String(e); }
+  }
+  onMount(load);
+  async function check() { await Api.hdRadioCheck(); await load(); }
+  async function toggle() {
+    try { await Api.hdRadioEnable(!status.enabled); await load(); }
+    catch (e) { error = String(e); }
+  }
 </script>
-<div class="page"><h1>HD Radio</h1><p class="muted">Inspect digital radio decoder availability and output.</p>{#if error}<p class="error">{error}</p>{/if}<section class="card controls"><b>Decoder: <span class:ok={available}>{available?'available':'not detected'}</span></b><button onclick={toggle}>{status.enabled?'Disable':'Enable'} decoder</button><button class="primary" onclick={check}>Check decoder</button><button onclick={load}>Refresh</button><pre>{JSON.stringify(status,null,2)}</pre></section><section class="card"><h2>Messages</h2>{#each messages as m}<div class="row">{#each Object.entries(m) as [k,v]}<span><small>{k}</small>{typeof v==='object'?JSON.stringify(v):String(v??'—')}</span>{/each}</div>{:else}<div class="empty">No HD Radio messages</div>{/each}</section></div>
-<style>.page{padding:16px;overflow-y:auto;height:100%}.muted,small,.empty{color:var(--fg-dim)}.error{color:var(--danger)}.card{margin:12px 0;padding:14px;background:var(--bg-elev);border:1px solid var(--line);border-radius:8px}.controls{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.controls b{margin-right:auto}.ok{color:var(--ok)}button{background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:7px 11px;border-radius:5px}.primary{color:var(--accent);border-color:var(--accent)}pre{width:100%;background:var(--bg);padding:8px;font:11px var(--mono)}h2{font-size:14px}.row{display:flex;gap:16px;border-top:1px solid var(--line);padding:8px 0;font:12px var(--mono);flex-wrap:wrap}.row span{min-width:120px}.row small{display:block;font:10px var(--sans)}.empty{text-align:center;padding:20px}</style>
+<div class="page">
+  <h1>HD Radio</h1>
+  <p class="muted">Inspect nrsc5 availability and parsed SIS/ID3 lines. OFDM demodulation is not fixture-verified.</p>
+  <div class="banner">Beta: the SIS parser is unit-tested. Catalog stays unavailable until an nrsc5 recorded-IQ gate passes.</div>
+  {#if error}<p class="error">{error}</p>{/if}
+  <section class="card controls">
+    <b>Decoder: <span class:ok={available}>{available ? 'available' : 'not detected'}</span></b>
+    <button onclick={toggle}>{status.enabled ? 'Disable' : 'Enable'} decoder</button>
+    <button class="primary" onclick={check}>Check decoder</button>
+    <button onclick={load}>Refresh</button>
+    <pre>{JSON.stringify(status, null, 2)}</pre>
+  </section>
+  <section class="card">
+    <h2>Messages</h2>
+    {#each messages as m}
+      <div class="row">{#each Object.entries(m) as [k,v]}<span><small>{k}</small>{typeof v==='object'?JSON.stringify(v):String(v??'—')}</span>{/each}</div>
+    {:else}
+      <div class="empty">No HD Radio messages</div>
+    {/each}
+  </section>
+</div>
+<style>
+  .page{padding:16px;overflow-y:auto;height:100%}
+  .muted,small,.empty{color:var(--fg-dim)}
+  .error{color:var(--danger)}
+  .banner{margin:8px 0 12px;padding:10px 12px;background:rgb(245 158 11 / 10%);border:1px solid rgb(245 158 11 / 30%);border-radius:7px;color:#fcd38d;font-size:12px}
+  .card{margin:12px 0;padding:14px;background:var(--bg-elev);border:1px solid var(--line);border-radius:8px}
+  .controls{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .controls b{margin-right:auto}
+  .ok{color:var(--ok)}
+  button{background:var(--bg);color:var(--fg);border:1px solid var(--line);padding:7px 11px;border-radius:5px}
+  .primary{color:var(--accent);border-color:var(--accent)}
+  pre{width:100%;background:var(--bg);padding:8px;font:11px var(--mono)}
+  h2{font-size:14px}
+  .row{display:flex;gap:16px;border-top:1px solid var(--line);padding:8px 0;font:12px var(--mono);flex-wrap:wrap}
+  .row span{min-width:120px}
+  .row small{display:block;font:10px var(--sans)}
+  .empty{text-align:center;padding:20px}
+</style>

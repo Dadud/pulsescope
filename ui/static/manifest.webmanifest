@@ -1,0 +1,24 @@
+{
+  "name": "PulseScope SDR Receiver",
+  "short_name": "PulseScope",
+  "description": "A LAN-first software-defined radio receiver and monitoring console.",
+  "start_url": "/#/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1014",
+  "theme_color": "#131b22",
+  "categories": ["utilities", "music", "education"],
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "Receiver", "url": "/#/", "icons": [{ "src": "/app-icon.svg", "sizes": "any", "type": "image/svg+xml" }] },
+    { "name": "Hardware", "url": "/#/settings", "icons": [{ "src": "/app-icon.svg", "sizes": "any", "type": "image/svg+xml" }] }
+  ]
+}

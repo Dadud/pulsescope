@@ -25,10 +25,13 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
+        conn.execute_batch(include_str!("../migrations/002_receiver_workspace.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -41,6 +44,13 @@ impl Db {
 impl Db {
     pub fn conn(&self) -> parking_lot::MutexGuard<'_, Connection> {
         self.conn.lock()
+    }
+
+    pub fn integrity_check(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .conn()
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?
+            == "ok")
     }
 }
 
@@ -185,7 +195,15 @@ pub struct BlacklistEntry {
 }
 
 impl Db {
-    pub fn insert_signal_event(&self, frequency_hz: u64, _strength_db: f32, snr_db: f32, bandwidth_hz: u32, range_name: &str, timestamp_ms: i64) -> anyhow::Result<i64> {
+    pub fn insert_signal_event(
+        &self,
+        frequency_hz: u64,
+        _strength_db: f32,
+        snr_db: f32,
+        bandwidth_hz: u32,
+        range_name: &str,
+        timestamp_ms: i64,
+    ) -> anyhow::Result<i64> {
         // Backward-compatible path: no classification provided.
         self.insert_classified_signal_event(
             frequency_hz,
@@ -254,9 +272,27 @@ impl Db {
     pub fn recent_signal_events(&self, limit: u32) -> anyhow::Result<Vec<SignalEvent>> {
         let c = self.conn();
         let mut q = c.prepare("SELECT id,frequency_hz,signal_class,top_family,top_confidence,sub_protocol,symbol_rate,bandwidth_hz,snr_db,decode_success,decode_protocol,decode_summary,likely_proprietary,waterfall_psd,range_name,timestamp_ms,is_novel FROM signal_events ORDER BY timestamp_ms DESC LIMIT ?1")?;
-        let rows = q.query_map([limit.clamp(1, 1000)], |r| Ok(SignalEvent {
-            id: Some(r.get(0)?), frequency_hz: r.get::<_, i64>(1)? as u64, signal_class: r.get(2)?, top_family: r.get(3)?, top_confidence: r.get(4)?, sub_protocol: r.get::<_, Option<String>>(5)?.unwrap_or_default(), symbol_rate: r.get::<_, Option<f32>>(6)?.unwrap_or_default(), bandwidth_hz: r.get::<_, Option<i64>>(7)?.unwrap_or_default() as u32, snr_db: r.get::<_, Option<f32>>(8)?.unwrap_or_default(), decode_success: r.get::<_, i64>(9)? != 0, decode_protocol: r.get::<_, Option<String>>(10)?.unwrap_or_default(), decode_summary: r.get::<_, Option<String>>(11)?.unwrap_or_default(), likely_proprietary: r.get::<_, i64>(12)? != 0, waterfall_psd: r.get::<_, Option<String>>(13)?.unwrap_or_default(), range_name: r.get::<_, Option<String>>(14)?.unwrap_or_default(), timestamp_ms: r.get(15)?, is_novel: r.get::<_, i64>(16)? != 0,
-        }))?;
+        let rows = q.query_map([limit.clamp(1, 1000)], |r| {
+            Ok(SignalEvent {
+                id: Some(r.get(0)?),
+                frequency_hz: r.get::<_, i64>(1)? as u64,
+                signal_class: r.get(2)?,
+                top_family: r.get(3)?,
+                top_confidence: r.get(4)?,
+                sub_protocol: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                symbol_rate: r.get::<_, Option<f32>>(6)?.unwrap_or_default(),
+                bandwidth_hz: r.get::<_, Option<i64>>(7)?.unwrap_or_default() as u32,
+                snr_db: r.get::<_, Option<f32>>(8)?.unwrap_or_default(),
+                decode_success: r.get::<_, i64>(9)? != 0,
+                decode_protocol: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                decode_summary: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                likely_proprietary: r.get::<_, i64>(12)? != 0,
+                waterfall_psd: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                range_name: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+                timestamp_ms: r.get(15)?,
+                is_novel: r.get::<_, i64>(16)? != 0,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -280,43 +316,128 @@ impl Db {
              tag, mode, protocol, encrypted, hit_count, first_seen_ms, last_seen_ms) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             rusqlite::params![
-                t.system_name, t.talkgroup_id, t.alpha_tag, t.description,
-                t.category, t.tag, t.mode, t.protocol, t.encrypted,
-                t.hit_count, t.first_seen_ms, t.last_seen_ms,
+                t.system_name,
+                t.talkgroup_id,
+                t.alpha_tag,
+                t.description,
+                t.category,
+                t.tag,
+                t.mode,
+                t.protocol,
+                t.encrypted,
+                t.hit_count,
+                t.first_seen_ms,
+                t.last_seen_ms,
             ],
         )?;
         Ok(c.last_insert_rowid())
     }
 
     pub fn upsert_occupancy(&self, o: &SpectrumOccupancy) -> anyhow::Result<()> {
-        self.conn().execute("INSERT INTO spectrum_occupancy (frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(frequency_bucket_hz,time_bucket_15min) DO UPDATE SET avg_power_db=excluded.avg_power_db,peak_power_db=excluded.peak_power_db,avg_above_floor_db=excluded.avg_above_floor_db,sample_count=excluded.sample_count,noise_floor_db=excluded.noise_floor_db", rusqlite::params![o.frequency_bucket_hz as i64,o.time_bucket_15min,o.avg_power_db,o.peak_power_db,o.avg_above_floor_db,o.sample_count,o.noise_floor_db])?;
+        self.conn().execute(
+            "INSERT INTO spectrum_occupancy (frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db) VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(frequency_bucket_hz,time_bucket_15min) DO UPDATE SET
+               avg_power_db=(spectrum_occupancy.avg_power_db * spectrum_occupancy.sample_count + excluded.avg_power_db * excluded.sample_count) / (spectrum_occupancy.sample_count + excluded.sample_count),
+               peak_power_db=MAX(spectrum_occupancy.peak_power_db, excluded.peak_power_db),
+               avg_above_floor_db=(spectrum_occupancy.avg_above_floor_db * spectrum_occupancy.sample_count + excluded.avg_above_floor_db * excluded.sample_count) / (spectrum_occupancy.sample_count + excluded.sample_count),
+               sample_count=spectrum_occupancy.sample_count + excluded.sample_count,
+               noise_floor_db=(spectrum_occupancy.noise_floor_db * spectrum_occupancy.sample_count + excluded.noise_floor_db * excluded.sample_count) / (spectrum_occupancy.sample_count + excluded.sample_count)",
+            rusqlite::params![o.frequency_bucket_hz as i64, o.time_bucket_15min, o.avg_power_db, o.peak_power_db, o.avg_above_floor_db, o.sample_count, o.noise_floor_db],
+        )?;
         Ok(())
     }
 
     pub fn recent_occupancy(&self, limit: u32) -> anyhow::Result<Vec<SpectrumOccupancy>> {
         let c = self.conn();
         let mut q = c.prepare("SELECT frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db FROM spectrum_occupancy ORDER BY time_bucket_15min DESC,frequency_bucket_hz LIMIT ?1")?;
-        let rows = q.query_map([limit], |r| Ok(SpectrumOccupancy { frequency_bucket_hz: r.get::<_, i64>(0)? as u64, time_bucket_15min: r.get(1)?, avg_power_db: r.get(2)?, peak_power_db: r.get(3)?, avg_above_floor_db: r.get(4)?, sample_count: r.get(5)?, noise_floor_db: r.get(6)? }))?;
+        let rows = q.query_map([limit], |r| {
+            Ok(SpectrumOccupancy {
+                frequency_bucket_hz: r.get::<_, i64>(0)? as u64,
+                time_bucket_15min: r.get(1)?,
+                avg_power_db: r.get(2)?,
+                peak_power_db: r.get(3)?,
+                avg_above_floor_db: r.get(4)?,
+                sample_count: r.get(5)?,
+                noise_floor_db: r.get(6)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn decoded_message_count(&self) -> anyhow::Result<i64> {
-        Ok(self.conn().query_row("SELECT COUNT(*) FROM decoded_messages", [], |r| r.get(0))?)
+        Ok(self
+            .conn()
+            .query_row("SELECT COUNT(*) FROM decoded_messages", [], |r| r.get(0))?)
     }
 
-    pub fn messages_by_protocol(&self, protocol: Option<&str>, limit: u32) -> anyhow::Result<Vec<DecodedMessage>> {
+    pub fn messages_by_protocol(
+        &self,
+        protocol: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<DecodedMessage>> {
         let c = self.conn();
         let mut out = Vec::new();
         if let Some(protocol) = protocol {
             let mut q = c.prepare("SELECT id,frequency_hz,protocol,message_type,address,function_code,content,raw,encryption,timestamp_ms FROM decoded_messages WHERE protocol=?1 ORDER BY id DESC LIMIT ?2")?;
-            let rows = q.query_map(rusqlite::params![protocol, limit], |r| Ok(DecodedMessage { id: Some(r.get(0)?), frequency_hz: r.get::<_, i64>(1)? as u64, protocol: r.get(2)?, message_type: r.get(3)?, address: r.get(4)?, function_code: r.get(5)?, content: r.get(6)?, raw: r.get(7)?, encryption: r.get(8)?, timestamp_ms: r.get(9)? }))?;
-            for row in rows { out.push(row?); }
+            let rows = q.query_map(rusqlite::params![protocol, limit], |r| {
+                Ok(DecodedMessage {
+                    id: Some(r.get(0)?),
+                    frequency_hz: r.get::<_, i64>(1)? as u64,
+                    protocol: r.get(2)?,
+                    message_type: r.get(3)?,
+                    address: r.get(4)?,
+                    function_code: r.get(5)?,
+                    content: r.get(6)?,
+                    raw: r.get(7)?,
+                    encryption: r.get(8)?,
+                    timestamp_ms: r.get(9)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
         } else {
             let mut q = c.prepare("SELECT id,frequency_hz,protocol,message_type,address,function_code,content,raw,encryption,timestamp_ms FROM decoded_messages WHERE protocol NOT IN ('rtl_433') ORDER BY id DESC LIMIT ?1")?;
-            let rows = q.query_map([limit], |r| Ok(DecodedMessage { id: Some(r.get(0)?), frequency_hz: r.get::<_, i64>(1)? as u64, protocol: r.get(2)?, message_type: r.get(3)?, address: r.get(4)?, function_code: r.get(5)?, content: r.get(6)?, raw: r.get(7)?, encryption: r.get(8)?, timestamp_ms: r.get(9)? }))?;
-            for row in rows { out.push(row?); }
+            let rows = q.query_map([limit], |r| {
+                Ok(DecodedMessage {
+                    id: Some(r.get(0)?),
+                    frequency_hz: r.get::<_, i64>(1)? as u64,
+                    protocol: r.get(2)?,
+                    message_type: r.get(3)?,
+                    address: r.get(4)?,
+                    function_code: r.get(5)?,
+                    content: r.get(6)?,
+                    raw: r.get(7)?,
+                    encryption: r.get(8)?,
+                    timestamp_ms: r.get(9)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
         }
         Ok(out)
+    }
+
+    pub fn messages_by_protocols(
+        &self,
+        protocols: &[&str],
+        limit: u32,
+    ) -> anyhow::Result<Vec<DecodedMessage>> {
+        let mut all = Vec::new();
+        for protocol in protocols {
+            all.extend(self.messages_by_protocol(Some(protocol), limit)?);
+        }
+        all.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms).then(b.id.cmp(&a.id)));
+        all.truncate(limit as usize);
+        Ok(all)
+    }
+
+    pub fn delete_messages_by_protocol(&self, protocol: &str) -> anyhow::Result<usize> {
+        Ok(self.conn().execute(
+            "DELETE FROM decoded_messages WHERE protocol=?1",
+            rusqlite::params![protocol],
+        )?)
     }
 
     pub fn recent_decoded_messages(&self, limit: u32) -> anyhow::Result<Vec<DecodedMessage>> {
@@ -329,9 +450,14 @@ impl Db {
             Ok(DecodedMessage {
                 id: Some(r.get::<_, i64>(0)?),
                 frequency_hz: r.get::<_, i64>(1)? as u64,
-                protocol: r.get(2)?, message_type: r.get(3)?, address: r.get(4)?,
-                function_code: r.get(5)?, content: r.get(6)?, raw: r.get(7)?,
-                encryption: r.get(8)?, timestamp_ms: r.get(9)?,
+                protocol: r.get(2)?,
+                message_type: r.get(3)?,
+                address: r.get(4)?,
+                function_code: r.get(5)?,
+                content: r.get(6)?,
+                raw: r.get(7)?,
+                encryption: r.get(8)?,
+                timestamp_ms: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -340,7 +466,23 @@ impl Db {
     pub fn list_talkgroups(&self) -> anyhow::Result<Vec<Talkgroup>> {
         let c = self.conn();
         let mut q = c.prepare("SELECT id,system_name,talkgroup_id,alpha_tag,description,category,tag,mode,protocol,encrypted,hit_count,first_seen_ms,last_seen_ms FROM talkgroups ORDER BY system_name,talkgroup_id")?;
-        let rows = q.query_map([], |r| Ok(Talkgroup { id: Some(r.get(0)?), system_name: r.get(1)?, talkgroup_id: r.get(2)?, alpha_tag: r.get(3)?, description: r.get(4)?, category: r.get(5)?, tag: r.get(6)?, mode: r.get(7)?, protocol: r.get(8)?, encrypted: r.get::<_, i64>(9)? != 0, hit_count: r.get(10)?, first_seen_ms: r.get(11)?, last_seen_ms: r.get(12)? }))?;
+        let rows = q.query_map([], |r| {
+            Ok(Talkgroup {
+                id: Some(r.get(0)?),
+                system_name: r.get(1)?,
+                talkgroup_id: r.get(2)?,
+                alpha_tag: r.get(3)?,
+                description: r.get(4)?,
+                category: r.get(5)?,
+                tag: r.get(6)?,
+                mode: r.get(7)?,
+                protocol: r.get(8)?,
+                encrypted: r.get::<_, i64>(9)? != 0,
+                hit_count: r.get(10)?,
+                first_seen_ms: r.get(11)?,
+                last_seen_ms: r.get(12)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -350,22 +492,37 @@ impl Db {
     }
 
     pub fn delete_talkgroup_system(&self, system: &str) -> anyhow::Result<usize> {
-        Ok(self.conn().execute("DELETE FROM talkgroups WHERE system_name=?1", [system])?)
+        Ok(self
+            .conn()
+            .execute("DELETE FROM talkgroups WHERE system_name=?1", [system])?)
     }
 
     pub fn talkgroup_systems(&self) -> anyhow::Result<Vec<String>> {
         let c = self.conn();
-        let mut q = c.prepare("SELECT DISTINCT system_name FROM talkgroups ORDER BY system_name")?;
+        let mut q =
+            c.prepare("SELECT DISTINCT system_name FROM talkgroups ORDER BY system_name")?;
         let rows = q.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn export_talkgroups(&self) -> anyhow::Result<Vec<Talkgroup>> { self.list_talkgroups() }
+    pub fn export_talkgroups(&self) -> anyhow::Result<Vec<Talkgroup>> {
+        self.list_talkgroups()
+    }
 
     pub fn list_cases(&self) -> anyhow::Result<Vec<Case>> {
         let c = self.conn();
         let mut q = c.prepare("SELECT id,name,description,status,tags,created_ms,updated_ms FROM cases ORDER BY updated_ms DESC")?;
-        let rows = q.query_map([], |r| Ok(Case { id: Some(r.get(0)?), name: r.get(1)?, description: r.get(2)?, status: r.get(3)?, tags: r.get(4)?, created_ms: r.get(5)?, updated_ms: r.get(6)? }))?;
+        let rows = q.query_map([], |r| {
+            Ok(Case {
+                id: Some(r.get(0)?),
+                name: r.get(1)?,
+                description: r.get(2)?,
+                status: r.get(3)?,
+                tags: r.get(4)?,
+                created_ms: r.get(5)?,
+                updated_ms: r.get(6)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -377,18 +534,69 @@ impl Db {
 
     pub fn get_case(&self, id: i64) -> anyhow::Result<Option<Case>> {
         let c = self.conn();
-        let mut q = c.prepare("SELECT id,name,description,status,tags,created_ms,updated_ms FROM cases WHERE id=?1")?;
-        Ok(q.query_row([id], |r| Ok(Case { id: Some(r.get(0)?), name: r.get(1)?, description: r.get(2)?, status: r.get(3)?, tags: r.get(4)?, created_ms: r.get(5)?, updated_ms: r.get(6)? })).optional()?)
+        let mut q = c.prepare(
+            "SELECT id,name,description,status,tags,created_ms,updated_ms FROM cases WHERE id=?1",
+        )?;
+        Ok(q.query_row([id], |r| {
+            Ok(Case {
+                id: Some(r.get(0)?),
+                name: r.get(1)?,
+                description: r.get(2)?,
+                status: r.get(3)?,
+                tags: r.get(4)?,
+                created_ms: r.get(5)?,
+                updated_ms: r.get(6)?,
+            })
+        })
+        .optional()?)
     }
 
     pub fn delete_case(&self, id: i64) -> anyhow::Result<usize> {
         Ok(self.conn().execute("DELETE FROM cases WHERE id=?1", [id])?)
     }
 
-    pub fn add_case_attachment(&self, a: &CaseAttachment) -> anyhow::Result<i64> { let c=self.conn(); c.execute("INSERT INTO case_attachments (case_id,kind,ref,note,attached_ms) VALUES (?1,?2,?3,?4,?5)",rusqlite::params![a.case_id,a.kind,a.r#ref,a.note,a.attached_ms])?; Ok(c.last_insert_rowid()) }
-    pub fn case_attachments(&self, case_id: i64) -> anyhow::Result<Vec<CaseAttachment>> { let c=self.conn(); let mut q=c.prepare("SELECT id,case_id,kind,ref,note,attached_ms FROM case_attachments WHERE case_id=?1 ORDER BY attached_ms DESC")?; let rows=q.query_map([case_id],|r|Ok(CaseAttachment{id:Some(r.get(0)?),case_id:r.get(1)?,kind:r.get(2)?,r#ref:r.get(3)?,note:r.get(4)?,attached_ms:r.get(5)?}))?; Ok(rows.collect::<Result<Vec<_>,_>>()?) }
-    pub fn case_attachment(&self, id: i64) -> anyhow::Result<Option<CaseAttachment>> { let c=self.conn(); let mut q=c.prepare("SELECT id,case_id,kind,ref,note,attached_ms FROM case_attachments WHERE id=?1")?; Ok(q.query_row([id],|r|Ok(CaseAttachment{id:Some(r.get(0)?),case_id:r.get(1)?,kind:r.get(2)?,r#ref:r.get(3)?,note:r.get(4)?,attached_ms:r.get(5)?})).optional()?) }
-    pub fn delete_case_attachment(&self, id: i64) -> anyhow::Result<usize> { Ok(self.conn().execute("DELETE FROM case_attachments WHERE id=?1",[id])?) }
+    pub fn add_case_attachment(&self, a: &CaseAttachment) -> anyhow::Result<i64> {
+        let c = self.conn();
+        c.execute("INSERT INTO case_attachments (case_id,kind,ref,note,attached_ms) VALUES (?1,?2,?3,?4,?5)",rusqlite::params![a.case_id,a.kind,a.r#ref,a.note,a.attached_ms])?;
+        Ok(c.last_insert_rowid())
+    }
+    pub fn case_attachments(&self, case_id: i64) -> anyhow::Result<Vec<CaseAttachment>> {
+        let c = self.conn();
+        let mut q=c.prepare("SELECT id,case_id,kind,ref,note,attached_ms FROM case_attachments WHERE case_id=?1 ORDER BY attached_ms DESC")?;
+        let rows = q.query_map([case_id], |r| {
+            Ok(CaseAttachment {
+                id: Some(r.get(0)?),
+                case_id: r.get(1)?,
+                kind: r.get(2)?,
+                r#ref: r.get(3)?,
+                note: r.get(4)?,
+                attached_ms: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+    pub fn case_attachment(&self, id: i64) -> anyhow::Result<Option<CaseAttachment>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT id,case_id,kind,ref,note,attached_ms FROM case_attachments WHERE id=?1",
+        )?;
+        Ok(q.query_row([id], |r| {
+            Ok(CaseAttachment {
+                id: Some(r.get(0)?),
+                case_id: r.get(1)?,
+                kind: r.get(2)?,
+                r#ref: r.get(3)?,
+                note: r.get(4)?,
+                attached_ms: r.get(5)?,
+            })
+        })
+        .optional()?)
+    }
+    pub fn delete_case_attachment(&self, id: i64) -> anyhow::Result<usize> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM case_attachments WHERE id=?1", [id])?)
+    }
 
     pub fn add_annotation(&self, a: &RecordingAnnotation) -> anyhow::Result<i64> {
         let c = self.conn();
@@ -399,33 +607,107 @@ impl Db {
     pub fn list_annotations(&self) -> anyhow::Result<Vec<RecordingAnnotation>> {
         let c = self.conn();
         let mut q = c.prepare("SELECT id,recording_path,offset_ms,text,created_ms FROM recording_annotations ORDER BY created_ms DESC")?;
-        let rows = q.query_map([], |r| Ok(RecordingAnnotation { id: Some(r.get(0)?), recording_path: r.get(1)?, offset_ms: r.get(2)?, text: r.get(3)?, created_ms: r.get(4)? }))?;
+        let rows = q.query_map([], |r| {
+            Ok(RecordingAnnotation {
+                id: Some(r.get(0)?),
+                recording_path: r.get(1)?,
+                offset_ms: r.get(2)?,
+                text: r.get(3)?,
+                created_ms: r.get(4)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn update_annotation(&self, id: i64, a: &RecordingAnnotation) -> anyhow::Result<usize> {
-        Ok(self.conn().execute("UPDATE recording_annotations SET recording_path=?1,offset_ms=?2,text=?3 WHERE id=?4", rusqlite::params![a.recording_path,a.offset_ms,a.text,id])?)
+        Ok(self.conn().execute(
+            "UPDATE recording_annotations SET recording_path=?1,offset_ms=?2,text=?3 WHERE id=?4",
+            rusqlite::params![a.recording_path, a.offset_ms, a.text, id],
+        )?)
     }
 
     pub fn delete_annotation(&self, id: i64) -> anyhow::Result<usize> {
-        Ok(self.conn().execute("DELETE FROM recording_annotations WHERE id=?1", [id])?)
+        Ok(self
+            .conn()
+            .execute("DELETE FROM recording_annotations WHERE id=?1", [id])?)
     }
 
-    pub fn due_scheduled_jobs(&self, now_ms:i64)->anyhow::Result<Vec<ScheduledJob>> { let c=self.conn(); let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs WHERE enabled=1 AND next_run_ms IS NOT NULL AND next_run_ms<=?1 ORDER BY next_run_ms,id")?; let rows=q.query_map([now_ms],|r|Ok(ScheduledJob{id:Some(r.get(0)?),name:r.get(1)?,kind:r.get(2)?,payload_json:r.get(3)?,enabled:r.get::<_,i64>(4)?!=0,next_run_ms:r.get(5)?,last_run_ms:r.get(6)?,last_status:r.get(7)?,last_error:r.get(8)?,created_ms:r.get(9)?,updated_ms:r.get(10)?}))?; Ok(rows.collect::<Result<Vec<_>,_>>()?) }
-    pub fn mark_scheduled_job(&self,id:i64,status:&str,error:&str,enabled:bool,now_ms:i64)->anyhow::Result<()> { self.conn().execute("UPDATE scheduled_jobs SET enabled=?1,next_run_ms=NULL,last_run_ms=?2,last_status=?3,last_error=?4,updated_ms=?2 WHERE id=?5",rusqlite::params![enabled,now_ms,status,error,id])?;Ok(()) }
+    pub fn due_scheduled_jobs(&self, now_ms: i64) -> anyhow::Result<Vec<ScheduledJob>> {
+        let c = self.conn();
+        let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs WHERE enabled=1 AND next_run_ms IS NOT NULL AND next_run_ms<=?1 ORDER BY next_run_ms,id")?;
+        let rows = q.query_map([now_ms], |r| {
+            Ok(ScheduledJob {
+                id: Some(r.get(0)?),
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                payload_json: r.get(3)?,
+                enabled: r.get::<_, i64>(4)? != 0,
+                next_run_ms: r.get(5)?,
+                last_run_ms: r.get(6)?,
+                last_status: r.get(7)?,
+                last_error: r.get(8)?,
+                created_ms: r.get(9)?,
+                updated_ms: r.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+    pub fn mark_scheduled_job(
+        &self,
+        id: i64,
+        status: &str,
+        error: &str,
+        enabled: bool,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        self.conn().execute("UPDATE scheduled_jobs SET enabled=?1,next_run_ms=NULL,last_run_ms=?2,last_status=?3,last_error=?4,updated_ms=?2 WHERE id=?5",rusqlite::params![enabled,now_ms,status,error,id])?;
+        Ok(())
+    }
 
     pub fn list_scheduled_jobs(&self) -> anyhow::Result<Vec<ScheduledJob>> {
-        let c=self.conn(); let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs ORDER BY next_run_ms IS NULL,next_run_ms,id")?;
-        let rows=q.query_map([],|r|Ok(ScheduledJob{id:Some(r.get(0)?),name:r.get(1)?,kind:r.get(2)?,payload_json:r.get(3)?,enabled:r.get::<_,i64>(4)?!=0,next_run_ms:r.get(5)?,last_run_ms:r.get(6)?,last_status:r.get(7)?,last_error:r.get(8)?,created_ms:r.get(9)?,updated_ms:r.get(10)?}))?;
-        Ok(rows.collect::<Result<Vec<_>,_>>()?)
+        let c = self.conn();
+        let mut q=c.prepare("SELECT id,name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms FROM scheduled_jobs ORDER BY next_run_ms IS NULL,next_run_ms,id")?;
+        let rows = q.query_map([], |r| {
+            Ok(ScheduledJob {
+                id: Some(r.get(0)?),
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                payload_json: r.get(3)?,
+                enabled: r.get::<_, i64>(4)? != 0,
+                next_run_ms: r.get(5)?,
+                last_run_ms: r.get(6)?,
+                last_status: r.get(7)?,
+                last_error: r.get(8)?,
+                created_ms: r.get(9)?,
+                updated_ms: r.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn create_scheduled_job(&self, job:&ScheduledJob)->anyhow::Result<i64>{let c=self.conn();c.execute("INSERT INTO scheduled_jobs(name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",rusqlite::params![job.name,job.kind,job.payload_json,job.enabled,job.next_run_ms,job.last_run_ms,job.last_status,job.last_error,job.created_ms,job.updated_ms])?;Ok(c.last_insert_rowid())}
-    pub fn delete_scheduled_job(&self,id:i64)->anyhow::Result<usize>{Ok(self.conn().execute("DELETE FROM scheduled_jobs WHERE id=?1",[id])?)}
+    pub fn create_scheduled_job(&self, job: &ScheduledJob) -> anyhow::Result<i64> {
+        let c = self.conn();
+        c.execute("INSERT INTO scheduled_jobs(name,kind,payload_json,enabled,next_run_ms,last_run_ms,last_status,last_error,created_ms,updated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",rusqlite::params![job.name,job.kind,job.payload_json,job.enabled,job.next_run_ms,job.last_run_ms,job.last_status,job.last_error,job.created_ms,job.updated_ms])?;
+        Ok(c.last_insert_rowid())
+    }
+    pub fn delete_scheduled_job(&self, id: i64) -> anyhow::Result<usize> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM scheduled_jobs WHERE id=?1", [id])?)
+    }
 
     pub fn list_blacklist(&self) -> anyhow::Result<Vec<BlacklistEntry>> {
         let c = self.conn();
-        let mut q = c.prepare("SELECT frequency_hz,reason,temporary,created_ms FROM blacklist ORDER BY frequency_hz")?;
-        let rows = q.query_map([], |r| Ok(BlacklistEntry { frequency_hz: r.get::<_, i64>(0)? as u64, reason: r.get(1)?, temporary: r.get::<_, i64>(2)? != 0, created_ms: r.get(3)? }))?;
+        let mut q = c.prepare(
+            "SELECT frequency_hz,reason,temporary,created_ms FROM blacklist ORDER BY frequency_hz",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(BlacklistEntry {
+                frequency_hz: r.get::<_, i64>(0)? as u64,
+                reason: r.get(1)?,
+                temporary: r.get::<_, i64>(2)? != 0,
+                created_ms: r.get(3)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -435,12 +717,20 @@ impl Db {
     }
 
     pub fn remove_blacklist(&self, frequency_hz: u64) -> anyhow::Result<usize> {
-        Ok(self.conn().execute("DELETE FROM blacklist WHERE frequency_hz=?1", [frequency_hz as i64])?)
+        Ok(self.conn().execute(
+            "DELETE FROM blacklist WHERE frequency_hz=?1",
+            [frequency_hz as i64],
+        )?)
     }
 
     pub fn clear_blacklist(&self, temporary_only: bool) -> anyhow::Result<usize> {
-        if temporary_only { Ok(self.conn().execute("DELETE FROM blacklist WHERE temporary=1", [])?) }
-        else { Ok(self.conn().execute("DELETE FROM blacklist", [])?) }
+        if temporary_only {
+            Ok(self
+                .conn()
+                .execute("DELETE FROM blacklist WHERE temporary=1", [])?)
+        } else {
+            Ok(self.conn().execute("DELETE FROM blacklist", [])?)
+        }
     }
 }
 
@@ -451,11 +741,20 @@ mod tests {
 
     #[test]
     fn recent_signal_events_are_newest_first_and_limited() {
-        let path = std::env::temp_dir().join(format!("pulsescope-db-{}.sqlite", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let db = Db::open(&path).unwrap();
-        db.insert_signal_event(433_920_000, 0.0, 3.0, 200_000, "ISM 433", 100).unwrap();
-        db.insert_signal_event(433_920_500, 0.0, 8.0, 200_000, "ISM 433", 200).unwrap();
-        db.insert_signal_event(433_921_000, 0.0, 5.0, 200_000, "ISM 433", 300).unwrap();
+        db.insert_signal_event(433_920_000, 0.0, 3.0, 200_000, "ISM 433", 100)
+            .unwrap();
+        db.insert_signal_event(433_920_500, 0.0, 8.0, 200_000, "ISM 433", 200)
+            .unwrap();
+        db.insert_signal_event(433_921_000, 0.0, 5.0, 200_000, "ISM 433", 300)
+            .unwrap();
         let rows = db.recent_signal_events(2).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].timestamp_ms, 300);
@@ -464,5 +763,76 @@ mod tests {
         drop(db);
         let _ = std::fs::remove_file(path);
     }
-}
 
+    #[test]
+    fn receiver_workspace_migration_is_idempotent_and_persistent() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-workspace-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn().execute(
+                "INSERT INTO receiver_profiles(id,name,center_frequency_hz,sample_rate_hz,bandwidth_hz,mode,created_ms,updated_ms) VALUES('fm','Local FM',99500000,10000000,8000000,'wfm',1,1)",
+                [],
+            ).unwrap();
+            db.conn().execute(
+                "INSERT INTO receiver_bookmarks(label,frequency_hz,mode,bandwidth_hz,profile_id,created_ms,updated_ms) VALUES('Station',99700000,'wfm',200000,'fm',1,1)",
+                [],
+            ).unwrap();
+        }
+        let reopened = Db::open(&path).unwrap();
+        let count: i64 = reopened
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM receiver_bookmarks WHERE profile_id='fm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn occupancy_upsert_averages_within_the_same_15min_bucket() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-occupancy-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let first = super::SpectrumOccupancy {
+            frequency_bucket_hz: 100_000_000,
+            time_bucket_15min: 1,
+            avg_power_db: -80.0,
+            peak_power_db: -70.0,
+            avg_above_floor_db: 10.0,
+            sample_count: 1,
+            noise_floor_db: -90.0,
+        };
+        let second = super::SpectrumOccupancy {
+            avg_power_db: -60.0,
+            peak_power_db: -50.0,
+            avg_above_floor_db: 30.0,
+            sample_count: 1,
+            noise_floor_db: -90.0,
+            ..first
+        };
+        db.upsert_occupancy(&first).unwrap();
+        db.upsert_occupancy(&second).unwrap();
+        let rows = db.recent_occupancy(8).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].avg_power_db + 70.0).abs() < 0.01);
+        assert!((rows[0].peak_power_db + 50.0).abs() < 0.01);
+        assert_eq!(rows[0].sample_count, 2);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+}

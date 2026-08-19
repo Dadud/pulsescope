@@ -95,13 +95,19 @@ pub struct IqDecoder {
 
 impl IqDecoder {
     pub fn new(sample_rate: u32, baud: PocsagBaud) -> Self {
-        Self { decoder: PocsagDecoder::new(sample_rate, baud), previous: None }
+        Self {
+            decoder: PocsagDecoder::new(sample_rate, baud),
+            previous: None,
+        }
     }
 
     pub fn push_iq(&mut self, samples: &[(f32, f32)]) -> Vec<PocsagMessage> {
         let mut audio = Vec::with_capacity(samples.len());
         for &(i, q) in samples {
-            if !i.is_finite() || !q.is_finite() { self.previous = None; continue; }
+            if !i.is_finite() || !q.is_finite() {
+                self.previous = None;
+                continue;
+            }
             if let Some((pi, pq)) = self.previous {
                 audio.push((q * pi - i * pq).atan2(i * pi + q * pq));
             }
@@ -110,9 +116,15 @@ impl IqDecoder {
         self.decoder.push_audio(&audio)
     }
 
-    pub fn flush(&mut self) -> Vec<PocsagMessage> { self.decoder.flush() }
-    pub fn corrected_words(&self) -> u64 { self.decoder.corrected_words() }
-    pub fn rejected_words(&self) -> u64 { self.decoder.rejected_words() }
+    pub fn flush(&mut self) -> Vec<PocsagMessage> {
+        self.decoder.flush()
+    }
+    pub fn corrected_words(&self) -> u64 {
+        self.decoder.corrected_words()
+    }
+    pub fn rejected_words(&self) -> u64 {
+        self.decoder.rejected_words()
+    }
 }
 
 impl PocsagDecoder {
@@ -360,6 +372,70 @@ fn decode_alphanumeric(words: &[u32]) -> String {
     text.trim_end().to_owned()
 }
 
+fn encode_codeword(data21: u32) -> u32 {
+    let mut bch = (data21 & 0x1f_ffff) << 10;
+    bch |= bch_remainder(bch);
+    let mut word = bch << 1;
+    if word.count_ones() & 1 != 0 {
+        word |= 1;
+    }
+    word
+}
+
+fn address_word(ric: u32, function: u8) -> u32 {
+    encode_codeword(((ric >> 3) << 2) | (function as u32 & 3))
+}
+
+fn message_word(data: u32) -> u32 {
+    encode_codeword((1 << 20) | (data & 0x000f_ffff))
+}
+
+fn alpha_words(text: &str) -> Vec<u32> {
+    let mut bits = 0u128;
+    let mut count = 0usize;
+    for byte in text.bytes().chain(std::iter::once(0x03)) {
+        bits |= (byte as u128) << count;
+        count += 7;
+    }
+    (0..count.div_ceil(20))
+        .map(|index| message_word(((bits >> (index * 20)) & 0x000f_ffff) as u32))
+        .collect()
+}
+
+/// Clean-room alphanumeric POCSAG page as discriminator audio for fixtures.
+pub fn synthesize_alphanumeric_audio(
+    sample_rate: u32,
+    baud: PocsagBaud,
+    ric: u32,
+    function: u8,
+    text: &str,
+) -> Vec<f32> {
+    let frame = (ric & 7) as usize;
+    let address_index = frame * 2;
+    let message_words = alpha_words(text);
+    let mut words = [IDLE_CODEWORD; WORDS_PER_BATCH];
+    words[address_index] = address_word(ric, function);
+    for (destination, source) in words[address_index + 1..].iter_mut().zip(message_words) {
+        *destination = source;
+    }
+    let mut bits = Vec::new();
+    for bit in (0..32).rev() {
+        bits.push(SYNC_CODEWORD & (1 << bit) != 0);
+    }
+    for word in words {
+        for bit in (0..32).rev() {
+            bits.push(word & (1 << bit) != 0);
+        }
+    }
+    let samples_per_bit = (sample_rate / baud.value()).max(1) as usize;
+    let mut audio = Vec::with_capacity(bits.len() * samples_per_bit);
+    for bit in bits {
+        let level = if bit { 0.8 } else { -0.8 };
+        audio.extend(std::iter::repeat_n(level, samples_per_bit));
+    }
+    audio
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,7 +553,7 @@ mod tests {
             let mut audio = Vec::new();
             for bit in bits {
                 let level = if bit { -0.8 } else { 0.8 }; // deliberately inverted
-                audio.extend(std::iter::repeat(level).take(samples_per_bit as usize));
+                audio.extend(std::iter::repeat_n(level, samples_per_bit as usize));
             }
             let mut decoder = PocsagDecoder::new(24_000, baud);
             let mut messages = Vec::new();
