@@ -159,6 +159,8 @@ pub struct ScannerConfig {
     /// Classify and run native decoders on every strong signal hit.
     pub auto_decode_all: bool,
     pub auto_decode_threshold: f32,
+    /// Use ARRL band-plan segments to pick demod mode and decoder routing.
+    pub use_arrl_bandplan: bool,
 }
 impl Default for ScannerConfig {
     fn default() -> Self {
@@ -182,6 +184,7 @@ impl Default for ScannerConfig {
             per_freq_squelch: true,
             auto_decode_all: true,
             auto_decode_threshold: 0.5,
+            use_arrl_bandplan: true,
         }
     }
 }

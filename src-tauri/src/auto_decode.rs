@@ -8,7 +8,8 @@ use rustfft::num_complex::Complex;
 use crate::ais::IqDecoder as AisIqDecoder;
 use crate::aviation::{AcarsIqDecoder, BitOrder, UatIqDecoder, Vdl2IqDecoder};
 use crate::db::DecodedMessage;
-use crate::demod::{decode_navtex, decode_rds, demodulate, low_pass_complex, mix_down, Mode};
+use crate::aprs::AprsDecoder;
+use crate::demod::{decode_cw, decode_navtex, decode_rds, decode_rtty, demodulate, low_pass_complex, mix_down, Mode};
 use crate::pocsag::{IqDecoder as PocsagIqDecoder, PocsagBaud};
 use crate::signal_id::{classify, Classification};
 
@@ -25,11 +26,17 @@ pub fn try_decode_signal(
     snr_db: f32,
     threshold: f32,
     timestamp_ms: i64,
+    use_arrl_bandplan: bool,
 ) -> Vec<DecodedMessage> {
     if iq.len() < 2048 || sample_rate == 0 {
         return Vec::new();
     }
 
+    let demod_mode = if use_arrl_bandplan {
+        crate::arrl_bandplan::recommended_mode(frequency_hz, mode)
+    } else {
+        mode
+    };
     let demod_rate = sample_rate.min(500_000).max(8_000);
     let demod_audio = extract_demod_audio(
         iq,
@@ -37,15 +44,15 @@ pub fn try_decode_signal(
         frequency_hz,
         sample_rate,
         demod_rate,
-        mode,
+        demod_mode,
     );
     let classification = classify(
         frequency_hz,
         channel_bw_hz,
-        mode,
+        demod_mode,
         range_name,
         snr_db,
-        Some(&demod_audio),
+        Some((&demod_audio, demod_rate as f32)),
     );
 
     let mut out = Vec::new();
@@ -53,30 +60,45 @@ pub fn try_decode_signal(
         out.push(decoded_from_classification(&classification, frequency_hz, timestamp_ms));
     }
 
-    if classification.top_confidence < threshold {
-        return out;
+    let channel_iq = extract_channel_iq(iq, device_center_hz, frequency_hz, sample_rate, demod_mode);
+    let mut tried = std::collections::HashSet::new();
+    for candidate in classification.candidates.iter().filter(|c| c.confidence >= threshold) {
+        if candidate.decoder == "none" || tried.contains(&candidate.decoder) {
+            continue;
+        }
+        tried.insert(candidate.decoder.clone());
+        out.extend(run_native_decoder(
+            &candidate.decoder,
+            &channel_iq,
+            sample_rate,
+            &demod_audio,
+            demod_rate,
+            frequency_hz,
+            &classification,
+            timestamp_ms,
+        ));
     }
 
-    let decoder = classification
-        .candidates
-        .first()
-        .map(|c| c.decoder.as_str())
-        .unwrap_or("none");
-    if decoder == "none" {
-        return out;
+    // ARRL weak-signal slots: try CW + RTTY even if top candidate was voice.
+    if use_arrl_bandplan {
+        for decoder in ["native_cw", "native_rtty", "native_aprs"] {
+            if tried.contains(decoder) {
+                continue;
+            }
+            tried.insert(decoder.to_string());
+            out.extend(run_native_decoder(
+                decoder,
+                &channel_iq,
+                sample_rate,
+                &demod_audio,
+                demod_rate,
+                frequency_hz,
+                &classification,
+                timestamp_ms,
+            ));
+        }
     }
 
-    let channel_iq = extract_channel_iq(iq, device_center_hz, frequency_hz, sample_rate, mode);
-    out.extend(run_native_decoder(
-        decoder,
-        &channel_iq,
-        sample_rate,
-        &demod_audio,
-        demod_rate,
-        frequency_hz,
-        &classification,
-        timestamp_ms,
-    ));
     out
 }
 
@@ -99,7 +121,7 @@ fn decoded_from_classification(
     }
 }
 
-fn extract_channel_iq(
+pub fn extract_channel_iq(
     iq: &[Complex<f32>],
     device_center_hz: u64,
     target_hz: u64,
@@ -120,7 +142,7 @@ fn extract_channel_iq(
     filtered.iter().map(|c| (c.re, c.im)).collect()
 }
 
-fn extract_demod_audio(
+pub fn extract_demod_audio(
     iq: &[Complex<f32>],
     device_center_hz: u64,
     target_hz: u64,
@@ -162,7 +184,7 @@ fn apply_agc(samples: &mut [f32], target_rms: f32) {
     }
 }
 
-fn run_native_decoder(
+pub fn run_native_decoder(
     decoder: &str,
     channel_iq: &[(f32, f32)],
     sample_rate: u32,
@@ -329,8 +351,6 @@ fn run_native_decoder(
             }
         }
         "rtl_433" => {
-            // rtl_433 sidecar consumes the full IQ stream; classification still
-            // surfaces likely ISM/sensor traffic in the message dock.
             if classification.top_confidence >= 0.55 {
                 out.push(DecodedMessage {
                     id: None,
@@ -344,6 +364,73 @@ fn run_native_decoder(
                         classification.top_family
                     ),
                     raw: classification.features.join("; "),
+                    encryption: "none".into(),
+                    timestamp_ms,
+                });
+            }
+        }
+        "native_cw" | "cw" => {
+            for tone in [700.0, 600.0, 800.0] {
+                if let Some(text) = decode_cw(demod_audio, demod_rate as f32, tone) {
+                    if text.chars().filter(|c| c.is_alphanumeric()).count() >= 2 {
+                        out.push(DecodedMessage {
+                            id: None,
+                            frequency_hz,
+                            protocol: "cw".into(),
+                            message_type: "cw".into(),
+                            address: String::new(),
+                            function_code: format!("{tone:.0}hz"),
+                            content: text,
+                            raw: String::new(),
+                            encryption: "none".into(),
+                            timestamp_ms,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        "native_rtty" | "rtty" | "digital_weak" => {
+            let profiles: [(f32, f32, f32); 3] = [
+                (170.0, 2125.0, 45.0),
+                (1275.0, 1445.0, 45.0),
+                (1615.0, 1785.0, 50.0),
+            ];
+            for (mark, space, baud) in profiles {
+                if let Some(text) = decode_rtty(demod_audio, demod_rate as f32, mark, space, baud) {
+                    if text.trim().len() >= 3 {
+                        out.push(DecodedMessage {
+                            id: None,
+                            frequency_hz,
+                            protocol: "rtty".into(),
+                            message_type: "rtty".into(),
+                            address: String::new(),
+                            function_code: format!("{mark:.0}/{space:.0}"),
+                            content: text,
+                            raw: String::new(),
+                            encryption: "none".into(),
+                            timestamp_ms,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        "native_aprs" | "direwolf" => {
+            let mut dec = AprsDecoder::new(demod_rate as f32);
+            for &sample in demod_audio {
+                dec.feed(sample);
+            }
+            for frame in dec.frames {
+                out.push(DecodedMessage {
+                    id: None,
+                    frequency_hz,
+                    protocol: "aprs".into(),
+                    message_type: "aprs".into(),
+                    address: frame.source.clone(),
+                    function_code: frame.dest.clone(),
+                    content: frame.info.clone(),
+                    raw: String::new(),
                     encryption: "none".into(),
                     timestamp_ms,
                 });

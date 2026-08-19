@@ -58,6 +58,49 @@ pub struct VfoState {
     pub squelch_open: bool,
     pub strength_db: f32,
     pub audio_level_db: f32,
+    /// scan = hopping search head, signal = parked on a detected emitter, idle = free slot
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub decoder: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub candidates: Vec<crate::signal_id::ProtocolCandidate>,
+    /// When true the scanner will not auto-reassign this VFO.
+    #[serde(default)]
+    pub locked: bool,
+    /// ARRL band-plan label when assigned from a detected signal.
+    #[serde(default)]
+    pub segment_label: String,
+}
+
+impl Default for VfoState {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            frequency_hz: 0,
+            mode: "nfm".into(),
+            muted: true,
+            volume: 0.7,
+            audio_agc: true,
+            squelch_open: false,
+            strength_db: -120.0,
+            audio_level_db: -120.0,
+            role: "idle".into(),
+            protocol: String::new(),
+            family: String::new(),
+            decoder: String::new(),
+            confidence: 0.0,
+            candidates: Vec::new(),
+            locked: false,
+            segment_label: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +119,7 @@ pub enum ScannerCommand {
     SetVfoMute { id: u32, muted: bool },
     SetVfoVolume { id: u32, volume: f32 },
     ToggleVfoAgc { id: u32, on: bool },
+    SetVfoLocked { id: u32, locked: bool },
     Shutdown,
 }
 
@@ -196,6 +240,239 @@ fn recenter_device_for_frequency(device: &DeviceLayer, frequency_hz: u64) {
     }
 }
 
+fn band_fits_capture_window(range: &ScanRange, sample_rate: u32) -> bool {
+    range.end_hz.saturating_sub(range.start_hz) <= sample_rate as u64
+}
+
+fn frequency_from_bin(bin: usize, bin_count: usize, center_hz: u64, sample_rate: u32) -> u64 {
+    if bin_count == 0 || sample_rate == 0 {
+        return center_hz;
+    }
+    let offset = bin as f64 / bin_count as f64 - 0.5;
+    (center_hz as f64 + offset * sample_rate as f64).max(0.0) as u64
+}
+
+struct DetectedPeak {
+    bin: usize,
+    strength_db: f32,
+    snr_db: f32,
+    frequency_hz: u64,
+}
+
+fn find_signal_peaks(
+    bins: &[f32],
+    noise_floor: f32,
+    squelch_db: f32,
+    min_bins: usize,
+    center_hz: u64,
+    sample_rate: u32,
+    range: &ScanRange,
+) -> Vec<DetectedPeak> {
+    let threshold = noise_floor + squelch_db;
+    let mut peaks = Vec::new();
+    let mut i = 0;
+    while i < bins.len() {
+        if bins[i] < threshold {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bins.len() && bins[i] >= threshold {
+            i += 1;
+        }
+        let end = i;
+        if end - start < min_bins {
+            continue;
+        }
+        let mut best_bin = start;
+        let mut best_val = bins[start];
+        for (j, val) in bins[start..end].iter().enumerate() {
+            if *val > best_val {
+                best_val = *val;
+                best_bin = start + j;
+            }
+        }
+        let frequency_hz = frequency_from_bin(best_bin, bins.len(), center_hz, sample_rate);
+        if frequency_hz < range.start_hz || frequency_hz > range.end_hz {
+            continue;
+        }
+        peaks.push(DetectedPeak {
+            bin: best_bin,
+            strength_db: best_val,
+            snr_db: best_val - noise_floor,
+            frequency_hz,
+        });
+    }
+    peaks.sort_by(|a, b| b.strength_db.partial_cmp(&a.strength_db).unwrap_or(std::cmp::Ordering::Equal));
+    peaks
+}
+
+fn classify_and_decode_peak(
+    iq: &[Complex<f32>],
+    peak: &DetectedPeak,
+    channel_bw: u32,
+    mode: &str,
+    range_name: &str,
+    cfg: &ScannerConfig,
+    db: &Db,
+    events_tx: &broadcast::Sender<ScannerEvent>,
+    device_center_hz: u64,
+    sample_rate: u32,
+) -> crate::signal_id::Classification {
+    let demod_mode = if cfg.use_arrl_bandplan {
+        crate::arrl_bandplan::recommended_mode(peak.frequency_hz, mode)
+    } else {
+        mode
+    };
+    let demod_rate = sample_rate.min(500_000).max(8_000);
+    let demod_audio = auto_decode::extract_demod_audio(
+        iq,
+        device_center_hz,
+        peak.frequency_hz,
+        sample_rate,
+        demod_rate,
+        demod_mode,
+    );
+    let classification = signal_id::classify(
+        peak.frequency_hz,
+        channel_bw,
+        demod_mode,
+        range_name,
+        peak.snr_db,
+        Some((&demod_audio, demod_rate as f32)),
+    );
+    if cfg.auto_decode_all {
+        let timestamp = now_ms();
+        for decoded in auto_decode::try_decode_signal(
+            iq,
+            device_center_hz,
+            sample_rate,
+            peak.frequency_hz,
+            channel_bw,
+            demod_mode,
+            range_name,
+            peak.snr_db,
+            cfg.auto_decode_threshold,
+            timestamp,
+            cfg.use_arrl_bandplan,
+        ) {
+            let _ = db.insert_decoded_message(&decoded);
+            let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
+        }
+    }
+    classification
+}
+
+fn assign_peaks_to_vfos(
+    vfos: &mut [VfoState],
+    peaks: &[DetectedPeak],
+    range: &ScanRange,
+    iq: &[Complex<f32>],
+    cfg: &ScannerConfig,
+    db: &Db,
+    events_tx: &broadcast::Sender<ScannerEvent>,
+    device_center_hz: u64,
+    sample_rate: u32,
+    range_name: &str,
+    wideband: bool,
+) {
+    let step = cfg.freq_step_hz.max(1) as u64;
+    let mode = range.mode.as_str();
+    let channel_bw = range.channel_bw_hz;
+
+    // Release idle slots when the signal has been gone for a while.
+    for vfo in vfos.iter_mut() {
+        if vfo.locked {
+            continue;
+        }
+        if vfo.role == "signal" && !vfo.squelch_open && vfo.audio_level_db < -42.0 {
+            vfo.role = "idle".into();
+            vfo.protocol.clear();
+            vfo.family.clear();
+            vfo.decoder.clear();
+            vfo.confidence = 0.0;
+            vfo.candidates.clear();
+            vfo.segment_label.clear();
+        }
+    }
+
+    let mut peak_idx = 0;
+    for vfo in vfos.iter_mut() {
+        if vfo.locked {
+            continue;
+        }
+        // Narrowband: VFO 0 is the hopper — monitor VFOs are id >= 1.
+        if !wideband && vfo.id == 0 {
+            continue;
+        }
+        // Keep a parked signal until it drops unless the slot is idle.
+        if vfo.role == "signal" && vfo.squelch_open {
+            continue;
+        }
+        while peak_idx < peaks.len() {
+            let peak = &peaks[peak_idx];
+            peak_idx += 1;
+            let dup = vfos.iter().any(|v| {
+                v.frequency_hz.abs_diff(peak.frequency_hz) < step / 2 && v.role == "signal"
+            });
+            if dup {
+                continue;
+            }
+            let classification = classify_and_decode_peak(
+                iq,
+                peak,
+                channel_bw,
+                mode,
+                range_name,
+                cfg,
+                db,
+                events_tx,
+                device_center_hz,
+                sample_rate,
+            );
+            let top = classification.candidates.first();
+            vfo.frequency_hz = peak.frequency_hz;
+            vfo.role = "signal".into();
+            vfo.squelch_open = true;
+            let demod_mode = if cfg.use_arrl_bandplan {
+                crate::arrl_bandplan::recommended_mode(peak.frequency_hz, mode)
+            } else {
+                mode
+            };
+            vfo.mode = demod_mode.to_string();
+            if let Some(seg) = crate::arrl_bandplan::segment_at(peak.frequency_hz) {
+                vfo.segment_label = seg.label.to_string();
+            } else {
+                vfo.segment_label.clear();
+            }
+            vfo.protocol = classification.sub_protocol.clone();
+            vfo.family = classification.top_family.clone();
+            vfo.confidence = classification.top_confidence;
+            vfo.decoder = top
+                .map(|c| c.decoder.clone())
+                .unwrap_or_else(|| "none".into());
+            vfo.candidates = classification.candidates.clone();
+            let _ = db.insert_classified_signal_event(
+                peak.frequency_hz,
+                peak.snr_db,
+                channel_bw,
+                range_name,
+                now_ms(),
+                &classification.signal_class,
+                &classification.top_family,
+                classification.top_confidence,
+                &classification.sub_protocol,
+                classification.decode_success,
+                &classification.decode_protocol,
+                &classification.decode_summary,
+                classification.likely_proprietary,
+                classification.is_novel,
+            );
+            break;
+        }
+    }
+}
+
 
 impl ScannerHandle {
     pub fn spawn(
@@ -264,19 +541,30 @@ async fn scanner_loop(
                     let name = range.name.clone();
                     let center = range.start_hz + range.end_hz.saturating_sub(range.start_hz) / 2;
                     recenter_device_for_frequency(&device, center);
+                    let wideband = band_fits_capture_window(&range, device.status().sample_rate);
                     let mut vfos = (0..range.max_vfos.min(cfg.max_vfos as u32))
                         .map(|i| VfoState {
                             id: i,
                             frequency_hz: range.start_hz,
                             mode: range.mode.clone(),
-                            // Monitoring is opt-in. Scans must never turn into
-                            // speaker static merely because the app launched.
                             muted: true,
                             volume: 0.7,
                             audio_agc: true,
                             squelch_open: false,
                             strength_db: -120.0,
                             audio_level_db: -120.0,
+                            role: if i == 0 && !wideband {
+                                "scan".into()
+                            } else {
+                                "idle".into()
+                            },
+                            protocol: String::new(),
+                            family: String::new(),
+                            decoder: String::new(),
+                            confidence: 0.0,
+                            candidates: Vec::new(),
+                            locked: false,
+                            segment_label: String::new(),
                         })
                         .collect::<Vec<_>>();
                     spread_vfo_frequencies(
@@ -349,6 +637,16 @@ async fn scanner_loop(
                     let vfos = state.lock().vfo_states.clone();
                     let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
                 }
+                ScannerCommand::SetVfoLocked { id, locked } => {
+                    if let Some(v) = state.lock().vfo_states.iter_mut().find(|v| v.id == id) {
+                        v.locked = locked;
+                        if locked {
+                            v.role = "signal".into();
+                        }
+                    }
+                    let vfos = state.lock().vfo_states.clone();
+                    let _ = events_tx.send(ScannerEvent::VfoStates(vfos));
+                }
                 ScannerCommand::Shutdown => return,
             }
         }
@@ -358,36 +656,41 @@ async fn scanner_loop(
             continue;
         }
 
-        // VFO 0 scans the range grid; hold when audio is active on that channel.
-        if let Some(range) = active_range.as_ref() {
-            let dwell = Duration::from_millis(range.dwell_ms.max(50) as u64);
-            if last_vfo_hop.elapsed() >= dwell && !scan_grid.is_empty() {
-                let hold = {
-                    let st = state.lock();
-                    st.vfo_states
-                        .iter()
-                        .find(|v| v.id == 0)
-                        .map(|v| {
-                            cfg.scan_hold_on_audio
-                                && !v.muted
-                                && v.audio_level_db > -35.0
-                        })
-                        .unwrap_or(false)
-                };
-                if !hold {
-                    scan_index = (scan_index + 1) % scan_grid.len();
-                    let next_freq = scan_grid[scan_index];
-                    let center = device.status().center_freq_hz;
-                    let half = device.status().sample_rate / 2;
-                    if next_freq < center.saturating_sub(half as u64)
-                        || next_freq > center + half as u64
-                    {
-                        recenter_device_for_frequency(&device, next_freq);
+        // Narrowband bands: VFO 0 hops the step grid. Wideband (e.g. 40m): full span
+        // is visible — peaks are assigned to all VFO slots each FFT frame.
+        let wideband = active_range.as_ref().map(|r| band_fits_capture_window(r, device.status().sample_rate)).unwrap_or(false);
+        if !wideband {
+            if let Some(range) = active_range.as_ref() {
+                let dwell = Duration::from_millis(range.dwell_ms.max(50) as u64);
+                if last_vfo_hop.elapsed() >= dwell && !scan_grid.is_empty() {
+                    let hold = {
+                        let st = state.lock();
+                        st.vfo_states
+                            .iter()
+                            .find(|v| v.id == 0)
+                            .map(|v| {
+                                cfg.scan_hold_on_audio
+                                    && !v.muted
+                                    && v.audio_level_db > -35.0
+                            })
+                            .unwrap_or(false)
+                    };
+                    if !hold {
+                        scan_index = (scan_index + 1) % scan_grid.len();
+                        let next_freq = scan_grid[scan_index];
+                        let center = device.status().center_freq_hz;
+                        let half = device.status().sample_rate / 2;
+                        if next_freq < center.saturating_sub(half as u64)
+                            || next_freq > center + half as u64
+                        {
+                            recenter_device_for_frequency(&device, next_freq);
+                        }
+                        if let Some(v0) = state.lock().vfo_states.iter_mut().find(|v| v.id == 0) {
+                            v0.frequency_hz = next_freq;
+                            v0.role = "scan".into();
+                        }
+                        last_vfo_hop = Instant::now();
                     }
-                    if let Some(v0) = state.lock().vfo_states.iter_mut().find(|v| v.id == 0) {
-                        v0.frequency_hz = next_freq;
-                    }
-                    last_vfo_hop = Instant::now();
                 }
             }
         }
@@ -453,15 +756,29 @@ async fn scanner_loop(
                 let frequency_hz = (status.center_freq_hz as f64 + offset * status.sample_rate as f64).max(0.0) as u64;
                 let bandwidth_hz = (status.sample_rate / bins.len().max(1) as u32).max(1);
                 // Prefer the active range's channel BW when available (more accurate than FFT bin width)
-                let mode = active_range.as_ref().map(|r| r.mode.as_str()).unwrap_or("nfm");
+                let range_mode = active_range.as_ref().map(|r| r.mode.as_str()).unwrap_or("nfm");
+                let demod_mode = if cfg.use_arrl_bandplan {
+                    crate::arrl_bandplan::recommended_mode(frequency_hz, range_mode)
+                } else {
+                    range_mode
+                };
                 let channel_bw = active_range.as_ref().map(|r| r.channel_bw_hz).unwrap_or(bandwidth_hz);
+                let demod_rate = status.sample_rate.min(500_000).max(8_000);
+                let demod_audio = auto_decode::extract_demod_audio(
+                    &iq,
+                    status.center_freq_hz,
+                    frequency_hz,
+                    status.sample_rate,
+                    demod_rate,
+                    demod_mode,
+                );
                 let classification = signal_id::classify(
                     frequency_hz,
                     channel_bw,
-                    mode,
+                    demod_mode,
                     &range_name,
                     snr,
-                    None,
+                    Some((&demod_audio, demod_rate as f32)),
                 );
                 let top = classification.candidates.first();
                 let decoder = top.map(|c| c.decoder.clone()).unwrap_or_else(|| "none".into());
@@ -489,11 +806,12 @@ async fn scanner_loop(
                         status.sample_rate,
                         frequency_hz,
                         channel_bw,
-                        mode,
+                        demod_mode,
                         &range_name,
                         snr,
                         cfg.auto_decode_threshold,
                         timestamp,
+                        cfg.use_arrl_bandplan,
                     ) {
                         let _ = db.insert_decoded_message(&decoded);
                         let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
@@ -527,6 +845,32 @@ async fn scanner_loop(
                 let strength = vfo_strength_db(&bins, vfo.frequency_hz, center, sample_rate);
                 vfo.strength_db = strength;
                 vfo.squelch_open = strength - noise_floor >= cfg.squelch_db;
+            }
+            if let Some(range) = active_range.as_ref() {
+                let peaks = find_signal_peaks(
+                    &bins,
+                    noise_floor,
+                    cfg.squelch_db,
+                    cfg.min_signal_width_bins.max(2),
+                    center,
+                    sample_rate,
+                    range,
+                );
+                if !peaks.is_empty() {
+                    assign_peaks_to_vfos(
+                        &mut runtime.vfo_states,
+                        &peaks,
+                        range,
+                        &iq,
+                        &cfg,
+                        &db,
+                        &events_tx,
+                        center,
+                        sample_rate,
+                        &range_name,
+                        wideband,
+                    );
+                }
             }
         }
         let _ = events_tx.send(ScannerEvent::VfoStates(state.lock().vfo_states.clone()));

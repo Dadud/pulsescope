@@ -328,6 +328,9 @@ pub fn classify(
         }
     }
 
+    // 1b. ARRL US amateur band-plan segments (public allocation facts)
+    crate::arrl_bandplan::apply_arrl_scores(frequency_hz, &mut scores);
+
     // 2. Range name boosts
     for (proto, boost) in range_boost(range_name) {
         let entry = scores.entry(proto.to_string()).or_insert((
@@ -501,7 +504,7 @@ fn family_for(proto: &str) -> &'static str {
         "p25" | "dmr" | "p25_trunked" | "tetra" | "frs_gmrs" => "land_mobile",
         "pocsag" | "flex" => "paging",
         "ism_433" | "ism_915" => "ism",
-        "aprs" | "amateur_vhf" | "cw" | "rtty" | "sstv" => "amateur",
+        "aprs" | "amateur_vhf" | "amateur_uhf" | "cw" | "rtty" | "sstv" | "ssb_voice" | "fm_voice" | "digital_weak" => "amateur",
         "dtmf" => "signaling",
         _ => "unknown",
     }
@@ -518,14 +521,15 @@ fn decoder_for(proto: &str) -> &'static str {
         "goes_hrit" | "inmarsat" | "gps_l1" | "satellite" => "satdump",
         "iridium" => "iridiumlive",
         "pocsag" | "flex" | "dtmf" => "native_pocsag",
-        "aprs" => "direwolf",
+        "aprs" => "native_aprs",
+        "cw" => "native_cw",
+        "rtty" | "digital_weak" => "native_rtty",
+        "ssb_voice" | "fm_voice" | "amateur_uhf" => "none",
         "p25" | "dmr" | "p25_trunked" | "nxdn" | "dstar" | "ysf" | "m17" => "dsd-fme",
         "ism_433" | "ism_915" | "radiosonde" => "rtl_433",
         "hd_radio" => "nrsc5",
         "tetra" => "tetraear",
         "navtex" => "native_navtex",
-        "rtty" => "native_rtty",
-        "cw" => "native_cw",
         "sstv" => "native_sstv",
         "fm_broadcast" => "native_wfm_rds",
         "analog_nfm" | "frs_gmrs" | "marine_vhf" | "noaa_weather" => "native_nfm",
@@ -595,5 +599,16 @@ mod tests {
         assert!(c.sub_protocol == "fm_broadcast" || c.sub_protocol == "hd_radio");
         let has_wfm = c.candidates.iter().any(|x| x.decoder == "native_wfm_rds");
         assert!(has_wfm);
+    }
+
+    #[test]
+    fn arrl_forty_meter_voice_segment() {
+        let c = classify(7_150_000, 2_700, "lsb", "40m Amateur", 18.0, None);
+        assert!(
+            c.sub_protocol == "ssb_voice" || c.candidates.iter().any(|x| x.protocol == "ssb_voice"),
+            "expected ssb_voice candidate, got {:?}",
+            c.candidates.first().map(|x| x.protocol.clone())
+        );
+        assert_eq!(c.mode, "lsb");
     }
 }

@@ -95,6 +95,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/vfo/:id/mode", post(vfo_mode))
         .route("/vfo/:id/audio_agc", post(vfo_agc))
         .route("/vfo/:id/identify", post(vfo_identify))
+        .route("/vfo/:id/lock", post(vfo_lock))
+        .route("/vfo/:id/decode", post(vfo_decode))
         .route("/vfo/:id/rds", get(vfo_rds))
         // ── spectrum / signal-id ─────────────────────────────────────────
         .route("/spectrum", get(spectrum))
@@ -515,6 +517,7 @@ async fn scan_config(State(s): State<ApiState>) -> impl IntoResponse {
         "freq_step_hz": cfg.scanner.freq_step_hz,
         "auto_decode_all": cfg.scanner.auto_decode_all,
         "auto_decode_threshold": cfg.scanner.auto_decode_threshold,
+        "use_arrl_bandplan": cfg.scanner.use_arrl_bandplan,
     }))
 }
 
@@ -1472,6 +1475,114 @@ async fn vfo_diagnostics(State(s): State<ApiState>) -> impl IntoResponse {
     let vfos = s.0.scanner.read().as_ref().map(|h| h.state.lock().vfo_states.clone()).unwrap_or_default();
     Json(vfos.into_iter().map(|v| json!({"id": v.id, "frequency_hz": v.frequency_hz, "strength_db": v.strength_db, "audio_level_db": v.audio_level_db, "squelch_open": v.squelch_open, "muted": v.muted})).collect::<Vec<_>>())
 }
+#[derive(Deserialize)] struct VfoLockReq { locked: bool }
+async fn vfo_lock(State(s): State<ApiState>, Path(id): Path<u32>, Json(req): Json<VfoLockReq>) -> impl IntoResponse {
+    send_vfo(&s, crate::scanner::ScannerCommand::SetVfoLocked { id, locked: req.locked });
+    Json(json!({"ok": true, "id": id, "locked": req.locked}))
+}
+
+#[derive(Deserialize)] struct VfoDecodeReq { decoder: Option<String> }
+async fn vfo_decode(State(s): State<ApiState>, Path(id): Path<u32>, Json(req): Json<VfoDecodeReq>) -> impl IntoResponse {
+    let v = s.0.scanner.read().as_ref().and_then(|h| h.state.lock().vfo_states.iter().find(|v| v.id == id).cloned());
+    let Some(v) = v else {
+        return Json(json!({"ok": false, "error": "vfo not found"}));
+    };
+    let range_name = s.0.scanner.read().as_ref()
+        .and_then(|h| h.state.lock().active_range.clone())
+        .unwrap_or_default();
+    let channel_bw = s.0.config.read().scan_ranges.iter()
+        .find(|r| r.name == range_name)
+        .map(|r| r.channel_bw_hz)
+        .unwrap_or(12_500);
+    let cfg = s.0.config.read();
+    let use_arrl = cfg.scanner.use_arrl_bandplan;
+    let threshold = cfg.scanner.auto_decode_threshold;
+    let status = s.0.device.status();
+    let snr_db = if v.squelch_open { v.strength_db.max(12.0) } else { v.strength_db.max(6.0) };
+    let demod_mode = if use_arrl {
+        crate::arrl_bandplan::recommended_mode(v.frequency_hz, &v.mode)
+    } else {
+        v.mode.as_str()
+    };
+
+    if !status.connected {
+        return Json(json!({"ok": false, "error": "device not connected"}));
+    }
+    let count = ((status.sample_rate as f64) * 0.5) as usize;
+    let iq = match s.0.device.read_iq(count.max(8192)) {
+        Ok(samples) if samples.len() > 2048 => samples,
+        Ok(_) => return Json(json!({"ok": false, "error": "insufficient IQ capture"})),
+        Err(error) => return Json(json!({"ok": false, "error": error.to_string()})),
+    };
+
+    let timestamp_ms = crate::scanner::now_ms();
+    let mut messages = if let Some(decoder) = req.decoder.as_ref().filter(|d| !d.is_empty() && d != "none") {
+        let demod_rate = status.sample_rate.min(500_000).max(8_000);
+        let demod_audio = crate::auto_decode::extract_demod_audio(
+            &iq,
+            status.center_freq_hz,
+            v.frequency_hz,
+            status.sample_rate,
+            demod_rate,
+            demod_mode,
+        );
+        let classification = crate::signal_id::classify(
+            v.frequency_hz,
+            channel_bw,
+            demod_mode,
+            &range_name,
+            snr_db,
+            Some((&demod_audio, demod_rate as f32)),
+        );
+        let channel_iq = crate::auto_decode::extract_channel_iq(
+            &iq,
+            status.center_freq_hz,
+            v.frequency_hz,
+            status.sample_rate,
+            demod_mode,
+        );
+        crate::auto_decode::run_native_decoder(
+            decoder,
+            &channel_iq,
+            status.sample_rate,
+            &demod_audio,
+            demod_rate,
+            v.frequency_hz,
+            &classification,
+            timestamp_ms,
+        )
+    } else {
+        crate::auto_decode::try_decode_signal(
+            &iq,
+            status.center_freq_hz,
+            status.sample_rate,
+            v.frequency_hz,
+            channel_bw,
+            demod_mode,
+            &range_name,
+            snr_db,
+            threshold,
+            timestamp_ms,
+            use_arrl,
+        )
+    };
+
+    for msg in &messages {
+        let _ = s.0.db.insert_decoded_message(msg);
+        let _ = s.0.events.send(ScannerEvent::DecodedMessage(msg.clone()));
+    }
+
+    Json(json!({
+        "ok": true,
+        "vfo_id": id,
+        "frequency_hz": v.frequency_hz,
+        "mode": demod_mode,
+        "decoder": req.decoder,
+        "message_count": messages.len(),
+        "messages": messages,
+    }))
+}
+
 async fn vfo_identify(State(s): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
     let v = s.0.scanner.read().as_ref().and_then(|h| h.state.lock().vfo_states.iter().find(|v| v.id as i64 == id).cloned());
     let Some(v) = v else {
