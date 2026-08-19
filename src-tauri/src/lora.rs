@@ -756,7 +756,7 @@ fn meshcore_mac_ok(aes_key: &[u8; 16], mac: [u8; 2], ciphertext: &[u8]) -> bool 
 }
 
 fn aes128_ecb_crypt_blocks(key: &[u8; 16], data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
-    if data.is_empty() || data.len() % 16 != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(16) {
         return None;
     }
     let cipher = Aes128::new(key.into());
