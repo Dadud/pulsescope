@@ -56,6 +56,7 @@
   let filter = $state('');
   let messageSearch = $state('');
   let dockFilter = $state('all');
+  let logDockOpen = $state(true);
   let notice = $state('');
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
@@ -92,6 +93,7 @@
     if (!browser) return;
     waterfallGain = Math.max(0.25, Math.min(4, Number(localStorage.getItem('pulsescope.waterfall.gain') ?? 1)) || 1);
     waterfallPalette = localStorage.getItem('pulsescope.waterfall.palette') === 'mono' ? 'mono' : 'classic';
+    logDockOpen = localStorage.getItem('pulsescope.logdock.open') !== '0';
     const onSpectrum = (event: Event) => {
       const spectrum = (event as CustomEvent).detail;
       activeRange = spectrum?.range ?? activeRange;
@@ -222,6 +224,11 @@
   function setWaterfallPalette(event: Event) {
     waterfallPalette = (event.currentTarget as HTMLSelectElement).value === 'mono' ? 'mono' : 'classic';
     localStorage.setItem('pulsescope.waterfall.palette', waterfallPalette);
+  }
+
+  function toggleLogDock() {
+    logDockOpen = !logDockOpen;
+    localStorage.setItem('pulsescope.logdock.open', logDockOpen ? '1' : '0');
   }
 
   function drawSpectrum() {
@@ -434,7 +441,10 @@
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● {connected ? 'PWR' : 'OFF'}</span>
         <span class="status-pill" class:on={scanRunning}>● {scanRunning ? 'SCANNING' : 'IDLE'}</span>
-        <a href="#/settings" class="settings-link">⚙ Settings</a>
+        <button type="button" class="dock-toggle" class:on={logDockOpen} onclick={toggleLogDock}>
+          {logDockOpen ? '▼' : '▲'} Messages
+        </button>
+        <a href="#/messages" class="full-log-link">Full log →</a>
       </div>
     </div>
     <div class="device-strip card">
@@ -516,6 +526,7 @@
   </section>
 
   <!-- Message log -->
+  {#if logDockOpen}
   <aside class="log card">
     <div class="dock-tabs">
       <button class="dock-tab" class:active={dockFilter === 'all'} onclick={() => (dockFilter = 'all')}>All <b>{messages.length}</b></button>
@@ -540,13 +551,14 @@
       {/each}
     </div>
   </aside>
+  {/if}
 </div>
 
 <style>
   .scanner-layout {
     display: grid;
-    grid-template-columns: 260px 1fr;
-    grid-template-rows: minmax(0, 1fr) 140px;
+    grid-template-columns: 240px 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
     gap: 8px;
     height: 100%;
     padding: 8px;
@@ -582,7 +594,22 @@
   .quick { padding: 4px 7px; font-size: 11px; border-radius: 3px; }
   .status-pill { color: var(--fg-dim); font: 10px var(--mono); }
   .status-pill.on { color: var(--ok); }
-  .settings-link { color: var(--fg); text-decoration: none; font-size: 12px; border-left: 1px solid var(--line-strong); padding-left: 8px; }
+  .dock-toggle {
+    font: 10px var(--mono);
+    padding: 3px 8px;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--fg-dim);
+  }
+  .dock-toggle.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+  .full-log-link {
+    color: var(--fg-dim);
+    text-decoration: none;
+    font-size: 11px;
+    border-left: 1px solid var(--line-strong);
+    padding-left: 8px;
+  }
+  .full-log-link:hover { color: var(--accent); }
 
   .center { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; padding-right: 2px; }
   .device-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 12px; font-size: 13px; }
@@ -632,7 +659,7 @@
   .meter-fill { height: 100%; background: linear-gradient(90deg, var(--ok), var(--warn), var(--danger)); transition: width 0.1s; }
   .strength-val { font-family: var(--mono); font-size: 10px; color: var(--fg-dim); width: 48px; text-align: right; }
 
-  .log { grid-column: 1 / -1; min-height: 0; padding: 0; overflow: hidden; border-radius: 4px; }
+  .log { grid-column: 1 / -1; min-height: 0; max-height: 200px; padding: 0; overflow: hidden; border-radius: 4px; }
   .dock-tabs { display: flex; align-items: center; gap: 3px; padding: 4px 8px; background: #13294b; border-bottom: 1px solid var(--line-strong); }
   .dock-tab { border: 0; background: transparent; color: var(--fg-dim); padding: 4px 9px; font-size: 11px; border-radius: 3px; }
   .dock-tab.active { color: var(--fg); background: var(--bg-elev-2); }
@@ -659,17 +686,17 @@
     .waterfall-head { flex-wrap:wrap; }
     .waterfall-head h2 { min-width:180px; }
     .vfo-grid { grid-template-columns:1fr; }
-    .signal-history { display:none; }
-    .log { display:none; }
+    .signal-history { max-height: 140px; }
+    .log { max-height: 180px; }
   }
 
-  /* Short laptop / WebView windows: live RF controls beat an empty log dock. */
+  /* Short laptop / WebView windows: keep RF controls primary; message dock is toggleable. */
   @media (max-height: 850px) {
-    .scanner-layout { grid-template-rows: minmax(0, 1fr); }
-    .log { display: none; }
-    .spectrum-wrap { min-height: 230px; }
-    .spectrum-wrap canvas, .spectrum-wrap canvas.waterfall { height: 80px; }
+    .scanner-layout { grid-template-rows: minmax(0, 1fr) auto; }
+    .log { max-height: 150px; }
+    .spectrum-wrap { min-height: 210px; }
+    .spectrum-wrap canvas, .spectrum-wrap canvas.waterfall { height: 72px; }
     .vfo-tile { padding: 8px; }
-    .signal-history { display: none; }
+    .signal-history { max-height: 120px; }
   }
 </style>

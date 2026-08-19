@@ -17,6 +17,7 @@
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   --mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --sidebar-width: 220px;
 }
 
 * { box-sizing: border-box; }
@@ -29,45 +30,6 @@ body {
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
 }
-
-.app-shell {
-  display: grid;
-  grid-template-rows: 48px 1fr;
-  height: 100vh;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 0 16px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--line);
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--accent);
-}
-.wordmark { font-weight: 600; letter-spacing: 0.02em; color: var(--fg); }
-.nav-links {
-  list-style: none;
-  display: flex;
-  gap: 8px;
-  padding: 0;
-  margin: 0;
-}
-.nav-links a {
-  color: var(--fg-dim);
-  text-decoration: none;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-}
-.nav-links a:hover { background: var(--bg-elev-2); color: var(--fg); }
-
-.content { overflow: hidden; }
 
 button {
   font-family: inherit;
@@ -103,20 +65,33 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 }
 .card h2 { margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-dim); }
 
+/* Shared page shell for secondary routes */
+.page-shell {
+  padding: 16px 20px;
+  max-width: 1100px;
+  margin: 0 auto;
+  height: 100%;
+  overflow-y: auto;
+}
+.page-shell h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 600;
+}
+.page-shell .page-lead {
+  margin: 0 0 16px;
+  color: var(--fg-dim);
+  font-size: 13px;
+  max-width: 640px;
+}
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
 
-/* Phone/tablet shell: navigation stays reachable without crushing the RF UI. */
 @media (max-width: 760px) {
-  .app-shell { grid-template-rows: 48px minmax(0, 1fr); }
-  .topbar { gap: 10px; padding: 0 10px; overflow-x: auto; white-space: nowrap; }
-  .brand svg { width: 22px; height: 22px; }
-  .wordmark { font-size: 13px; }
-  .nav-links { gap: 2px; }
-  .nav-links a { display: block; padding: 6px 8px; font-size: 12px; }
-  .content { overflow: auto; }
+  .page-shell { padding: 12px; }
   .card { padding: 9px; border-radius: 6px; }
   button, input, select { min-height: 36px; }
 }
