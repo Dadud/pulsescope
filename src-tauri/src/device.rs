@@ -495,7 +495,7 @@ mod soapy {
         pub fn capabilities(&self) -> DeviceCapabilities {
             unsafe {
                 let mut c = DeviceCapabilities {
-                    contract_version: 1,
+                    contract_version: 2,
                     connected: true,
                     stream_mtu: self.stream_mtu,
                     sample_formats: vec!["CF32".into()],
@@ -1043,6 +1043,13 @@ impl DeviceLayer {
     }
 
     pub fn set_frequency(&self, freq: u64) -> anyhow::Result<()> {
+        let caps = self.capabilities();
+        if !Self::frequency_in_range(&caps, freq) {
+            return Err(anyhow::anyhow!(
+                "frequency {} Hz is outside supported RF ranges",
+                freq
+            ));
+        }
         #[cfg(feature = "soapysdr")]
         if let Some(hardware) = self.hardware.lock().as_mut() {
             hardware.set_frequency(freq)?;
@@ -1050,6 +1057,16 @@ impl DeviceLayer {
         self.state.lock().center_freq_hz = freq;
         self.counters.retunes.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    pub fn frequency_in_range(capabilities: &DeviceCapabilities, freq: u64) -> bool {
+        if capabilities.rf_ranges_hz.is_empty() {
+            return true;
+        }
+        capabilities
+            .rf_ranges_hz
+            .iter()
+            .any(|range| freq >= range.minimum as u64 && freq <= range.maximum as u64)
     }
 
     pub fn set_sample_rate(&self, rate: u32) -> anyhow::Result<()> {
@@ -1077,7 +1094,12 @@ impl DeviceLayer {
                 (candidate > 0.0 && candidate <= rate as f64).then_some(candidate as u32)
             })
             .max()
-            .unwrap_or(rate);
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no analog bandwidth range supports sample rate {} Hz",
+                    rate
+                )
+            })?;
         self.set_bandwidth(bandwidth)?;
         Ok(bandwidth)
     }
@@ -1095,12 +1117,19 @@ impl DeviceLayer {
     }
 
     pub fn set_gain(&self, gain: String) -> anyhow::Result<()> {
-        #[cfg(feature = "soapysdr")]
-        if let Ok(value) = gain.parse::<f64>() {
-            if let Some(hardware) = self.hardware.lock().as_mut() {
-                hardware.set_gain(value)?;
-            }
+        if gain.eq_ignore_ascii_case("auto") {
+            self.state.lock().gain = gain;
+            return Ok(());
         }
+        let value = gain
+            .parse::<f64>()
+            .map_err(|_| anyhow::anyhow!("gain must be numeric dB or 'auto'"))?;
+        #[cfg(feature = "soapysdr")]
+        if let Some(hardware) = self.hardware.lock().as_mut() {
+            hardware.set_gain(value)?;
+        }
+        #[cfg(not(feature = "soapysdr"))]
+        let _ = value;
         self.state.lock().gain = gain;
         Ok(())
     }
@@ -1110,7 +1139,7 @@ impl DeviceLayer {
         #[cfg(feature = "soapysdr")]
         if let Some(hardware) = self.hardware.lock().as_ref() {
             let mut capabilities = hardware.capabilities();
-            capabilities.contract_version = 1;
+            capabilities.contract_version = 2;
             capabilities.connected = status.connected;
             capabilities.total_bandwidth_hz = status.bandwidth_hz;
             capabilities.usable_bandwidth_hz = status
@@ -1125,7 +1154,7 @@ impl DeviceLayer {
             return capabilities;
         }
         DeviceCapabilities {
-            contract_version: 1,
+            contract_version: 2,
             identity: self.identity(&status),
             connected: status.connected,
             rf_ranges_hz: vec![NumericRange {
@@ -1309,7 +1338,7 @@ mod contract_tests {
         let device = DeviceLayer::new_mock();
         device.connect("driver=mock").unwrap();
         let capabilities = device.capabilities();
-        assert_eq!(capabilities.contract_version, 1);
+        assert_eq!(capabilities.contract_version, 2);
         assert_eq!(capabilities.identity.connection, "virtual");
         assert!(capabilities.stream_mtu >= 512);
         assert!(capabilities.usable_bandwidth_hz < capabilities.total_bandwidth_hz);

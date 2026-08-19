@@ -19,16 +19,21 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn parse(value: &str) -> Self {
+    pub fn try_parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
-            "am" => Self::Am,
-            "sam" => Self::Sam,
-            "wfm" => Self::Wfm,
-            "usb" => Self::Usb,
-            "lsb" => Self::Lsb,
-            "cw" => Self::Cw,
-            _ => Self::Nfm,
+            "am" => Some(Self::Am),
+            "sam" => Some(Self::Sam),
+            "wfm" => Some(Self::Wfm),
+            "usb" => Some(Self::Usb),
+            "lsb" => Some(Self::Lsb),
+            "cw" => Some(Self::Cw),
+            "nfm" => Some(Self::Nfm),
+            _ => None,
         }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        Self::try_parse(value).unwrap_or(Self::Nfm)
     }
 }
 
@@ -673,19 +678,17 @@ pub fn decode_cw(samples: &[f32], sample_rate: f32, target_tone_hz: f32) -> Opti
             } else {
                 current_pattern.push('.');
             }
-        } else {
-            if *count >= dit_blocks * 7 / 2 {
-                if let Some(c) = morse_decode(&current_pattern) {
-                    text.push(c);
-                }
-                text.push(' ');
-                current_pattern.clear();
-            } else if *count >= dit_blocks * 5 / 2 {
-                if let Some(c) = morse_decode(&current_pattern) {
-                    text.push(c);
-                }
-                current_pattern.clear();
+        } else if *count >= dit_blocks * 7 / 2 {
+            if let Some(c) = morse_decode(&current_pattern) {
+                text.push(c);
             }
+            text.push(' ');
+            current_pattern.clear();
+        } else if *count >= dit_blocks * 5 / 2 {
+            if let Some(c) = morse_decode(&current_pattern) {
+                text.push(c);
+            }
+            current_pattern.clear();
         }
     }
     if !current_pattern.is_empty() {

@@ -22,6 +22,7 @@ pub mod device;
 pub mod hd_radio;
 pub mod lora;
 pub mod operations;
+pub mod paths;
 pub mod pocsag;
 pub mod protocols;
 pub mod scanner;

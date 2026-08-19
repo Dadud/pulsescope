@@ -165,9 +165,9 @@ impl SidecarRegistry {
             .kill_on_drop(true);
 
         let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().expect("stdin");
-        let stdout = child.stdout.take().expect("stdout");
-        let stderr = child.stderr.take().expect("stderr");
+        let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("stdin pipe missing"))?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("stdout pipe missing"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("stderr pipe missing"))?;
         let protocol = name.to_string();
 
         let stdout = tokio::io::BufReader::new(stdout);

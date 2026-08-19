@@ -483,16 +483,59 @@ async fn auth_gate(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let query = req
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
-        .unwrap_or("");
-    if header == format!("Bearer {expected}") || query == expected {
+  // Query tokens leak into logs and Referer; HTTP uses Bearer only.
+    if header == format!("Bearer {expected}") {
         Ok(next.run(req).await)
     } else {
         Err(axum::http::StatusCode::UNAUTHORIZED)
     }
+}
+
+fn flush_receiver_buffers(s: &ApiState) {
+    if let Some(handle) = s.0.scanner.read().as_ref() {
+        handle.flush_iq();
+    }
+    s.0.audio.clear_queue();
+}
+
+fn hardware_tune_allowed(s: &ApiState) -> Result<(), (StatusCode, Json<Value>)> {
+    let session = s.0.receiver_session.lock();
+    match session.owner.as_deref() {
+        None | Some("scanner") => Ok(()),
+        Some(owner) => Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": format!("receiver is held by {owner}"), "session": session.clone()}),
+            ),
+        )),
+    }
+}
+
+fn hardware_reconfigure_allowed(
+    s: &ApiState,
+    actor: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let session = s.0.receiver_session.lock();
+    match session.owner.as_deref() {
+        None => Ok(()),
+        Some(owner) if owner == actor => Ok(()),
+        Some(owner) => Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": format!("receiver is held by {owner}"), "session": session.clone()}),
+            ),
+        )),
+    }
+}
+
+fn network_export_allowed(s: &ApiState) -> Result<(), (StatusCode, Json<Value>)> {
+    if s.0.config.read().streaming.network_export_enabled {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({"error":"network export is disabled; set streaming.network_export_enabled in expert settings"})),
+    ))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────
@@ -879,7 +922,9 @@ fn cached_command(s: &ApiState, command_id: &str) -> Option<Value> {
 fn remember_command(s: &ApiState, command_id: String, result: Value) {
     let mut commands = s.0.command_results.lock();
     if commands.len() >= 1024 {
-        commands.clear();
+        if let Some(key) = commands.keys().next().cloned() {
+            commands.remove(&key);
+        }
     }
     commands.insert(command_id, result);
 }
@@ -910,8 +955,12 @@ async fn receiver_tune_v2(
     if req.expected_revision != revision {
         return (StatusCode::CONFLICT, Json(json!({"error":"stale revision","expected":revision,"received":req.expected_revision}))).into_response();
     }
+    if let Err(response) = hardware_tune_allowed(&s) {
+        return response.into_response();
+    }
     let result = match s.0.device.set_frequency(req.frequency_hz) {
         Ok(()) => {
+            flush_receiver_buffers(&s);
             follow_manual_retune(&s, s.0.device.status().center_freq_hz);
             json!({"ok":true,"command_id":req.command_id,"receiver_id":id,"actual_frequency_hz":s.0.device.status().center_freq_hz,"revision":revision})
         }
@@ -1604,6 +1653,15 @@ async fn get_settings(State(s): State<ApiState>) -> impl IntoResponse {
 
 async fn put_settings(State(s): State<ApiState>, Json(patch): Json<Value>) -> impl IntoResponse {
     if let Ok(updated) = serde_json::from_value::<crate::config::Config>(patch.clone()) {
+        let current = s.0.config.read().clone();
+        if !updated.decoder_launch_fields_equal(&current)
+            && !crate::config::Config::admin_settings_allowed()
+        {
+            return Json(json!({
+                "ok": false,
+                "error": "decoder executable paths require PULSESCOPE_ADMIN_SETTINGS=1"
+            }));
+        }
         *s.0.config.write() = updated.clone();
         let _ = updated.save(&s.0.data_dir);
         return Json(json!({"ok": true}));
@@ -1644,8 +1702,11 @@ async fn device_connect(
     State(s): State<ApiState>,
     Json(req): Json<DevKeyReq>,
 ) -> impl IntoResponse {
+    if let Err(response) = hardware_reconfigure_allowed(&s, "device-connect") {
+        return response.into_response();
+    }
     if let Err(e) = s.0.device.connect(&req.key) {
-        return Json(json!({"ok": false, "error": e.to_string()}));
+        return Json(json!({"ok": false, "error": e.to_string()})).into_response();
     }
     let mut cfg = s.0.config.write();
     cfg.device.last_device_key = req.key;
@@ -1653,7 +1714,7 @@ async fn device_connect(
     let _ = cfg.save(&s.0.data_dir);
     drop(cfg);
     s.0.start_default_monitor();
-    Json(json!({"ok": true, "status": s.0.device.status()}))
+    Json(json!({"ok": true, "status": s.0.device.status()})).into_response()
 }
 
 async fn device_disconnect(State(s): State<ApiState>) -> impl IntoResponse {
@@ -1662,7 +1723,29 @@ async fn device_disconnect(State(s): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn device_status(State(s): State<ApiState>) -> impl IntoResponse {
-    Json(serde_json::to_value(s.0.device.status()).unwrap())
+    let status = s.0.device.status();
+    let usable_span_hz = status.bandwidth_hz.min(status.sample_rate);
+    let input_source = if status.driver == "mock" {
+        "mock"
+    } else {
+        "hardware"
+    };
+  Json(json!({
+        "connected": status.connected,
+        "lifecycle": status.lifecycle,
+        "driver": status.driver,
+        "label": status.label,
+        "sample_rate": status.sample_rate,
+        "bandwidth_hz": status.bandwidth_hz,
+        "usable_span_hz": usable_span_hz,
+        "center_freq_hz": status.center_freq_hz,
+        "ppm_correction": status.ppm_correction,
+        "gain": status.gain,
+        "bias_tee_on": status.bias_tee_on,
+        "saturation": status.saturation,
+        "stream": status.stream,
+        "input_source": input_source,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1742,28 +1825,27 @@ async fn device_frequency(
     State(s): State<ApiState>,
     Json(req): Json<FreqReq>,
 ) -> impl IntoResponse {
+    if let Err(response) = hardware_tune_allowed(&s) {
+        return response.into_response();
+    }
     if let Some(handle) = s.0.scanner.read().as_ref() {
         handle.state.lock().scan_locked = true;
     }
     match s.0.device.set_frequency(req.frequency_hz) {
         Ok(()) => {
-            // A center-frequency change alters the meaning of every buffered
-            // IQ sample. Keep the receiver task alive, but atomically discard
-            // samples and audio captured under the previous RF window.
-            if let Some(handle) = s.0.scanner.read().as_ref() {
-                handle.flush_iq();
-            }
-            s.0.audio.clear_queue();
+            flush_receiver_buffers(&s);
             follow_manual_retune(&s, s.0.device.status().center_freq_hz);
             (
                 StatusCode::OK,
                 Json(json!({"ok": true, "status": s.0.device.status()})),
             )
+                .into_response()
         }
         Err(error) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "error": error.to_string(), "status": s.0.device.status()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -1775,6 +1857,9 @@ async fn device_sample_rate(
     State(s): State<ApiState>,
     Json(req): Json<SrReq>,
 ) -> impl IntoResponse {
+    if let Err(response) = hardware_reconfigure_allowed(&s, "sample-rate") {
+        return response.into_response();
+    }
     match s.0.device.set_sample_contract(req.sample_rate) {
         Ok(bandwidth_hz) => {
             {
@@ -1792,11 +1877,13 @@ async fn device_sample_rate(
                     json!({"ok":true,"bandwidth_hz":bandwidth_hz,"status":s.0.device.status(),"capabilities":s.0.device.capabilities()}),
                 ),
             )
+                .into_response()
         }
         Err(error) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok":false,"error":error.to_string(),"status":s.0.device.status()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -1957,9 +2044,10 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
         s.0.audio.clear_queue();
         configure_ham_decoders(&s, &range);
         start_configured_sidecars(&s).await;
-        let _ = handle
-            .cmd_tx
-            .send(crate::scanner::ScannerCommand::Start { range, cycle });
+        crate::scanner::send_command(
+            &handle.cmd_tx,
+            crate::scanner::ScannerCommand::Start { range, cycle },
+        );
         return Json(json!({"ok": true}));
     }
     let cfg = s.0.config.read().scanner.clone();
@@ -1979,10 +2067,13 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     let handle = crate::scanner::ScannerHandle::spawn(cfg, dependencies);
     *s.0.scanner.write() = Some(handle);
     if let Some(handle) = s.0.scanner.read().as_ref() {
-        let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start {
-            range: range.clone(),
-            cycle,
-        });
+        crate::scanner::send_command(
+            &handle.cmd_tx,
+            crate::scanner::ScannerCommand::Start {
+                range: range.clone(),
+                cycle,
+            },
+        );
     }
     configure_ham_decoders(&s, &range);
     start_configured_sidecars(&s).await;
@@ -2088,118 +2179,7 @@ async fn start_configured_sidecars(s: &ApiState) {
         )
         .await;
 
-    let mut jobs: Vec<(&str, String, Vec<String>)> = Vec::new();
-    if cfg.rtl433.enabled && !s.0.sidecars.is_running("rtl_433") {
-        let device = s.0.device.status();
-        let mut args = vec![
-            "-r".into(),
-            "-".into(),
-            "-s".into(),
-            device.sample_rate.to_string(),
-            "-f".into(),
-            device.center_freq_hz.to_string(),
-            "-F".into(),
-            "json".into(),
-        ];
-        if !cfg.rtl433.extra_args.trim().is_empty() {
-            args.extend(cfg.rtl433.extra_args.split_whitespace().map(str::to_string));
-        }
-        jobs.push(("rtl_433", cfg.rtl433.path, args));
-    }
-    if cfg.digital_decoder.enabled && !s.0.sidecars.is_running("multimon-ng") {
-        let mut args = vec!["-t".into(), "raw".into(), "-q".into()];
-        for protocol in &cfg.digital_decoder.enabled_protocols {
-            args.push("-a".into());
-            args.push(protocol.clone());
-        }
-        jobs.push(("multimon-ng", cfg.digital_decoder.multimon_path, args));
-    }
-    if cfg.aprs.enabled && !s.0.sidecars.is_running("direwolf") {
-        jobs.push((
-            "direwolf",
-            cfg.aprs.path,
-            vec![
-                "-n".into(),
-                "1".into(),
-                "-r".into(),
-                "48000".into(),
-                "-b".into(),
-                "16".into(),
-                "-t".into(),
-                "0".into(),
-                "-".into(),
-            ],
-        ));
-    }
-    if cfg.dsd.enabled && !s.0.sidecars.is_running("dsd-fme") {
-        let null_out = if cfg!(windows) { "nul" } else { "/dev/null" };
-        jobs.push((
-            "dsd-fme",
-            cfg.dsd.dsdneo_path,
-            vec![
-                "-fa".into(),
-                "-i".into(),
-                "-".into(),
-                "-n".into(),
-                "-o".into(),
-                null_out.into(),
-            ],
-        ));
-    }
-    if cfg.dump978.enabled && !s.0.sidecars.is_running("dump978") {
-        let mut args = cfg.dump978.extra_args.clone();
-        if args.is_empty() {
-            args.push("--raw-stdin".into());
-        }
-        jobs.push(("dump978", cfg.dump978.path, args));
-    }
-    if cfg.radiosonde.enabled && !s.0.sidecars.is_running("rs41mod") {
-        jobs.push(("rs41mod", cfg.radiosonde.path, Vec::new()));
-    }
-    if cfg.hd_radio.enabled && !s.0.sidecars.is_running("nrsc5") {
-        if let Some(path) = crate::hd_radio::find_nrsc5() {
-            let freq = s.0.device.status().center_freq_hz.max(87_900_000);
-            jobs.push((
-                "nrsc5",
-                path.display().to_string(),
-                crate::hd_radio::nrsc5_stdin_args(freq, cfg.hd_radio.program),
-            ));
-        }
-    }
-
-    for (name, path, args) in jobs {
-        if path.trim().is_empty() || s.0.sidecars.is_running(name) {
-            continue;
-        }
-        if !sidecar_path_usable(&path) {
-            tracing::warn!(sidecar = name, path = %path, "decoder executable is not a usable file");
-            continue;
-        }
-        match s
-            .0
-            .sidecars
-            .spawn_decoder(
-                name,
-                std::path::PathBuf::from(path),
-                args,
-                s.0.db.clone(),
-                s.0.events.clone(),
-            )
-            .await
-        {
-            Ok(()) => tracing::info!(sidecar = name, "decoder started"),
-            Err(e) => tracing::warn!(sidecar = name, error = %e, "decoder failed to start"),
-        }
-    }
-}
-
-fn sidecar_path_usable(path: &str) -> bool {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let candidate = std::path::Path::new(trimmed);
-    candidate.is_file() || which::which(trimmed).is_ok()
+    tracing::debug!("manifest decoder sync complete for configured sidecars");
 }
 
 async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
@@ -2208,7 +2188,7 @@ async fn scan_stop(State(s): State<ApiState>) -> Json<Value> {
         guard.as_ref().map(|h| h.cmd_tx.clone())
     };
     if let Some(cmd_tx) = cmd {
-        let _ = cmd_tx.send(crate::scanner::ScannerCommand::Stop);
+        crate::scanner::send_command(&cmd_tx, crate::scanner::ScannerCommand::Stop);
     }
     s.0.audio.clear_queue();
     stop_ham_decoders(&s);
@@ -3283,24 +3263,26 @@ async fn scan_lock(State(s): State<ApiState>) -> impl IntoResponse {
 }
 async fn scan_unlock(State(s): State<ApiState>) -> impl IntoResponse {
     if let Some(h) = s.0.scanner.read().as_ref() {
-        let _ = h.cmd_tx.send(crate::scanner::ScannerCommand::Resume);
+        crate::scanner::send_command(&h.cmd_tx, crate::scanner::ScannerCommand::Resume);
     }
     Json(json!({"ok":true,"locked":false}))
 }
 async fn scan_skip(State(s): State<ApiState>) -> impl IntoResponse {
     if let Some(h) = s.0.scanner.read().as_ref() {
-        let _ = h
-            .cmd_tx
-            .send(crate::scanner::ScannerCommand::Skip { temporary: true });
+        crate::scanner::send_command(
+            &h.cmd_tx,
+            crate::scanner::ScannerCommand::Skip { temporary: true },
+        );
         return Json(json!({"ok":true,"temporary":true}));
     }
     Json(json!({"ok":false,"error":"scanner is not running"}))
 }
 async fn scan_lockout(State(s): State<ApiState>) -> impl IntoResponse {
     if let Some(h) = s.0.scanner.read().as_ref() {
-        let _ = h
-            .cmd_tx
-            .send(crate::scanner::ScannerCommand::Skip { temporary: false });
+        crate::scanner::send_command(
+            &h.cmd_tx,
+            crate::scanner::ScannerCommand::Skip { temporary: false },
+        );
         return Json(json!({"ok":true,"temporary":false}));
     }
     Json(json!({"ok":false,"error":"scanner is not running"}))
@@ -3801,10 +3783,13 @@ async fn rec_iq_start(
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Json(json!({"ok": false, "error": e.to_string()}));
     }
-    let path = req
-        .path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| dir.join(format!("iq-{}.cf32", crate::scanner::now_ms())));
+    let path = match req.path {
+        Some(user_path) => match crate::paths::resolve_under(&dir, &user_path) {
+            Ok(path) => path,
+            Err(error) => return Json(json!({"ok": false, "error": error.to_string()})),
+        },
+        None => dir.join(format!("iq-{}.cf32", crate::scanner::now_ms())),
+    };
     match std::fs::File::create(&path) {
         Ok(file) => {
             let mut rec = s.0.recording.lock();
@@ -3992,12 +3977,19 @@ async fn iq_network_start(
     State(s): State<ApiState>,
     Json(req): Json<IqNetworkReq>,
 ) -> impl IntoResponse {
+    if let Err(response) = network_export_allowed(&s) {
+        return response.into_response();
+    }
+    if let Err(response) = hardware_reconfigure_allowed(&s, "iq-network") {
+        return response.into_response();
+    }
     match req.target.parse::<SocketAddr>() {
         Ok(target) => match s.0.iq_network.start(target) {
-            Ok(()) => Json(json!({"ok":true,"status":s.0.iq_network.status()})),
-            Err(e) => Json(json!({"ok":false,"error":e.to_string()})),
+            Ok(()) => Json(json!({"ok":true,"status":s.0.iq_network.status()})).into_response(),
+            Err(e) => Json(json!({"ok":false,"error":e.to_string()})).into_response(),
         },
-        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")})),
+        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")}))
+            .into_response(),
     }
 }
 async fn iq_network_stop(State(s): State<ApiState>) -> impl IntoResponse {
@@ -4016,12 +4008,19 @@ async fn audio_network_start(
     State(s): State<ApiState>,
     Json(req): Json<AudioNetworkReq>,
 ) -> impl IntoResponse {
+    if let Err(response) = network_export_allowed(&s) {
+        return response.into_response();
+    }
+    if let Err(response) = hardware_reconfigure_allowed(&s, "audio-network") {
+        return response.into_response();
+    }
     match req.target.parse::<SocketAddr>() {
         Ok(target) => match s.0.audio.start_network(target) {
-            Ok(()) => Json(json!({"ok":true,"status":s.0.audio.network_status()})),
-            Err(e) => Json(json!({"ok":false,"error":e.to_string()})),
+            Ok(()) => Json(json!({"ok":true,"status":s.0.audio.network_status()})).into_response(),
+            Err(e) => Json(json!({"ok":false,"error":e.to_string()})).into_response(),
         },
-        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")})),
+        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")}))
+            .into_response(),
     }
 }
 async fn audio_network_stop(State(s): State<ApiState>) -> impl IntoResponse {
@@ -4156,12 +4155,24 @@ async fn playback_start(
             Json(json!({"error":"path is required"})),
         );
     };
-    match crate::capture::PlaybackReader::open(std::path::PathBuf::from(&path)) {
+    let recordings_root = s.0.data_dir.join("recordings");
+    let resolved = match crate::paths::resolve_under(&recordings_root, &path) {
+        Ok(path) => path,
+        Err(error) => {
+            s.0.receiver_session.lock().release("playback");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok":false,"error":error.to_string()})),
+            );
+        }
+    };
+    let display_path = resolved.to_string_lossy().to_string();
+    match crate::capture::PlaybackReader::open(resolved) {
         Ok(reader) => {
             *s.0.playback.lock() = Some(reader);
             (
                 StatusCode::OK,
-                Json(json!({"ok":true,"path":path,"format":"cf32-le"})),
+                Json(json!({"ok":true,"path":display_path,"format":"cf32-le"})),
             )
         }
         Err(error) => {
@@ -4633,7 +4644,7 @@ async fn reconnect(State(s): State<ApiState>) -> impl IntoResponse {
 }
 async fn close_session(State(s): State<ApiState>) -> impl IntoResponse {
     if let Some(h) = s.0.scanner.read().as_ref() {
-        let _ = h.cmd_tx.send(crate::scanner::ScannerCommand::Stop);
+        crate::scanner::send_command(&h.cmd_tx, crate::scanner::ScannerCommand::Stop);
     }
     let _ = s.0.device.disconnect();
     Json(json!({"ok":true,"status":s.0.device.status()}))
@@ -4810,11 +4821,12 @@ async fn channel_bank_scan_config_put(
         if let Some(scanner) = s.0.scanner.read().as_ref() {
             let active = scanner.state.lock().active_range.clone();
             if active.as_deref() == Some(name) {
-                let _ = scanner
-                    .cmd_tx
-                    .send(crate::scanner::ScannerCommand::SetRangeSquelch {
+                crate::scanner::send_command(
+                    &scanner.cmd_tx,
+                    crate::scanner::ScannerCommand::SetRangeSquelch {
                         squelch_db: out.squelch_db,
-                    });
+                    },
+                );
             }
         }
     }
@@ -5226,7 +5238,7 @@ async fn ws_pump(socket: WebSocket, tx: tokio::sync::broadcast::Sender<ScannerEv
 
 fn send_vfo(s: &ApiState, cmd: crate::scanner::ScannerCommand) {
     if let Some(h) = s.0.scanner.read().as_ref() {
-        let _ = h.cmd_tx.send(cmd);
+        crate::scanner::send_command(&h.cmd_tx, cmd);
     }
 }
 

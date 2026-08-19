@@ -43,6 +43,7 @@
   let centerFreqHz = $state(0);
   let sampleRateHz = $state(1);
   let appliedBandwidthHz = $state(0);
+  let usableSpanHz = $state(0);
   let filter = $state('');
   let messageSearch = $state('');
   let dockFilter = $state('all');
@@ -72,7 +73,6 @@
   let displayConfig = $state<SpectrumDisplayConfig>(loadSpectrumDisplayConfig());
   let rfPanelOpen = $state(true);
   let rfControlBusy = $state(false);
-  let initialLoadInFlight = false;
   let browserAudio: BrowserAudio | null = null;
   let audioState: BrowserAudioState = $state('off');
   let audioGesturePending = false;
@@ -108,6 +108,12 @@
   let overviewPointerId: number | null = null;
   let listenerSessionId = '';
   let listenerSessionRevision = 0;
+  let receiverRevision = $state(0);
+  let listenerSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  let spectrumRafId: number | null = null;
+  let viewRafId: number | null = null;
+  let spectrumResizeObserver: ResizeObserver | null = null;
+  let pageMounted = false;
   let banksCollapsed = $state(false);
   let logExpanded = $state(false);
   let showShortcuts = $state(false);
@@ -131,7 +137,16 @@
   // Viewport geometry follows the confirmed center: it describes the window the
   // FFT bins on screen actually cover. A pending retune must not relabel frames
   // that were captured before the radio moved.
-  const captureSpanHz = $derived(Math.max(1, sampleRateHz));
+  const captureSpanHz = $derived(
+    Math.max(
+      1,
+      usableSpanHz > 0
+        ? usableSpanHz
+        : appliedBandwidthHz > 0
+          ? Math.min(appliedBandwidthHz, sampleRateHz)
+          : sampleRateHz,
+    ),
+  );
   const viewport = $derived(
     clampViewport(
       { centerHz: viewCenterRequestHz, spanHz: viewSpanRequestHz },
@@ -355,11 +370,21 @@
     };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('keydown', handleGlobalKeydown);
+    pageMounted = true;
     void (async () => {
       await loadInitial();
       connectEvents();
     })();
     return () => {
+      pageMounted = false;
+      if (spectrumRafId !== null) cancelAnimationFrame(spectrumRafId);
+      if (viewRafId !== null) cancelAnimationFrame(viewRafId);
+      spectrumRafId = null;
+      viewRafId = null;
+      if (listenerSyncTimer) window.clearTimeout(listenerSyncTimer);
+      listenerSyncTimer = null;
+      spectrumResizeObserver?.disconnect();
+      spectrumResizeObserver = null;
       window.removeEventListener('pulsescope:spectrum', onSpectrum);
       window.removeEventListener('pulsescope:runtime', onRuntime);
       window.removeEventListener('pulsescope:poll-error', onPollError);
@@ -460,6 +485,16 @@
   }
 
   function applyStreamSpectrum(frame: SpectrumStreamFrame) {
+    if (frame.sessionRevision > 0 && frame.sessionRevision < receiverRevision) {
+      droppedSpectrumFrames += 1;
+      return;
+    }
+    if (frame.sessionRevision > receiverRevision) {
+      receiverRevision = frame.sessionRevision;
+      clearWaterfallHistory();
+      peakHold.reset();
+      notice = 'Receiver session changed; spectrum state reset';
+    }
     if (lastSpectrumSequence > 0 && frame.sequence > lastSpectrumSequence + 1) {
       droppedSpectrumFrames += frame.sequence - lastSpectrumSequence - 1;
     }
@@ -468,6 +503,7 @@
     nowMs = lastSpectrumAt;
     centerFreqHz = frame.centerFreqHz;
     sampleRateHz = frame.sampleRateHz;
+    if (frame.usableSpanHz > 0) usableSpanHz = frame.usableSpanHz;
     spectrumError = '';
     applySpectrum(frame.bins);
   }
@@ -483,13 +519,15 @@
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
       appliedBandwidthHz = Number(status.bandwidth_hz ?? 0);
+      usableSpanHz = Number(status.usable_span_hz ?? 0);
     } catch (e) {
       console.warn('device status failed', e);
       notice = `Receiver status unavailable: ${e instanceof Error ? e.message : String(e)}`;
     }
-    const [banksResult, signalsResult, capabilitiesResult, bookmarksResult, vfosResult, messagesResult, listenerResult, maxVfosResult] = await Promise.allSettled([
+    const [banksResult, signalsResult, capabilitiesResult, bookmarksResult, vfosResult, messagesResult, listenerResult, maxVfosResult, receiversResult] = await Promise.allSettled([
       Api.banks(), Api.signalEvents(100), Api.deviceCapabilities(), Api.bookmarksV2(),
       Api.vfoStates(), Api.decodedMessages(100), syncListenerView(), Api.scannerMaxVfos(),
+      Api.receiversV2(),
     ]);
     if (maxVfosResult.status === 'fulfilled') maxVfos = Number(maxVfosResult.value?.max_vfos ?? 1);
     if (banksResult.status === 'fulfilled') banks = banksResult.value;
@@ -501,16 +539,24 @@
     if (listenerResult.status === 'rejected') {
       console.warn('listener session initialization failed', listenerResult.reason);
     }
+    if (receiversResult.status === 'fulfilled') {
+      const receivers = receiversResult.value?.receivers ?? [];
+      receiverRevision = Number(receivers[0]?.revision ?? 0);
+    }
   }
 
   async function pollRuntime() {
+    if (spectrumConnection === 'open' && !spectrumStale && (retunePending || centerTuneBusy)) return;
     try {
       const [status, nextVfos] = await Promise.all([Api.deviceStatus(), Api.vfoStates()]);
       deviceLabel = status.label;
       connected = status.connected;
-      centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
-      sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
+      if (spectrumConnection !== 'open' || spectrumStale) {
+        centerFreqHz = Number(status.center_freq_hz ?? centerFreqHz);
+        sampleRateHz = Number(status.sample_rate ?? sampleRateHz);
+      }
       appliedBandwidthHz = Number(status.bandwidth_hz ?? appliedBandwidthHz);
+      usableSpanHz = Number(status.usable_span_hz ?? usableSpanHz);
       applyVfos(nextVfos);
     } catch (e) { console.warn('runtime polling failed', e); }
   }
@@ -519,8 +565,10 @@
     spectrumBins = bins;
     if (drawPending) return;
     drawPending = true;
-    requestAnimationFrame(() => {
+    spectrumRafId = requestAnimationFrame(() => {
       drawPending = false;
+      spectrumRafId = null;
+      if (!pageMounted) return;
       drawSpectrum();
       drawWaterfall();
       renderFrames += 1;
@@ -704,7 +752,7 @@
     const maxDb = displayConfig.maxDb;
     const dpr = window.devicePixelRatio || 1;
     const bins = displayBins();
-    const peaks = displayConfig.peakHold ? peakHold.process(bins) : null;
+    const peaks = displayConfig.peakHold ? peakHold.process(bins, nowMs) : null;
     ctx.clearRect(0, 0, w, h);
 
     const labelPad = Math.round(18 * dpr);
@@ -839,8 +887,10 @@
   function redrawView() {
     if (viewRedrawPending) return;
     viewRedrawPending = true;
-    requestAnimationFrame(() => {
+    viewRafId = requestAnimationFrame(() => {
       viewRedrawPending = false;
+      viewRafId = null;
+      if (!pageMounted) return;
       if (spectrumBins.length) {
         drawSpectrum();
         waterfallCanvasRenderer.redraw(waterfallOptions());
@@ -861,9 +911,16 @@
 
   function bindSpectrumCanvas(node: HTMLCanvasElement) {
     canvas = node;
+    spectrumResizeObserver?.disconnect();
+    spectrumResizeObserver = new ResizeObserver(() => {
+      if (spectrumBins.length) drawSpectrum();
+    });
+    spectrumResizeObserver.observe(node);
     if (spectrumBins.length) drawSpectrum();
     return {
       destroy() {
+        spectrumResizeObserver?.disconnect();
+        spectrumResizeObserver = null;
         canvas = undefined as unknown as HTMLCanvasElement;
       },
     };
@@ -1098,6 +1155,14 @@
     waterfallCanvasRenderer.clear();
   }
 
+  function scheduleListenerSync() {
+    if (listenerSyncTimer) window.clearTimeout(listenerSyncTimer);
+    listenerSyncTimer = window.setTimeout(() => {
+      listenerSyncTimer = null;
+      void syncListenerView();
+    }, 350);
+  }
+
   async function applyCenterFrequency(frequencyHz: number) {
     if (!connected || !Number.isFinite(frequencyHz) || frequencyHz <= 0) return;
     if (centerTuneBusy) {
@@ -1109,14 +1174,30 @@
     centerTuneBusy = true;
     retunePending = true;
     pendingCenterHz = requestedHz;
+    const commandId = `tune-${requestedHz}-${Date.now()}`;
     try {
-      await Api.deviceFrequency(requestedHz);
-      centerFreqHz = requestedHz;
-      notice = `Receiver centered on ${fmtHz(requestedHz)}`;
+      const result = await Api.receiversV2Tune('receiver-0', {
+        command_id: commandId,
+        expected_revision: receiverRevision,
+        frequency_hz: requestedHz,
+      });
+      centerFreqHz = Number(result.actual_frequency_hz ?? requestedHz);
+      receiverRevision = Number(result.revision ?? receiverRevision);
+      notice = `Receiver centered on ${fmtHz(centerFreqHz)}`;
       await syncListenerView();
       window.setTimeout(() => { if (notice.startsWith('Receiver centered')) notice = ''; }, 1800);
-    } catch (error) {
-      notice = `Could not change center frequency: ${String(error)}`;
+    } catch (error: any) {
+      if (error?.status === 409) {
+        try {
+          const receivers = await Api.receiversV2();
+          receiverRevision = Number(receivers?.receivers?.[0]?.revision ?? receiverRevision);
+          notice = 'Receiver revision conflict; refresh and retry';
+        } catch {
+          notice = `Could not change center frequency: ${String(error)}`;
+        }
+      } else {
+        notice = `Could not change center frequency: ${String(error)}`;
+      }
     } finally {
       centerTuneBusy = false;
       const queuedHz = pendingCenterHz;
@@ -1158,13 +1239,14 @@
 
   async function syncListenerView(retry = true) {
     if (!listenerSessionId || !centerFreqHz || !sampleRateHz) return;
+    const spanLimit = usableSpanHz > 0 ? usableSpanHz : captureSpanHz;
     try {
       const result = await Api.saveListenerSessionV2({
         id: listenerSessionId,
         client_name: /Mobi|Android/i.test(navigator.userAgent) ? 'Mobile browser' : 'Desktop browser',
         receiver_id: 'receiver-0',
         view_center_hz: Math.round(viewport.centerHz),
-        view_span_hz: Math.round(Math.min(viewport.spanHz, appliedBandwidthHz || viewport.spanHz)),
+        view_span_hz: Math.round(Math.min(viewport.spanHz, spanLimit)),
         active_vfo_id: vfos[0]?.id ?? null,
         expected_revision: listenerSessionRevision,
       });
@@ -1174,7 +1256,16 @@
         const result: any = await Api.listenerSessionsV2();
         listenerSessionRevision = Number(result.sessions?.find((session: any) => session.id === listenerSessionId)?.revision ?? 0);
         await syncListenerView(false);
+        return;
       }
+      if (retry && error?.status === 400) {
+        const clamped = clampViewport(viewport, centerFreqHz, captureSpanHz);
+        viewCenterRequestHz = Math.round(clamped.centerHz);
+        viewSpanRequestHz = Math.round(clamped.spanHz);
+        await syncListenerView(false);
+        return;
+      }
+      notice = `Listener viewport sync failed: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 
@@ -1199,6 +1290,7 @@
     viewCenterRequestHz = Math.round(clamped.centerHz);
     viewSpanRequestHz = Math.round(clamped.spanHz);
     redrawView();
+    scheduleListenerSync();
   }
 
   function zoomAtFraction(factor: number, anchorFraction: number) {

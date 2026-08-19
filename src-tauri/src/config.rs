@@ -107,6 +107,22 @@ impl Config {
         std::fs::write(&path, text)?;
         Ok(())
     }
+
+    /// Decoder executable paths and argv fragments must not change remotely without admin.
+    pub fn decoder_launch_fields_equal(&self, other: &Self) -> bool {
+        self.rtl433.path == other.rtl433.path
+            && self.rtl433.extra_args == other.rtl433.extra_args
+            && self.digital_decoder.multimon_path == other.digital_decoder.multimon_path
+            && self.aprs.path == other.aprs.path
+            && self.dsd.dsdneo_path == other.dsd.dsdneo_path
+            && self.dump978.path == other.dump978.path
+            && self.dump978.extra_args == other.dump978.extra_args
+            && self.radiosonde.path == other.radiosonde.path
+    }
+
+    pub fn admin_settings_allowed() -> bool {
+        std::env::var("PULSESCOPE_ADMIN_SETTINGS").as_deref() == Ok("1")
+    }
 }
 
 /// Preserve operator configuration while making newly shipped built-in bands
@@ -320,6 +336,8 @@ pub struct StreamingConfig {
     pub max_clients: u32,
     pub sync_enabled: bool,
     pub sync_cluster: String,
+    /// Expert gate: allow API clients to stream live IQ/audio to arbitrary UDP targets.
+    pub network_export_enabled: bool,
 }
 impl Default for StreamingConfig {
     fn default() -> Self {
@@ -333,6 +351,7 @@ impl Default for StreamingConfig {
             max_clients: 10,
             sync_enabled: false,
             sync_cluster: "pulsescope".into(),
+            network_export_enabled: false,
         }
     }
 }

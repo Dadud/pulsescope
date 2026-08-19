@@ -37,7 +37,7 @@ use crate::state::{RecordingState, ScannerEvent, SpectrumFrame};
 /// Handle shared between the API and the UI. Cloning is cheap.
 #[derive(Clone)]
 pub struct ScannerHandle {
-    pub cmd_tx: mpsc::UnboundedSender<ScannerCommand>,
+    pub cmd_tx: mpsc::Sender<ScannerCommand>,
     pub state: Arc<Mutex<ScannerRuntimeState>>,
     pub iq_consumers: Vec<IqRing>,
     task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -176,6 +176,12 @@ pub enum ScannerCommand {
         on: bool,
     },
     Shutdown,
+}
+
+pub fn send_command(cmd_tx: &mpsc::Sender<ScannerCommand>, cmd: ScannerCommand) {
+    if let Err(error) = cmd_tx.try_send(cmd) {
+        tracing::warn!(error = %error, "scanner command channel full; dropping command");
+    }
 }
 
 /// `POST /channels/scan/start` name that visits every `enabled` bank.
@@ -455,7 +461,7 @@ impl AudioWorker {
                     // Translate before reducing the wide RF sample rate. Doing
                     // this in the opposite order aliases offset VFOs.
                     let baseband = mix_down(&iq, offset, sample_rate, &mut phases[idx]);
-                    let mode = Mode::parse(&vfo.mode);
+                    let mode = Mode::try_parse(&vfo.mode).unwrap_or(Mode::Nfm);
                     let cutoff_hz = match mode {
                         Mode::Wfm => 100_000.0,
                         Mode::Nfm => 12_500.0,
@@ -606,7 +612,7 @@ impl ScannerHandle {
     }
 
     pub fn spawn(cfg: ScannerConfig, dependencies: ScannerDependencies) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let state = Arc::new(Mutex::new(ScannerRuntimeState::default()));
         // FFT is a latest-frame consumer. Two complete FFT windows absorb
         // driver burstiness without accumulating stale waterfall history.
@@ -639,7 +645,7 @@ impl ScannerHandle {
 async fn scanner_loop(
     cfg: ScannerConfig,
     dependencies: ScannerDependencies,
-    mut cmd_rx: mpsc::UnboundedReceiver<ScannerCommand>,
+    mut cmd_rx: mpsc::Receiver<ScannerCommand>,
     state: Arc<Mutex<ScannerRuntimeState>>,
     capture_ring: IqRing,
     audio_ring: IqRing,
