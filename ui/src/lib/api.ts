@@ -41,6 +41,14 @@ function authHeader(): Record<string, string> {
   return token ? { 'authorization': `Bearer ${token}` } : {};
 }
 
+export interface ProtocolCandidate {
+  protocol: string;
+  family: string;
+  confidence: number;
+  decoder: string;
+  reason: string;
+}
+
 export interface VfoState {
   id: number;
   frequency_hz: number;
@@ -50,6 +58,15 @@ export interface VfoState {
   audio_agc: boolean;
   squelch_open: boolean;
   strength_db: number;
+  audio_level_db?: number;
+  role?: string;
+  protocol?: string;
+  family?: string;
+  decoder?: string;
+  confidence?: number;
+  candidates?: ProtocolCandidate[];
+  locked?: boolean;
+  segment_label?: string;
 }
 
 export interface DecodedMessage {
@@ -154,6 +171,8 @@ export const Api = {
   vfoMode: (id: number, mode: string) => postJson(`/vfo/${id}/mode`, { mode }),
   vfoAgc: (id: number, on: boolean) => postJson(`/vfo/${id}/audio_agc`, { id, on }),
   vfoIdentify: (id: number) => postJson(`/vfo/${id}/identify`, { id }),
+  vfoLock: (id: number, locked: boolean) => postJson(`/vfo/${id}/lock`, { locked }),
+  vfoDecode: (id: number, decoder?: string) => postJson(`/vfo/${id}/decode`, decoder ? { decoder } : {}),
   devices: () => getJson('/devices'),
   deviceConnect: (key: string, label?: string) => postJson('/device/connect', { key, label }),
   deviceDisconnect: () => postJson('/device/disconnect'),

@@ -59,6 +59,9 @@
   let logDockOpen = $state(true);
   let selectedVfoId = $state(0);
   let notice = $state('');
+  let autoDecodeEnabled = $state(true);
+  let useArrlBandplan = $state(true);
+  let decoderPick: Record<number, string> = $state({});
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
   let ws: WebSocket | null = $state(null);
@@ -80,6 +83,7 @@
   );
 
   const quickModes = [
+    { label: '40m Ham', match: '40m' },
     { label: 'ADS-B 1090', match: 'ADS-B' },
     { label: 'AIS 162', match: 'AIS' },
     { label: 'ACARS 130', match: 'ACARS' },
@@ -145,13 +149,17 @@
 
   async function loadInitial() {
     try {
-      const [bankList, status, storedSignals] = await Promise.all([Api.banks(), Api.deviceStatus(), Api.signalEvents(100)]);
+      const [bankList, status, storedSignals, scanCfg] = await Promise.all([
+        Api.banks(), Api.deviceStatus(), Api.signalEvents(100), Api.scanConfig(),
+      ]);
       banks = bankList;
       deviceLabel = status.label;
       connected = status.connected;
       centerFreqHz = Number(status.center_freq_hz ?? 0);
       sampleRateHz = Number(status.sample_rate ?? 1);
       signalHistory = storedSignals;
+      autoDecodeEnabled = Boolean(scanCfg?.auto_decode_all);
+      useArrlBandplan = Boolean(scanCfg?.use_arrl_bandplan);
       vfos = await Api.vfoStates();
       messages = await Api.decodedMessages(100);
     } catch (e) {
@@ -383,6 +391,55 @@
     setTimeout(() => (notice = ''), 3500);
   }
 
+  function decoderOptions(v: VfoState) {
+    const fromCandidates = (v.candidates ?? [])
+      .filter((c) => c.decoder && c.decoder !== 'none')
+      .map((c) => ({ decoder: c.decoder, label: `${c.protocol} (${c.decoder})` }));
+    if (v.decoder && v.decoder !== 'none' && !fromCandidates.some((c) => c.decoder === v.decoder)) {
+      fromCandidates.unshift({ decoder: v.decoder, label: v.decoder });
+    }
+    if (fromCandidates.length === 0) {
+      return [{ decoder: 'auto', label: 'Auto-detect' }];
+    }
+    return [{ decoder: 'auto', label: 'Auto-detect' }, ...fromCandidates];
+  }
+
+  function pickedDecoder(v: VfoState) {
+    const pick = decoderPick[v.id];
+    if (pick) return pick;
+    if (v.decoder && v.decoder !== 'none') return v.decoder;
+    const top = v.candidates?.find((c) => c.decoder && c.decoder !== 'none');
+    return top?.decoder ?? 'auto';
+  }
+
+  function setDecoderPick(id: number, decoder: string) {
+    decoderPick = { ...decoderPick, [id]: decoder };
+  }
+
+  async function toggleVfoLock(id: number, locked: boolean) {
+    vfos = vfos.map((v) => v.id === id ? { ...v, locked } : v);
+    await Api.vfoLock(id, locked);
+    notice = locked ? `VFO ${id} locked on signal` : `VFO ${id} released`;
+    setTimeout(() => (notice = ''), 2500);
+  }
+
+  async function decodeVfo(id: number) {
+    const vfo = vfos.find((v) => v.id === id);
+    if (!vfo) return;
+    const decoder = pickedDecoder(vfo);
+    try {
+      const result = await Api.vfoDecode(id, decoder === 'auto' ? undefined : decoder);
+      const count = Number(result?.message_count ?? 0);
+      notice = count > 0
+        ? `VFO ${id}: ${count} decoded message${count === 1 ? '' : 's'}`
+        : `VFO ${id}: no decode output (try another decoder or mode)`;
+      if (count > 0 && Array.isArray(result?.messages)) {
+        messages = [...result.messages, ...messages].slice(0, 200);
+      }
+    } catch (e) { notice = String(e); }
+    setTimeout(() => (notice = ''), 4000);
+  }
+
   function exportMessages() {
     const header = 'timestamp_ms,frequency_hz,protocol,message_type,address,content\\n';
     const csv = header + visibleMessages.map((m) => [m.timestamp_ms, m.frequency_hz, m.protocol, m.message_type, m.address, m.content]
@@ -467,7 +524,10 @@
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● {connected ? 'PWR' : 'OFF'}</span>
         <span class="status-pill" class:on={scanRunning}>● {scanRunning ? 'SCANNING' : 'IDLE'}</span>
-        <span class="status-pill on">● AUTO-DECODE</span>
+        <span class="status-pill" class:on={autoDecodeEnabled}>● {autoDecodeEnabled ? 'AUTO-DECODE' : 'DECODE OFF'}</span>
+        {#if useArrlBandplan && autoDecodeEnabled}
+          <span class="status-pill on subtle">● ARRL PLAN</span>
+        {/if}
         <button type="button" class="dock-toggle" class:on={logDockOpen} onclick={toggleLogDock}>
           {logDockOpen ? '▼' : '▲'} Messages
         </button>
@@ -508,8 +568,17 @@
         <div class="vfo-tile card" class:selected={selectedVfoId === v.id} role="button" tabindex="0" onclick={() => (selectedVfoId = v.id)} onkeydown={(e) => e.key === 'Enter' && (selectedVfoId = v.id)}>
           <div class="vfo-head">
             <div class="vfo-freq">{fmtHz(v.frequency_hz)}</div>
-            {#if v.id === 0}<span class="scan-badge">SCAN</span>{/if}
+            {#if v.id === 0 && v.role === 'scan'}<span class="scan-badge">SCAN</span>{/if}
+            {#if v.role === 'signal'}<span class="signal-badge">SIGNAL</span>{/if}
+            {#if v.locked}<span class="lock-badge">LOCK</span>{/if}
           </div>
+          {#if v.segment_label || v.protocol}
+            <div class="vfo-ident">
+              {#if v.segment_label}<span class="segment-label">{v.segment_label}</span>{/if}
+              {#if v.protocol}<span class="proto-tag">{v.protocol}</span>{/if}
+              {#if v.confidence}<span class="conf-tag">{Math.round(v.confidence * 100)}%</span>{/if}
+            </div>
+          {/if}
           <div class="vfo-controls" onclick={(e) => e.stopPropagation()}>
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
             <select aria-label="VFO {v.id} mode" value={v.mode} onchange={(e) => setVfoMode(v.id, e)}>
@@ -537,10 +606,18 @@
               {v.muted ? '🔇' : '🔊'}
             </button>
           </div>
+          <div class="vfo-decode-row" onclick={(e) => e.stopPropagation()}>
+            <select aria-label="VFO {v.id} decoder" value={pickedDecoder(v)} onchange={(e) => setDecoderPick(v.id, (e.target as HTMLSelectElement).value)}>
+              {#each decoderOptions(v) as opt}
+                <option value={opt.decoder}>{opt.label}</option>
+              {/each}
+            </select>
+            <button class="mini decode-btn" onclick={() => decodeVfo(v.id)}>Decode</button>
+          </div>
           <div class="vfo-actions" onclick={(e) => e.stopPropagation()}>
             <button class="mini" class:on={v.audio_agc} onclick={() => toggleVfoAgc(v.id, !v.audio_agc)}>AGC</button>
             <button class="mini" onclick={() => identifyVfo(v.id)}>ID</button>
-            <button class="mini" onclick={() => unsupportedAction('Hold')}>Hold</button>
+            <button class="mini" class:on={v.locked} onclick={() => toggleVfoLock(v.id, !v.locked)}>Lock</button>
             <button class="mini" onclick={() => unsupportedAction('Per-VFO recording')}>REC</button>
             <button class="mini" onclick={() => unsupportedAction('VFO zoom')}>Zoom</button>
           </div>
@@ -673,6 +750,15 @@
   .vfo-tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
   .vfo-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
   .scan-badge { font: 9px var(--mono); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 3px; padding: 1px 4px; }
+  .signal-badge { font: 9px var(--mono); color: #22c55e; border: 1px solid color-mix(in srgb, #22c55e 40%, transparent); border-radius: 3px; padding: 1px 4px; }
+  .lock-badge { font: 9px var(--mono); color: #f59e0b; border: 1px solid color-mix(in srgb, #f59e0b 40%, transparent); border-radius: 3px; padding: 1px 4px; }
+  .vfo-ident { display: flex; flex-wrap: wrap; gap: 4px; font-size: 10px; }
+  .segment-label { color: var(--fg); font-weight: 500; }
+  .proto-tag, .conf-tag { color: var(--fg-dim); font: 10px var(--mono); }
+  .vfo-decode-row { display: flex; gap: 4px; align-items: center; }
+  .vfo-decode-row select { flex: 1; font-size: 11px; min-width: 0; }
+  .decode-btn { color: var(--accent); }
+  .status-pill.subtle { opacity: 0.85; font-size: 10px; }
   .vfo-freq { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
   .vfo-mode { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .vfo-controls { display: flex; gap: 4px; }

@@ -130,6 +130,10 @@
         <label for="auto-decode-threshold">Auto-decode threshold</label>
         <input id="auto-decode-threshold" type="number" min="0" max="1" step="0.05" bind:value={cfg.scanner.auto_decode_threshold} />
       </div>
+      <div class="row">
+        <label for="use-arrl-bandplan">Use ARRL band-plan hints (auto mode + decode routing)</label>
+        <input id="use-arrl-bandplan" type="checkbox" bind:checked={cfg.scanner.use_arrl_bandplan} />
+      </div>
     </section>
 
     <section class="card">
