@@ -183,7 +183,7 @@ impl AppState {
                 .map(|handle| handle.cmd_tx.clone());
             if let Some(command) = existing {
                 if command
-                    .send(crate::scanner::ScannerCommand::Start {
+                    .try_send(crate::scanner::ScannerCommand::Start {
                         range: range.clone(),
                         cycle: Vec::new(),
                     })
@@ -209,13 +209,16 @@ impl AppState {
             wfm_deemphasis_us,
         };
         let handle = ScannerHandle::spawn(cfg, dependencies);
-        handle
+        if handle
             .cmd_tx
-            .send(crate::scanner::ScannerCommand::Start {
+            .try_send(crate::scanner::ScannerCommand::Start {
                 range,
                 cycle: Vec::new(),
             })
-            .map_err(|_| "receiver task did not accept its startup command".to_string())?;
+            .is_err()
+        {
+            return Err("receiver task did not accept its startup command".to_string());
+        }
         *self.scanner.write() = Some(handle);
         if recovering {
             self.observe_receiver_recovery();
@@ -278,15 +281,30 @@ impl AppState {
                     let device = app.device.clone();
                     let key = candidate.key.clone();
                     let connected = tokio::task::spawn_blocking(move || device.connect(&key)).await;
-                    if !matches!(connected, Ok(Ok(()))) {
+                    if matches!(connected, Ok(Ok(()))) {
+                        hardware_probe_backoff = Duration::from_secs(2);
+                        tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
+                        if let Some(handle) = app.scanner.read().as_ref() {
+                            crate::scanner::send_command(
+                                &handle.cmd_tx,
+                                crate::scanner::ScannerCommand::Stop,
+                            );
+                            handle.flush_iq();
+                        }
+                        app.audio.clear_queue();
+                        let rate = app.config.read().device.sample_rate;
+                        if let Err(error) = app.device.set_sample_contract(rate) {
+                            tracing::warn!(%error, "could not reapply sample contract after hotplug");
+                        }
+                        if let Err(error) = app.ensure_receiver_flow(true) {
+                            tracing::warn!(%error, "receiver supervisor could not restart flow after hotplug");
+                        }
+                    } else {
                         next_hardware_probe = now + hardware_probe_backoff;
                         hardware_probe_backoff = hardware_probe_backoff
                             .saturating_mul(2)
                             .min(Duration::from_secs(30));
-                        continue;
                     }
-                    hardware_probe_backoff = Duration::from_secs(2);
-                    tracing::info!(driver = %candidate.driver, label = %candidate.label, "physical SDR selected after probe");
                 }
 
                 let now = crate::scanner::now_ms();
@@ -439,7 +457,7 @@ impl AppState {
                 continue;
             };
             if let Some(handle) = self.scanner.read().as_ref() {
-                let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop);
+                crate::scanner::send_command(&handle.cmd_tx, crate::scanner::ScannerCommand::Stop);
             }
             self.audio.clear_queue();
             self.receiver_session.lock().release("scanner");
@@ -471,10 +489,13 @@ impl AppState {
                 continue;
             }
             if let Some(handle) = self.scanner.read().as_ref() {
-                let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Start {
-                    range,
-                    cycle: Vec::new(),
-                });
+                crate::scanner::send_command(
+                    &handle.cmd_tx,
+                    crate::scanner::ScannerCommand::Start {
+                        range,
+                        cycle: Vec::new(),
+                    },
+                );
             } else {
                 self.receiver_session.lock().release(&owner);
                 let _ = self.db.mark_scheduled_job(
@@ -491,7 +512,10 @@ impl AppState {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(duration_ms)).await;
                 if let Some(handle) = app.scanner.read().as_ref() {
-                    let _ = handle.cmd_tx.send(crate::scanner::ScannerCommand::Stop);
+                    crate::scanner::send_command(
+                        &handle.cmd_tx,
+                        crate::scanner::ScannerCommand::Stop,
+                    );
                 }
                 app.audio.clear_queue();
                 app.receiver_session.lock().release(&owner);

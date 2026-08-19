@@ -25,13 +25,17 @@ export function loadSpectrumDisplayConfig(): SpectrumDisplayConfig {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SPECTRUM_DISPLAY };
     const parsed = JSON.parse(raw) as Partial<SpectrumDisplayConfig>;
-    return {
+    const config: SpectrumDisplayConfig = {
       minDb: clampDb(parsed.minDb ?? DEFAULT_SPECTRUM_DISPLAY.minDb),
       maxDb: clampDb(parsed.maxDb ?? DEFAULT_SPECTRUM_DISPLAY.maxDb),
       smoothing: clamp01(parsed.smoothing ?? DEFAULT_SPECTRUM_DISPLAY.smoothing),
       peakHold: parsed.peakHold ?? DEFAULT_SPECTRUM_DISPLAY.peakHold,
       palette: paletteFromString(parsed.palette),
     };
+    if (config.maxDb <= config.minDb + 10) {
+      return { ...DEFAULT_SPECTRUM_DISPLAY };
+    }
+    return config;
   } catch {
     return { ...DEFAULT_SPECTRUM_DISPLAY };
   }
@@ -206,24 +210,29 @@ export class SpectrumSmoother {
 
 export class PeakHoldTrace {
   private peaks: number[] | null = null;
+  private lastMs = 0;
 
-  constructor(private decayDbPerFrame = 0.45) {}
+  constructor(private decayDbPerMs = 0.012) {}
 
-  process(bins: number[]): number[] {
+  process(bins: number[], nowMs = Date.now()): number[] {
     if (!bins.length) return bins;
+    const elapsed = this.lastMs > 0 ? Math.max(0, nowMs - this.lastMs) : 0;
+    this.lastMs = nowMs;
+    const decay = this.decayDbPerMs * elapsed;
     if (!this.peaks || this.peaks.length !== bins.length) {
       this.peaks = bins.slice();
       return this.peaks;
     }
     for (let i = 0; i < bins.length; i += 1) {
       if (bins[i] >= this.peaks[i]) this.peaks[i] = bins[i];
-      else this.peaks[i] = Math.max(bins[i], this.peaks[i] - this.decayDbPerFrame);
+      else this.peaks[i] = Math.max(bins[i], this.peaks[i] - decay);
     }
     return this.peaks;
   }
 
   reset() {
     this.peaks = null;
+    this.lastMs = 0;
   }
 }
 

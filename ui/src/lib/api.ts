@@ -234,6 +234,7 @@ export function openSpectrum(
   onState?.('connecting');
   const ws = new WebSocket(websocketUrl('/api/v2/spectrum/stream'));
   ws.binaryType = 'arraybuffer';
+  let scratchBins: number[] = [];
   ws.onopen = () => onState?.('open');
   ws.onclose = () => onState?.('closed');
   ws.onerror = () => onState?.('error');
@@ -247,7 +248,10 @@ export function openSpectrum(
     if (64 + count !== event.data.byteLength) return;
     const floor = view.getFloat32(44, true);
     const scale = view.getFloat32(48, true);
-    const bins = Array.from(bytes.subarray(64), (value) => floor + value * scale);
+    if (scratchBins.length !== count) scratchBins = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      scratchBins[i] = floor + bytes[64 + i] * scale;
+    }
     onFrame({
       sequence: Number(view.getBigUint64(8, true)),
       capturedMs: Number(view.getBigInt64(16, true)),
@@ -256,7 +260,7 @@ export function openSpectrum(
       usableSpanHz: view.getUint32(36, true),
       receiverId: view.getUint32(52, true),
       sessionRevision: Number(view.getBigUint64(56, true)),
-      bins,
+      bins: scratchBins.slice(0, count),
     });
   };
   return ws;
@@ -327,6 +331,10 @@ export const Api = {
   deviceDisconnect: () => postJson('/device/disconnect'),
   deviceStatus: () => getJson('/device/status'),
   deviceFrequency: (frequency_hz: number) => postJson('/device/frequency', { frequency_hz }),
+  receiversV2Tune: (
+    receiverId: string,
+    body: { command_id: string; expected_revision: number; frequency_hz: number },
+  ) => postJson(`/api/v2/receivers/${encodeURIComponent(receiverId)}/tune`, body),
   deviceSampleRate: (sample_rate: number) => postJson('/device/sample_rate', { sample_rate }),
   deviceCapabilities: () => getJson('/device/capabilities'),
   deviceControl: (control: string, value: string | number | boolean) => postJson('/device/control', { control, value: String(value) }),
@@ -390,10 +398,10 @@ export const Api = {
   iqRecordingStop: () => postJson('/iq_recording/stop'),
   cases: () => getJson<any[]>('/cases'),
   createCase: (body: any) => postJson('/cases', body),
-  deleteCase: (id: number) => fetch(`${BASE}/cases/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteCase: (id: number) => deleteJson(`/cases/${id}`),
   recordingAnnotations: () => getJson<any[]>('/recordings/annotations'),
   addRecordingAnnotation: (body: any) => postJson('/recordings/annotations', body),
-  deleteRecordingAnnotation: (id: number) => fetch(`${BASE}/recordings/annotations/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteRecordingAnnotation: (id: number) => deleteJson(`/recordings/annotations/${id}`),
   transcriptionStatus: () => getJson('/transcription/status'),
   transcripts: () => getJson<any[]>('/transcription/transcripts'),
   transcriptionStart: () => postJson('/transcription/start'),

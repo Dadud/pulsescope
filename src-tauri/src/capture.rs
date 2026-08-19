@@ -51,23 +51,36 @@ impl IqNetworkSink {
         let Some((socket, target)) = guard.as_ref() else {
             return;
         };
-        let mut packet = Vec::with_capacity(24 + samples.len() * 8);
-        packet.extend_from_slice(b"PSIQ");
-        packet.extend_from_slice(&1u16.to_le_bytes());
-        packet.extend_from_slice(&0u16.to_le_bytes());
-        packet.extend_from_slice(&rate.to_le_bytes());
-        packet.extend_from_slice(&center.to_le_bytes());
-        packet.extend_from_slice(&(samples.len() as u32).to_le_bytes());
-        for s in samples {
-            packet.extend_from_slice(&s.re.to_le_bytes());
-            packet.extend_from_slice(&s.im.to_le_bytes());
+        const HEADER_BYTES: usize = 24;
+        const SAMPLE_BYTES: usize = 8;
+        const MAX_PAYLOAD: usize = 1400;
+        let max_samples = (MAX_PAYLOAD - HEADER_BYTES) / SAMPLE_BYTES;
+        if max_samples == 0 {
+            return;
         }
-        match socket.send_to(&packet, target) {
-            Ok(_) => {
-                self.packets.fetch_add(1, Ordering::Relaxed);
+        let mut offset = 0;
+        while offset < samples.len() {
+            let chunk = samples[offset..].len().min(max_samples);
+            let slice = &samples[offset..offset + chunk];
+            offset += chunk;
+            let mut packet = Vec::with_capacity(HEADER_BYTES + slice.len() * SAMPLE_BYTES);
+            packet.extend_from_slice(b"PSIQ");
+            packet.extend_from_slice(&1u16.to_le_bytes());
+            packet.extend_from_slice(&0u16.to_le_bytes());
+            packet.extend_from_slice(&rate.to_le_bytes());
+            packet.extend_from_slice(&center.to_le_bytes());
+            packet.extend_from_slice(&(slice.len() as u32).to_le_bytes());
+            for s in slice {
+                packet.extend_from_slice(&s.re.to_le_bytes());
+                packet.extend_from_slice(&s.im.to_le_bytes());
             }
-            Err(_) => {
-                self.errors.fetch_add(1, Ordering::Relaxed);
+            match socket.send_to(&packet, target) {
+                Ok(_) => {
+                    self.packets.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    self.errors.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }

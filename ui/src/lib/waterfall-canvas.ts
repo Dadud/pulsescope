@@ -192,7 +192,6 @@ export class WaterfallCanvas {
       h,
       geometry.viewStartHz,
       geometry.viewEndHz,
-      geometry.captureCenterHz,
       geometry.captureSpanHz,
       options.minDb ?? -120,
       options.maxDb ?? -20,
