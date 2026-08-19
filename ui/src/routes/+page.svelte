@@ -199,6 +199,31 @@
   type ScanCategoryId = 'popular' | 'ham' | 'public-safety' | 'air' | 'lora-ism' | 'weather' | 'marine' | 'broadcast' | 'digital' | 'all';
   let selectedScanCategory = $state<ScanCategoryId>('popular');
   let vfoIdentity = $state<Record<number, string>>({});
+  let decoderPick: Record<number, string> = $state({});
+  let spectrumViewMode = $state<'band' | 'full'>('band');
+  let deviceMinHz = $state(0);
+  let deviceMaxHz = $state(0);
+  let bandStartHz = $state(0);
+  let bandEndHz = $state(0);
+  let autoDecodeEnabled = $state(false);
+  let useArrlBandplan = $state(true);
+
+  const navigationMinHz = $derived(
+    spectrumViewMode === 'band' && bandEndHz > bandStartHz ? bandStartHz : deviceMinHz,
+  );
+  const navigationMaxHz = $derived(
+    spectrumViewMode === 'band' && bandEndHz > bandStartHz ? bandEndHz : deviceMaxHz,
+  );
+  const navWindowLeft = $derived(
+    navigationMaxHz > navigationMinHz
+      ? ((viewStartHz - navigationMinHz) / (navigationMaxHz - navigationMinHz)) * 100
+      : 0,
+  );
+  const navWindowWidth = $derived(
+    navigationMaxHz > navigationMinHz
+      ? Math.max(2, (sampleRateHz / (navigationMaxHz - navigationMinHz)) * 100)
+      : 100,
+  );
 
   const POPULAR_SCAN_BANDS = [
     'FM Broadcast',
@@ -343,6 +368,7 @@
       scanRunning = Boolean(spectrum?.running);
       scanLocked = Boolean(spectrum?.locked);
       scanHolding = Boolean(spectrum?.holding);
+      applySpectrumMeta(spectrum);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length) {
         spectrumError = '';
         applySpectrum(spectrum.bins);
@@ -543,6 +569,129 @@
       const receivers = receiversResult.value?.receivers ?? [];
       receiverRevision = Number(receivers[0]?.revision ?? 0);
     }
+    try {
+      const scanCfg = await Api.scanConfig();
+      autoDecodeEnabled = Boolean(scanCfg?.auto_decode_all);
+      useArrlBandplan = Boolean(scanCfg?.use_arrl_bandplan);
+      spectrumViewMode = scanCfg?.spectrum_view_mode === 'full' ? 'full' : 'band';
+    } catch (e) {
+      console.warn('scan config load failed', e);
+    }
+  }
+
+  function applySpectrumMeta(spectrum: any) {
+    if (spectrum?.spectrum_view_mode) {
+      spectrumViewMode = spectrum.spectrum_view_mode === 'full' ? 'full' : 'band';
+    }
+    if (spectrum?.device_min_freq_hz != null) deviceMinHz = Number(spectrum.device_min_freq_hz);
+    if (spectrum?.device_max_freq_hz != null) deviceMaxHz = Number(spectrum.device_max_freq_hz);
+    if (spectrum?.band_start_hz != null) bandStartHz = Number(spectrum.band_start_hz);
+    if (spectrum?.band_end_hz != null) bandEndHz = Number(spectrum.band_end_hz);
+  }
+
+  function clampPanCenter(freq: number): number {
+    const half = sampleRateHz / 2;
+    const minHz =
+      spectrumViewMode === 'band' && bandEndHz > bandStartHz
+        ? bandStartHz + half
+        : deviceMinHz + half;
+    const maxHz =
+      spectrumViewMode === 'band' && bandEndHz > bandStartHz
+        ? bandEndHz - half
+        : deviceMaxHz - half;
+    if (maxHz > minHz) return Math.max(minHz, Math.min(maxHz, freq));
+    return freq;
+  }
+
+  async function setSpectrumViewMode(mode: 'band' | 'full') {
+    try {
+      await Api.scannerSpectrumMode(mode);
+      spectrumViewMode = mode;
+      notice =
+        mode === 'full'
+          ? 'Full spectrum — scroll or drag to pan across device range'
+          : 'Band mode — view locked to scan range';
+    } catch (e) {
+      notice = String(e);
+    }
+  }
+
+  async function scannerPanCenter(centerHz: number) {
+    const clamped = clampPanCenter(centerHz);
+    retunePending = true;
+    try {
+      await Api.scannerPan(clamped);
+      centerFreqHz = clamped;
+      viewCenterRequestHz = clamped;
+      clearWaterfallHistory();
+      await syncListenerView();
+    } catch (e) {
+      notice = `Could not pan: ${String(e)}`;
+    } finally {
+      retunePending = false;
+    }
+  }
+
+  function retuneCenterHz(frequencyHz: number) {
+    if (scanRunning) {
+      void scannerPanCenter(frequencyHz);
+    } else {
+      scheduleCenterFrequency(frequencyHz, 0);
+    }
+  }
+
+  function navigatorClick(event: MouseEvent) {
+    const track = event.currentTarget as HTMLElement;
+    const rect = track.getBoundingClientRect();
+    const fraction = (event.clientX - rect.left) / rect.width;
+    const span = navigationMaxHz - navigationMinHz;
+    if (span <= 0) return;
+    const targetCenter = navigationMinHz + fraction * span;
+    retuneCenterHz(targetCenter);
+  }
+
+  function decoderOptions(v: VfoState) {
+    const fromCandidates = (v.candidates ?? [])
+      .filter((c) => c.decoder && c.decoder !== 'none')
+      .map((c) => ({ decoder: c.decoder, label: `${c.protocol} (${c.decoder})` }));
+    if (v.decoder && v.decoder !== 'none' && !fromCandidates.some((c) => c.decoder === v.decoder)) {
+      fromCandidates.unshift({ decoder: v.decoder, label: v.decoder });
+    }
+    return fromCandidates.length
+      ? [{ decoder: 'auto', label: 'Auto-detect' }, ...fromCandidates]
+      : [{ decoder: 'auto', label: 'Auto-detect' }];
+  }
+
+  function pickedDecoder(v: VfoState): string {
+    const pick = decoderPick[v.id];
+    if (pick) return pick;
+    if (v.decoder && v.decoder !== 'none') return v.decoder;
+    const top = v.candidates?.find((c) => c.decoder && c.decoder !== 'none');
+    return top?.decoder ?? 'auto';
+  }
+
+  function setDecoderPick(id: number, decoder: string) {
+    decoderPick = { ...decoderPick, [id]: decoder };
+  }
+
+  async function toggleVfoLock(id: number, locked: boolean) {
+    await Api.vfoLock(id, locked);
+  }
+
+  async function decodeVfo(vfo: VfoState) {
+    const decoder = pickedDecoder(vfo);
+    try {
+      const result = await Api.vfoDecode(vfo.id, decoder === 'auto' ? undefined : decoder);
+      if (result?.messages?.length) {
+        messages = [...result.messages, ...messages].slice(0, 200);
+        notice = `VFO ${vfo.id}: ${result.messages[0]?.content ?? 'decoded'}`;
+      } else {
+        notice = `VFO ${vfo.id}: no decode output (try another decoder or mode)`;
+      }
+    } catch (e) {
+      notice = String(e);
+    }
+    setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 5000);
   }
 
   async function pollRuntime() {
@@ -590,6 +739,7 @@
       scanRunning = Boolean(spectrum?.running);
       scanLocked = Boolean(spectrum?.locked);
       scanHolding = Boolean(spectrum?.holding);
+      applySpectrumMeta(spectrum);
       if (Array.isArray(spectrum?.bins) && spectrum.bins.length > 0) {
         spectrumError = '';
         lastSpectrumSequence = Number(spectrum.frame_sequence ?? lastSpectrumSequence);
@@ -943,6 +1093,9 @@
     }
     activeRange = bank.name;
     scanRunning = true;
+    bandStartHz = bank.start_hz;
+    bandEndHz = bank.end_hz;
+    spectrumViewMode = 'band';
     resetZoom();
     try {
       await Api.scanStart(bank.name);
@@ -1330,7 +1483,7 @@
       // lands there once the radio confirms the new center.
       viewCenterRequestHz = Math.max(1, Math.round(requestedCenterHz));
       retunePending = true;
-      scheduleCenterFrequency(centerFreqHz + overflowHz, 90);
+      retuneCenterHz(centerFreqHz + overflowHz);
     }
   }
 
@@ -1863,10 +2016,19 @@
     </section>
 
     <div class="status-strip card">
+      <div class="view-modes" role="group" aria-label="Spectrum view mode">
+        <span class="strip-label">View</span>
+        <button type="button" class="quick" class:on={spectrumViewMode === 'band'} onclick={() => setSpectrumViewMode('band')}>Band</button>
+        <button type="button" class="quick" class:on={spectrumViewMode === 'full'} onclick={() => setSpectrumViewMode('full')}>Full spectrum</button>
+      </div>
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● Radio {connected ? 'online' : 'offline'}</span>
         <span class="status-pill" class:on={spectrumLive}>● Spectrum {spectrumStatusLabel}</span>
         <span class="status-pill" class:on={scanRunning}>● Scan {scanRunning ? (scanLocked ? 'HOLD' : scanHolding ? 'delay' : activeRange ?? 'running') : 'idle'}</span>
+        <span class="status-pill" class:on={autoDecodeEnabled}>● {autoDecodeEnabled ? 'AUTO-DECODE' : 'DECODE OFF'}</span>
+        {#if useArrlBandplan && autoDecodeEnabled}
+          <span class="status-pill on subtle">● ARRL PLAN</span>
+        {/if}
         <span class="status-pill" class:on={eventConnection === 'open'}>● Events {eventConnection === 'open' ? 'live' : 'reconnecting'}</span>
         {#if !isCompactLayout}
           <button class="layout-toggle" type="button" aria-pressed={logExpanded} onclick={toggleLogExpanded}>
@@ -2128,6 +2290,18 @@
         </div>
       </div>
       <p class="gesture-status" class:busy={retunePending || centerTuneBusy || surfaceDragging} aria-live="polite">{gestureStatus}</p>
+      {#if navigationMaxHz > navigationMinHz}
+        <div class="spectrum-nav" role="button" tabindex="0" onclick={navigatorClick} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigatorClick(e as unknown as MouseEvent); } }} title="Click to jump within {spectrumViewMode === 'band' ? 'band' : 'device'} range">
+          <div class="nav-track">
+            <div class="nav-window" style="left: {navWindowLeft}%; width: {navWindowWidth}%"></div>
+          </div>
+          <div class="nav-labels">
+            <span>{fmtHz(navigationMinHz)}</span>
+            <span class="nav-current">{fmtHz(viewStartHz)} – {fmtHz(viewEndHz)}</span>
+            <span>{fmtHz(navigationMaxHz)}</span>
+          </div>
+        </div>
+      {/if}
       {#if zoomed}
         <div
           class="capture-overview"
@@ -2259,6 +2433,13 @@
             <span class="vfo-warn">Outside the capture window — no audio until you retune. <button class="mini" onclick={() => Api.vfoFrequency(v.id, v.frequency_hz)}>Recenter</button></span>
           {/if}
           {#if v.locked}<span class="vfo-lock">LOCKED · logged {v.last_hit_ms ? fmtTime(v.last_hit_ms) : 'now'}</span>{/if}
+          {#if v.segment_label || v.protocol}
+            <div class="vfo-meta segment-row">
+              {#if v.segment_label}<span class="segment-label">{v.segment_label}</span>{/if}
+              {#if v.protocol}<span class="protocol-tag">{v.protocol}</span>{/if}
+              {#if v.confidence}<span class="confidence-tag">{Math.round((v.confidence ?? 0) * 100)}%</span>{/if}
+            </div>
+          {/if}
           <div class="vfo-controls">
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
             <select aria-label="VFO {v.id} mode" value={v.mode} onchange={(e) => setVfoMode(v.id, e)}>
@@ -2296,6 +2477,13 @@
           <div class="vfo-actions">
             <button class="mini" class:on={v.audio_agc} onclick={() => Api.vfoAgc(v.id, !v.audio_agc)}>AGC</button>
             <button class="mini" onclick={() => identifyVfo(v.id)}>ID</button>
+            <button class="mini" class:on={v.locked} onclick={() => toggleVfoLock(v.id, !v.locked)}>{v.locked ? 'Unlock' : 'Lock'}</button>
+            <select class="mini decoder-select" aria-label="VFO {v.id} decoder" value={pickedDecoder(v)} onchange={(e) => setDecoderPick(v.id, (e.target as HTMLSelectElement).value)}>
+              {#each decoderOptions(v) as opt}
+                <option value={opt.decoder}>{opt.label}</option>
+              {/each}
+            </select>
+            <button class="mini" onclick={() => decodeVfo(v)}>Decode</button>
             {#if vfos.length > 1}
               <button class="mini remove-vfo" disabled={vfoBusy} aria-label="Remove VFO {v.id}" onclick={() => removeVfo(v.id)}>Remove</button>
             {/if}
@@ -2550,7 +2738,21 @@
   .scan-secondary-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .scan-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .scan-actions button.active { border-color: var(--accent); color: var(--accent); }
-  .status-strip { padding: 8px 10px; }
+  .status-strip { padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+  .view-modes { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .strip-label { color: var(--fg-dim); font: 10px var(--mono); margin-right: 4px; }
+  .quick { padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg-dim); font-size: 11px; cursor: pointer; }
+  .quick.on { border-color: var(--accent); color: var(--accent); background: rgba(56, 189, 248, 0.08); }
+  .spectrum-nav { margin-bottom: 6px; cursor: pointer; }
+  .nav-track { height: 6px; border-radius: 3px; background: var(--line); position: relative; }
+  .nav-window { position: absolute; top: 0; height: 100%; border-radius: 3px; background: var(--accent); opacity: 0.65; min-width: 2%; }
+  .nav-labels { display: flex; justify-content: space-between; margin-top: 4px; font: 9px var(--mono); color: var(--fg-dim); }
+  .nav-current { color: var(--accent); }
+  .segment-label { color: var(--fg); font-weight: 500; }
+  .protocol-tag, .confidence-tag { color: var(--fg-dim); font: 9px var(--mono); }
+  .segment-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .decoder-select { max-width: 120px; font-size: 10px; padding: 2px 4px; }
+  .status-pill.subtle { opacity: 0.85; font-size: 10px; }
   .bookmarks-aside .bookmark-primary h2 { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .squelch-badge {
     padding: 1px 6px;

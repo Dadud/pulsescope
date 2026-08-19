@@ -117,10 +117,26 @@ pub struct VfoState {
     pub squelch_open: bool,
     pub strength_db: f32,
     pub audio_level_db: f32,
+    /// scan = hopping search head, signal = parked emitter, idle = free slot.
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub decoder: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub candidates: Vec<crate::signal_id::ProtocolCandidate>,
     /// True while the scanner is holding this VFO on a detected signal (or
     /// the operator has manually parked it).
     #[serde(default)]
     pub locked: bool,
+    /// ARRL band-plan label when assigned from a detected signal.
+    #[serde(default)]
+    pub segment_label: String,
     #[serde(default)]
     pub last_hit_ms: i64,
     /// Signal above noise floor in dB (local peak minus smoothed floor).
@@ -129,6 +145,33 @@ pub struct VfoState {
     /// Smoothed noise floor used for squelch decisions (dBFS).
     #[serde(default)]
     pub noise_floor_db: f32,
+}
+
+impl Default for VfoState {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            frequency_hz: 0,
+            mode: "nfm".into(),
+            muted: true,
+            volume: 0.7,
+            audio_agc: true,
+            squelch_open: false,
+            strength_db: -120.0,
+            audio_level_db: -120.0,
+            role: "idle".into(),
+            protocol: String::new(),
+            family: String::new(),
+            decoder: String::new(),
+            confidence: 0.0,
+            candidates: Vec::new(),
+            locked: false,
+            segment_label: String::new(),
+            last_hit_ms: 0,
+            snr_db: 0.0,
+            noise_floor_db: -120.0,
+        }
+    }
 }
 
 /// Prefer the VFO the operator is listening to, then a scanner lock, then VFO 0.
@@ -346,15 +389,8 @@ fn starter_vfos(range: &ScanRange, center_hz: u64, max_vfos: usize) -> Vec<VfoSt
             || range.name.starts_with("RTTY ")
             || range.name.starts_with("NAVTEX ")
             || range.name.starts_with("CW ")),
-        volume: 0.7,
-        audio_agc: true,
-        squelch_open: false,
-        strength_db: -120.0,
-        audio_level_db: -120.0,
-        locked: false,
-        last_hit_ms: 0,
-        snr_db: 0.0,
-        noise_floor_db: -120.0,
+        role: "scan".into(),
+        ..Default::default()
     }]
 }
 
@@ -403,6 +439,92 @@ fn clamp_center_hz(
         return (device_min + device_max) / 2;
     }
     center_hz.clamp(limit_min, limit_max)
+}
+
+fn classify_and_decode_hit(
+    iq: &[Complex<f32>],
+    frequency_hz: u64,
+    channel_bw: u32,
+    mode: &str,
+    range_name: &str,
+    snr_db: f32,
+    cfg: &ScannerConfig,
+    db: &Db,
+    events_tx: &broadcast::Sender<ScannerEvent>,
+    device_center_hz: u64,
+    sample_rate: u32,
+) -> crate::signal_id::Classification {
+    let demod_mode = if cfg.use_arrl_bandplan {
+        crate::arrl_bandplan::recommended_mode(frequency_hz, mode)
+    } else {
+        mode
+    };
+    let demod_rate = sample_rate.min(500_000).max(8_000);
+    let demod_audio = auto_decode::extract_demod_audio(
+        iq,
+        device_center_hz,
+        frequency_hz,
+        sample_rate,
+        demod_rate,
+        demod_mode,
+    );
+    let classification = signal_id::classify(
+        frequency_hz,
+        channel_bw,
+        demod_mode,
+        range_name,
+        snr_db,
+        Some((&demod_audio, demod_rate as f32)),
+    );
+    if cfg.auto_decode_all {
+        let timestamp = now_ms();
+        for decoded in auto_decode::try_decode_signal(
+            iq,
+            device_center_hz,
+            sample_rate,
+            frequency_hz,
+            channel_bw,
+            demod_mode,
+            range_name,
+            snr_db,
+            cfg.auto_decode_threshold,
+            timestamp,
+            cfg.use_arrl_bandplan,
+        ) {
+            let _ = db.insert_decoded_message(&decoded);
+            let _ = events_tx.send(ScannerEvent::DecodedMessage(decoded));
+        }
+    }
+    classification
+}
+
+fn apply_classification_to_vfo(
+    vfo: &mut VfoState,
+    classification: &crate::signal_id::Classification,
+    cfg: &ScannerConfig,
+    frequency_hz: u64,
+    mode: &str,
+) {
+    let demod_mode = if cfg.use_arrl_bandplan {
+        crate::arrl_bandplan::recommended_mode(frequency_hz, mode)
+    } else {
+        mode
+    };
+    vfo.mode = demod_mode.to_string();
+    vfo.role = "signal".into();
+    if let Some(seg) = crate::arrl_bandplan::segment_at(frequency_hz) {
+        vfo.segment_label = seg.label.to_string();
+    } else {
+        vfo.segment_label.clear();
+    }
+    vfo.protocol = classification.sub_protocol.clone();
+    vfo.family = classification.top_family.clone();
+    vfo.confidence = classification.top_confidence;
+    let top = classification.candidates.first();
+    vfo.decoder = top
+        .map(|c| c.decoder.clone())
+        .unwrap_or_else(|| "none".into());
+    vfo.candidates = classification.candidates.clone();
 }
 
 /// Convert a noisy FFT-bin peak into a stable channel frequency. Broadcast FM
@@ -979,17 +1101,12 @@ async fn scanner_loop(
                                 // Audio stays opt-in; the slot arrives with a
                                 // Listen control rather than unsolicited sound.
                                 muted: true,
-                                volume: 0.7,
-                                audio_agc: true,
-                                squelch_open: false,
-                                strength_db: -120.0,
-                                audio_level_db: -120.0,
                                 // Operator-placed slots must not be recycled by
                                 // the sweep's hit allocator.
                                 locked: true,
                                 last_hit_ms: now_ms(),
-                                snr_db: 0.0,
-                                noise_floor_db: -120.0,
+                                role: "signal".into(),
+                                ..Default::default()
                             });
                         }
                         runtime.vfo_states.clone()
@@ -1219,13 +1336,18 @@ async fn scanner_loop(
                         cfg.confirm_ms,
                     );
                 if confirmed {
-                    let classification = signal_id::classify(
+                    let classification = classify_and_decode_hit(
+                        &iq,
                         frequency_hz,
                         channel_bw,
                         mode,
                         &range_name,
                         snr,
-                        None, // audio analysis happens on VFO identify / auto-decode path
+                        &cfg,
+                        &db,
+                        &events_tx,
+                        status.center_freq_hz,
+                        status.sample_rate,
                     );
                     let top = classification.candidates.first();
                     let decoder = top
@@ -1281,16 +1403,17 @@ async fn scanner_loop(
                                     frequency_hz,
                                     mode: mode.to_string(),
                                     muted: true,
-                                    volume: 0.7,
-                                    audio_agc: true,
                                     squelch_open: true,
                                     strength_db: *peak,
-                                    audio_level_db: -120.0,
                                     locked: true,
                                     last_hit_ms: now,
                                     snr_db: snr,
                                     noise_floor_db: noise_floor,
+                                    role: "signal".into(),
+                                    ..Default::default()
                                 });
+                                let vfo = runtime.vfo_states.last_mut().expect("vfo slot");
+                                apply_classification_to_vfo(vfo, &classification, &cfg, frequency_hz, mode);
                                 Some(runtime.vfo_states.len() - 1)
                             } else {
                                 None
@@ -1299,11 +1422,13 @@ async fn scanner_loop(
                         if let Some(index) = index {
                             let vfo = &mut runtime.vfo_states[index];
                             vfo.frequency_hz = frequency_hz;
-                            vfo.mode = mode.to_string();
                             vfo.strength_db = *peak;
                             vfo.squelch_open = true;
                             vfo.locked = true;
                             vfo.last_hit_ms = now;
+                            vfo.snr_db = snr;
+                            vfo.noise_floor_db = noise_floor;
+                            apply_classification_to_vfo(vfo, &classification, &cfg, frequency_hz, mode);
                         }
                     }
                     if active_range.as_ref().is_some_and(|range| range.hold_ms > 0) {
@@ -1388,6 +1513,19 @@ async fn scanner_loop(
                 }
                 if !vfo.muted && cfg.scan_hold_on_audio && vfo.squelch_open {
                     vfo.squelch_open = vfo.audio_level_db >= cfg.voice_audio_min_db;
+                }
+                if !vfo.locked
+                    && vfo.role == "signal"
+                    && !vfo.squelch_open
+                    && vfo.audio_level_db < -42.0
+                {
+                    vfo.role = "idle".into();
+                    vfo.protocol.clear();
+                    vfo.family.clear();
+                    vfo.decoder.clear();
+                    vfo.confidence = 0.0;
+                    vfo.candidates.clear();
+                    vfo.segment_label.clear();
                 }
             }
             let signal_present = runtime
@@ -2106,8 +2244,6 @@ mod scan_window_tests {
             frequency_hz: 162_400_000,
             mode: "nfm".into(),
             muted: true,
-            volume: 0.7,
-            audio_agc: true,
             squelch_open: true,
             strength_db: -40.0,
             audio_level_db: -20.0,
@@ -2115,6 +2251,7 @@ mod scan_window_tests {
             last_hit_ms: 1,
             snr_db: 12.0,
             noise_floor_db: -90.0,
+            ..Default::default()
         };
         let unmuted = VfoState {
             id: 1,

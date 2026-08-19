@@ -60,6 +60,7 @@ export const navSections: NavSection[] = [
     id: 'system',
     label: 'System',
     items: [
+      { label: 'Profiles', href: '#/profiles', description: 'Hardware profiles and bookmarks' },
       { label: 'Settings', href: '#/settings', description: 'Device, receiver, scanner, audio' },
       { label: 'Debug', href: '#/debug', description: 'Stats, logs, classifier state' },
     ],
