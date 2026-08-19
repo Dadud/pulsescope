@@ -457,10 +457,7 @@ impl AppState {
                 continue;
             };
             if let Some(handle) = self.scanner.read().as_ref() {
-                crate::scanner::send_command(
-                    &handle.cmd_tx,
-                    crate::scanner::ScannerCommand::Stop,
-                );
+                crate::scanner::send_command(&handle.cmd_tx, crate::scanner::ScannerCommand::Stop);
             }
             self.audio.clear_queue();
             self.receiver_session.lock().release("scanner");
@@ -516,9 +513,9 @@ impl AppState {
                 tokio::time::sleep(Duration::from_millis(duration_ms)).await;
                 if let Some(handle) = app.scanner.read().as_ref() {
                     crate::scanner::send_command(
-                    &handle.cmd_tx,
-                    crate::scanner::ScannerCommand::Stop,
-                );
+                        &handle.cmd_tx,
+                        crate::scanner::ScannerCommand::Stop,
+                    );
                 }
                 app.audio.clear_queue();
                 app.receiver_session.lock().release(&owner);

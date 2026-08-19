@@ -34,10 +34,7 @@ pub fn resolve_under(root: &Path, user_path: &str) -> anyhow::Result<PathBuf> {
             })
             .transpose()?
             .unwrap_or_else(|| root.clone());
-        let name = candidate
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_default();
+        let name = candidate.file_name().map(PathBuf::from).unwrap_or_default();
         parent.join(name)
     };
     if !resolved.starts_with(&root) {

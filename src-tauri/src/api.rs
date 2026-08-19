@@ -483,7 +483,7 @@ async fn auth_gate(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-  // Query tokens leak into logs and Referer; HTTP uses Bearer only.
+    // Query tokens leak into logs and Referer; HTTP uses Bearer only.
     if header == format!("Bearer {expected}") {
         Ok(next.run(req).await)
     } else {
@@ -534,7 +534,9 @@ fn network_export_allowed(s: &ApiState) -> Result<(), (StatusCode, Json<Value>)>
     }
     Err((
         StatusCode::FORBIDDEN,
-        Json(json!({"error":"network export is disabled; set streaming.network_export_enabled in expert settings"})),
+        Json(
+            json!({"error":"network export is disabled; set streaming.network_export_enabled in expert settings"}),
+        ),
     ))
 }
 
@@ -1730,7 +1732,7 @@ async fn device_status(State(s): State<ApiState>) -> impl IntoResponse {
     } else {
         "hardware"
     };
-  Json(json!({
+    Json(json!({
         "connected": status.connected,
         "lifecycle": status.lifecycle,
         "driver": status.driver,
@@ -3988,8 +3990,7 @@ async fn iq_network_start(
             Ok(()) => Json(json!({"ok":true,"status":s.0.iq_network.status()})).into_response(),
             Err(e) => Json(json!({"ok":false,"error":e.to_string()})).into_response(),
         },
-        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")}))
-            .into_response(),
+        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")})).into_response(),
     }
 }
 async fn iq_network_stop(State(s): State<ApiState>) -> impl IntoResponse {
@@ -4019,8 +4020,7 @@ async fn audio_network_start(
             Ok(()) => Json(json!({"ok":true,"status":s.0.audio.network_status()})).into_response(),
             Err(e) => Json(json!({"ok":false,"error":e.to_string()})).into_response(),
         },
-        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")}))
-            .into_response(),
+        Err(e) => Json(json!({"ok":false,"error":format!("invalid target: {e}")})).into_response(),
     }
 }
 async fn audio_network_stop(State(s): State<ApiState>) -> impl IntoResponse {

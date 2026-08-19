@@ -1095,10 +1095,7 @@ impl DeviceLayer {
             })
             .max()
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no analog bandwidth range supports sample rate {} Hz",
-                    rate
-                )
+                anyhow::anyhow!("no analog bandwidth range supports sample rate {} Hz", rate)
             })?;
         self.set_bandwidth(bandwidth)?;
         Ok(bandwidth)
