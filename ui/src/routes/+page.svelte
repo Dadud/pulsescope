@@ -57,6 +57,7 @@
   let messageSearch = $state('');
   let dockFilter = $state('all');
   let logDockOpen = $state(true);
+  let selectedVfoId = $state(0);
   let notice = $state('');
   let canvas: HTMLCanvasElement;
   let waterfallCanvas: HTMLCanvasElement;
@@ -332,27 +333,52 @@
 
   async function tuneFromSpectrum(event: MouseEvent) {
     const target = event.currentTarget as HTMLCanvasElement;
-    if (!vfos.length || sampleRateHz <= 0) return;
+    const vfo = vfos.find((v) => v.id === selectedVfoId) ?? vfos[0];
+    if (!vfo || sampleRateHz <= 0) return;
     const rect = target.getBoundingClientRect();
     const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
     const frequencyHz = Math.round(centerFreqHz - sampleRateHz / 2 + fraction * sampleRateHz);
-    await Api.vfoFrequency(vfos[0].id, frequencyHz);
-    notice = `VFO ${vfos[0].id} tuned to ${fmtHz(frequencyHz)}`;
+    vfos = vfos.map((v) => v.id === vfo.id ? { ...v, frequency_hz: frequencyHz } : v);
+    await Api.vfoFrequency(vfo.id, frequencyHz);
+    notice = `VFO ${vfo.id} tuned to ${fmtHz(frequencyHz)}`;
     window.setTimeout(() => { if (notice.startsWith('VFO ')) notice = ''; }, 1800);
   }
 
   async function setVfoFrequency(id: number, event: Event) {
     const value = Number((event.currentTarget as HTMLInputElement).value);
-    if (Number.isFinite(value) && value > 0) await Api.vfoFrequency(id, value);
+    if (Number.isFinite(value) && value > 0) {
+      vfos = vfos.map((v) => v.id === id ? { ...v, frequency_hz: value } : v);
+      await Api.vfoFrequency(id, value);
+    }
   }
   async function setVfoMode(id: number, event: Event) {
-    await Api.vfoMode(id, (event.currentTarget as HTMLSelectElement).value);
+    const mode = (event.currentTarget as HTMLSelectElement).value;
+    vfos = vfos.map((v) => v.id === id ? { ...v, mode } : v);
+    await Api.vfoMode(id, mode);
+  }
+
+  async function toggleVfoMute(id: number, muted: boolean) {
+    vfos = vfos.map((v) => v.id === id ? { ...v, muted } : v);
+    await Api.vfoMute(id, muted);
+  }
+
+  async function setVfoVolumeLocal(id: number, value: number) {
+    vfos = vfos.map((v) => v.id === id ? { ...v, volume: value } : v);
+    await Api.vfoVolume(id, value);
+  }
+
+  async function toggleVfoAgc(id: number, on: boolean) {
+    vfos = vfos.map((v) => v.id === id ? { ...v, audio_agc: on } : v);
+    await Api.vfoAgc(id, on);
   }
 
   async function identifyVfo(id: number) {
     try {
       const result = await Api.vfoIdentify(id);
-      notice = result?.available === false ? result.reason : `VFO ${id} identification requested`;
+      const protocol = result?.classification ?? result?.family;
+      notice = protocol
+        ? `VFO ${id}: ${protocol} (${Number(result?.confidence ?? 0).toFixed(2)})`
+        : (result?.error ?? 'Identification complete');
     } catch (e) { notice = String(e); }
     setTimeout(() => (notice = ''), 3500);
   }
@@ -441,6 +467,7 @@
       <div class="runtime-status">
         <span class="status-pill" class:on={connected}>● {connected ? 'PWR' : 'OFF'}</span>
         <span class="status-pill" class:on={scanRunning}>● {scanRunning ? 'SCANNING' : 'IDLE'}</span>
+        <span class="status-pill on">● AUTO-DECODE</span>
         <button type="button" class="dock-toggle" class:on={logDockOpen} onclick={toggleLogDock}>
           {logDockOpen ? '▼' : '▲'} Messages
         </button>
@@ -458,7 +485,7 @@
 
     <div class="spectrum-wrap card">
       <h2>Spectrum <small class="fft-status">{spectrumError || (spectrumBins.length ? `${spectrumBins.length} FFT bins` : 'waiting for FFT')}</small></h2>
-      <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune VFO 0"></canvas>
+      <canvas bind:this={canvas} onclick={tuneFromSpectrum} title="Click to tune selected VFO"></canvas>
       <div class="waterfall-head"><h2 class="waterfall-title">Waterfall · live FFT history</h2><label>Gain <input aria-label="Waterfall gain" type="range" min="0.25" max="4" step="0.25" value={waterfallGain} oninput={setWaterfallGain} /></label><select aria-label="Waterfall palette" value={waterfallPalette} onchange={setWaterfallPalette}><option value="classic">Classic</option><option value="mono">Mono</option></select></div>
       <canvas class="waterfall" bind:this={waterfallCanvas} aria-label="Live waterfall from FFT bins"></canvas>
     </div>
@@ -478,9 +505,12 @@
 
     <div class="vfo-grid">
       {#each vfos as v (v.id)}
-        <div class="vfo-tile card">
-          <div class="vfo-freq">{fmtHz(v.frequency_hz)}</div>
-          <div class="vfo-controls">
+        <div class="vfo-tile card" class:selected={selectedVfoId === v.id} role="button" tabindex="0" onclick={() => (selectedVfoId = v.id)} onkeydown={(e) => e.key === 'Enter' && (selectedVfoId = v.id)}>
+          <div class="vfo-head">
+            <div class="vfo-freq">{fmtHz(v.frequency_hz)}</div>
+            {#if v.id === 0}<span class="scan-badge">SCAN</span>{/if}
+          </div>
+          <div class="vfo-controls" onclick={(e) => e.stopPropagation()}>
             <input class="freq-input" type="number" step="100" value={v.frequency_hz} aria-label="VFO {v.id} frequency" onchange={(e) => setVfoFrequency(v.id, e)} />
             <select aria-label="VFO {v.id} mode" value={v.mode} onchange={(e) => setVfoMode(v.id, e)}>
               <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="lsb">LSB</option><option value="usb">USB</option>
@@ -495,20 +525,20 @@
             <polyline points={miniTrace(v.frequency_hz)} fill="none" stroke="var(--accent)" stroke-width="1.2" vector-effect="non-scaling-stroke" />
             <line x1="0" y1="38" x2="100" y2="38" stroke="var(--line-strong)" stroke-width="0.5" />
           </svg>
-          <div class="vfo-bar">
+          <div class="vfo-bar" onclick={(e) => e.stopPropagation()}>
             <label for="vfo-volume-{v.id}">Vol</label>
             <input
               id="vfo-volume-{v.id}"              type="range" min="0" max="1" step="0.01"
               value={v.volume}
-              oninput={(e) => Api.vfoVolume(v.id, parseFloat((e.target as HTMLInputElement).value))}
+              oninput={(e) => setVfoVolumeLocal(v.id, parseFloat((e.target as HTMLInputElement).value))}
             />
             <button class="mini" class:off={v.muted}
-              onclick={() => Api.vfoMute(v.id, !v.muted)}>
+              onclick={() => toggleVfoMute(v.id, !v.muted)}>
               {v.muted ? '🔇' : '🔊'}
             </button>
           </div>
-          <div class="vfo-actions">
-            <button class="mini" class:on={v.audio_agc} onclick={() => Api.vfoAgc(v.id, !v.audio_agc)}>AGC</button>
+          <div class="vfo-actions" onclick={(e) => e.stopPropagation()}>
+            <button class="mini" class:on={v.audio_agc} onclick={() => toggleVfoAgc(v.id, !v.audio_agc)}>AGC</button>
             <button class="mini" onclick={() => identifyVfo(v.id)}>ID</button>
             <button class="mini" onclick={() => unsupportedAction('Hold')}>Hold</button>
             <button class="mini" onclick={() => unsupportedAction('Per-VFO recording')}>REC</button>
@@ -639,7 +669,10 @@
   .history-empty { color: var(--fg-dim); padding: 8px 0; font-size: 12px; }
 
   .vfo-grid { order: 2; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
-  .vfo-tile { display: flex; flex-direction: column; gap: 4px; }
+  .vfo-tile { display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
+  .vfo-tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .vfo-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .scan-badge { font: 9px var(--mono); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 3px; padding: 1px 4px; }
   .vfo-freq { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
   .vfo-mode { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
   .vfo-controls { display: flex; gap: 4px; }

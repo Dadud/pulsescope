@@ -513,6 +513,8 @@ async fn scan_config(State(s): State<ApiState>) -> impl IntoResponse {
         "squelch_db": cfg.scanner.squelch_db,
         "auto_squelch_mode": cfg.scanner.auto_squelch_mode,
         "freq_step_hz": cfg.scanner.freq_step_hz,
+        "auto_decode_all": cfg.scanner.auto_decode_all,
+        "auto_decode_threshold": cfg.scanner.auto_decode_threshold,
     }))
 }
 
@@ -535,7 +537,8 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
     if let Err(e) = s.0.device.set_bandwidth(range.channel_bw_hz) {
         return Json(json!({"ok": false, "error": format!("failed to set channel bandwidth: {e}")}));
     }
-    if let Err(e) = s.0.device.set_frequency(range.start_hz) {
+    let center_hz = range.start_hz + range.end_hz.saturating_sub(range.start_hz) / 2;
+    if let Err(e) = s.0.device.set_frequency(center_hz) {
         return Json(json!({"ok": false, "error": format!("failed to tune device: {e}")}));
     }
     // Lazily create the scanner if needed.
@@ -559,7 +562,8 @@ async fn scan_start(State(s): State<ApiState>, Json(req): Json<ScanStartReq>) ->
 async fn start_configured_sidecars(s: &ApiState) {
     let cfg = s.0.config.read().clone();
     let mut jobs: Vec<(&str, String, Vec<String>)> = Vec::new();
-    if cfg.rtl433.enabled {
+    let rtl433_wanted = cfg.rtl433.enabled || cfg.scanner.auto_decode_all;
+    if rtl433_wanted {
         let device = s.0.device.status();
         jobs.push(("rtl_433", cfg.rtl433.path, vec![
             "-r".into(), "-".into(), "-s".into(), device.sample_rate.to_string(),

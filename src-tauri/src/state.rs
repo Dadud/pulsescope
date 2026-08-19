@@ -89,7 +89,12 @@ impl AppState {
         let Some(range) = range else { return; };
         if self.device.set_sample_rate(range.sample_rate_hz).is_err()
             || self.device.set_bandwidth(range.channel_bw_hz).is_err()
-            || self.device.set_frequency(range.start_hz).is_err() {
+        {
+            self.receiver_session.lock().release("scanner");
+            return;
+        }
+        let center_hz = range.start_hz + range.end_hz.saturating_sub(range.start_hz) / 2;
+        if self.device.set_frequency(center_hz).is_err() {
             self.receiver_session.lock().release("scanner");
             return;
         }

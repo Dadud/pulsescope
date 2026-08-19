@@ -156,6 +156,9 @@ pub struct ScannerConfig {
     pub scan_hold_on_audio: bool,
     pub scan_hold_max_ms: u64,
     pub per_freq_squelch: bool,
+    /// Classify and run native decoders on every strong signal hit.
+    pub auto_decode_all: bool,
+    pub auto_decode_threshold: f32,
 }
 impl Default for ScannerConfig {
     fn default() -> Self {
@@ -177,6 +180,8 @@ impl Default for ScannerConfig {
             scan_hold_on_audio: true,
             scan_hold_max_ms: 10_000,
             per_freq_squelch: true,
+            auto_decode_all: true,
+            auto_decode_threshold: 0.5,
         }
     }
 }

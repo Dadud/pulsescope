@@ -14,6 +14,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod auto_decode;
 mod audio;
 mod capture;
 mod config;

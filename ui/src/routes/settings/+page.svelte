@@ -122,6 +122,14 @@
         <label for="squelch">Squelch (dB)</label>
         <input id="squelch" type="number" step="0.5" bind:value={cfg.scanner.squelch_db} />
       </div>
+      <div class="row">
+        <label for="auto-decode-all">Auto-decode all protocols</label>
+        <input id="auto-decode-all" type="checkbox" bind:checked={cfg.scanner.auto_decode_all} />
+      </div>
+      <div class="row">
+        <label for="auto-decode-threshold">Auto-decode threshold</label>
+        <input id="auto-decode-threshold" type="number" min="0" max="1" step="0.05" bind:value={cfg.scanner.auto_decode_threshold} />
+      </div>
     </section>
 
     <section class="card">

@@ -4,6 +4,7 @@
 // crate so the Tauri macro and integration tests can reach the modules.
 
 pub mod api;
+pub mod auto_decode;
 pub mod audio;
 pub mod capture;
 pub mod config;
