@@ -214,6 +214,41 @@
     </section>
   {/if}
 
+  <section class="card">
+    <h2>Decoder alerts</h2>
+    <p class="section-lead">
+      Browser notifications for normalized decoder events while PulseScope is open in the background.
+    </p>
+    <label class="row">
+      <span>Enable alerts<small>Uses the browser Notification API; no server push keys required.</small></span>
+      <input
+        type="checkbox"
+        checked={decoderAlerts.enabled}
+        onchange={(event) => {
+          const enabled = event.currentTarget.checked;
+          if (enabled && alertPermission !== 'granted') void enableDecoderAlerts();
+          else toggleDecoderAlerts(enabled);
+        }}
+      />
+    </label>
+    {#if alertPermission !== 'granted'}
+      <button onclick={enableDecoderAlerts}>Request notification permission</button>
+    {/if}
+    {#if alertNotice}<p class="control-notice" role="status">{alertNotice}</p>{/if}
+    <div class="alert-grid">
+      {#each DECODER_ALERT_PROTOCOL_OPTIONS as option}
+        <label class="alert-item">
+          <input
+            type="checkbox"
+            checked={decoderAlerts.protocols.includes(option.id)}
+            onchange={(event) => toggleDecoderAlertProtocol(option.id, event.currentTarget.checked)}
+          />
+          {option.label}
+        </label>
+      {/each}
+    </div>
+  </section>
+
   {#if expertMode}<section class="card">
     <h2>Per-band scan overrides</h2>
     {#each banks as bank (bank.name)}
@@ -271,41 +306,6 @@
         <label for="output-rate">Output sample rate</label>
         <input id="output-rate" type="number" bind:value={cfg.audio.sample_rate} />
       </div>{/if}
-    </section>
-
-    <section class="card">
-      <h2>Decoder alerts</h2>
-      <p class="section-lead">
-        Browser notifications for normalized decoder events while PulseScope is open in the background.
-      </p>
-      <label class="row">
-        <span>Enable alerts<small>Uses the browser Notification API; no server push keys required.</small></span>
-        <input
-          type="checkbox"
-          checked={decoderAlerts.enabled}
-          onchange={(event) => {
-            const enabled = event.currentTarget.checked;
-            if (enabled && alertPermission !== 'granted') void enableDecoderAlerts();
-            else toggleDecoderAlerts(enabled);
-          }}
-        />
-      </label>
-      {#if alertPermission !== 'granted'}
-        <button onclick={enableDecoderAlerts}>Request notification permission</button>
-      {/if}
-      {#if alertNotice}<p class="control-notice" role="status">{alertNotice}</p>{/if}
-      <div class="alert-grid">
-        {#each DECODER_ALERT_PROTOCOL_OPTIONS as option}
-          <label class="alert-item">
-            <input
-              type="checkbox"
-              checked={decoderAlerts.protocols.includes(option.id)}
-              onchange={(event) => toggleDecoderAlertProtocol(option.id, event.currentTarget.checked)}
-            />
-            {option.label}
-          </label>
-        {/each}
-      </div>
     </section>
 
     <section class="card">
