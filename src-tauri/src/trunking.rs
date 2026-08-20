@@ -343,6 +343,31 @@ pub fn grant_to_call(grant: &TsbkGrant, frequency_hz: u64) -> TrunkingCall {
     }
 }
 
+pub fn grant_is_watched(
+    grant: &TsbkGrant,
+    system: Option<&str>,
+    watched: &[(String, String)],
+) -> bool {
+    watched.iter().any(|(sys, tg)| {
+        tg == &grant.talkgroup && (system.is_none() || system == Some(sys.as_str()))
+    })
+}
+
+pub fn filter_grants(
+    grants: Vec<TsbkGrant>,
+    watchlist_only: bool,
+    system: Option<&str>,
+    watched: &[(String, String)],
+) -> Vec<TsbkGrant> {
+    if !watchlist_only {
+        return grants;
+    }
+    grants
+        .into_iter()
+        .filter(|grant| grant_is_watched(grant, system, watched))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +466,33 @@ mod tests {
         let grant = parse_tsbk(&bytes).expect("update");
         assert_eq!(grant.opcode, TSBK_GROUP_VOICE_GRANT_UPDT);
         assert_eq!(grant.talkgroup, "77");
+    }
+
+    #[test]
+    fn filter_grants_honors_watchlist_only_mode() {
+        let grants = vec![
+            TsbkGrant {
+                opcode: TSBK_GROUP_VOICE_GRANT,
+                talkgroup: "1234".into(),
+                source: "1".into(),
+                channel: 1,
+                encrypted: false,
+                last_block: true,
+            },
+            TsbkGrant {
+                opcode: TSBK_GROUP_VOICE_GRANT,
+                talkgroup: "9999".into(),
+                source: "2".into(),
+                channel: 2,
+                encrypted: false,
+                last_block: true,
+            },
+        ];
+        let watched = vec![("County".into(), "1234".into())];
+        let all = filter_grants(grants.clone(), false, Some("County"), &watched);
+        assert_eq!(all.len(), 2);
+        let filtered = filter_grants(grants, true, Some("County"), &watched);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].talkgroup, "1234");
     }
 }

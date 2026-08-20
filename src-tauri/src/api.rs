@@ -153,6 +153,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/v2/spectrum/stream", get(spectrum_stream_ws))
         .route("/signal_events", get(signal_events))
         .route("/spectrum_occupancy", get(spectrum_occupancy))
+        .route("/spectrum_occupancy/heatmap", get(spectrum_occupancy_heatmap))
         .route("/signal_id/file", post(signal_id_file))
         .route("/signal_id/fingerprints", get(signal_id_fps))
         .route(
@@ -183,6 +184,9 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/trunking/status", get(trunking_status))
         .route("/trunking/lock", post(trunking_lock))
         .route("/trunking/calls", get(trunking_calls))
+        .route("/trunking/watchlist", get(trunking_watchlist))
+        .route("/trunking/watchlist/toggle", post(trunking_watchlist_toggle))
+        .route("/trunking/watchlist-only", post(trunking_watchlist_only))
         .route("/trunking/import", post(trunking_import))
         .route("/trunking/discovery/start", post(trunking_disc_start))
         .route("/trunking/discovery/stop", post(trunking_disc_stop))
@@ -2866,7 +2870,22 @@ async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> 
         }
     }
     let imported_voice = s.0.trunking.read().voice_channels.clone();
-    let follow_hz = crate::trunking::follow_frequency(&observation, &imported_voice);
+    let watchlist_only = s.0.trunking.read().watchlist_only;
+    let watched = s.0.db.list_talkgroup_watchlist().unwrap_or_default();
+    let active_system = s.0.trunking.read().system.clone();
+    let filtered_grants = crate::trunking::filter_grants(
+        observation.grants.clone(),
+        watchlist_only,
+        active_system.as_deref(),
+        &watched,
+    );
+    let follow_hz = crate::trunking::follow_frequency(
+        &crate::trunking::ControlChannelObservation {
+            grants: filtered_grants.clone(),
+            idens: observation.idens.clone(),
+        },
+        &imported_voice,
+    );
     if let Some(voice_hz) = follow_hz {
         send_vfo(
             &s,
@@ -2884,7 +2903,7 @@ async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> 
         t.control_channel_hz = control_hz;
     }
     t.reason = Some(reason.clone());
-    for grant in &observation.grants {
+    for grant in &filtered_grants {
         let freq = follow_hz
             .or(t.control_channel_hz)
             .unwrap_or(status.center_freq_hz);
@@ -2906,9 +2925,11 @@ async fn trunking_start(State(s): State<ApiState>, req: Option<Json<Value>>) -> 
         "running": true,
         "native": true,
         "p25_fir": true,
-        "grants": observation.grants,
+        "grants": filtered_grants,
         "idens": observation.idens,
         "follow_hz": follow_hz,
+        "watchlist_only": watchlist_only,
+        "watched_count": watched.len(),
         "reason": reason,
         "missing_gate": "live control-channel hardware verification",
         "status": &*t
@@ -2940,6 +2961,58 @@ async fn trunking_lock(
 }
 async fn trunking_calls(State(s): State<ApiState>) -> impl IntoResponse {
     Json(serde_json::to_value(&s.0.trunking.read().calls).unwrap())
+}
+
+async fn trunking_watchlist(State(s): State<ApiState>) -> impl IntoResponse {
+    let watched = s.0.db.list_talkgroup_watchlist().unwrap_or_default();
+    let talkgroups = s.0.db.list_talkgroups().unwrap_or_default();
+    let watchlist_only = s.0.trunking.read().watchlist_only;
+    Json(json!({
+        "watchlist_only": watchlist_only,
+        "watched": watched.iter().map(|(system_name, talkgroup_id)| json!({
+            "system_name": system_name,
+            "talkgroup_id": talkgroup_id,
+        })).collect::<Vec<_>>(),
+        "talkgroups": talkgroups,
+    }))
+}
+
+#[derive(Deserialize)]
+struct WatchlistToggleReq {
+    system_name: String,
+    talkgroup_id: String,
+    watched: bool,
+}
+
+async fn trunking_watchlist_toggle(
+    State(s): State<ApiState>,
+    Json(req): Json<WatchlistToggleReq>,
+) -> impl IntoResponse {
+    let ok = s
+        .0
+        .db
+        .set_talkgroup_watched(
+            &req.system_name,
+            &req.talkgroup_id,
+            req.watched,
+            crate::scanner::now_ms(),
+        )
+        .is_ok();
+    Json(json!({"ok": ok}))
+}
+
+#[derive(Deserialize)]
+struct WatchlistOnlyReq {
+    enabled: bool,
+}
+
+async fn trunking_watchlist_only(
+    State(s): State<ApiState>,
+    Json(req): Json<WatchlistOnlyReq>,
+) -> impl IntoResponse {
+    let mut t = s.0.trunking.write();
+    t.watchlist_only = req.enabled;
+    Json(json!({"ok": true, "watchlist_only": t.watchlist_only}))
 }
 async fn trunking_import(State(s): State<ApiState>, Json(def): Json<Value>) -> impl IntoResponse {
     let mut t = s.0.trunking.write();
@@ -5271,6 +5344,53 @@ async fn spectrum_occupancy(State(s): State<ApiState>) -> impl IntoResponse {
             })
         })
         .collect::<Vec<_>>()))
+}
+
+#[derive(Deserialize)]
+struct HeatmapQuery {
+    hours: Option<u32>,
+}
+
+async fn spectrum_occupancy_heatmap(
+    State(s): State<ApiState>,
+    Query(q): Query<HeatmapQuery>,
+) -> impl IntoResponse {
+    let hours = q.hours.unwrap_or(24).clamp(1, 168);
+    let now_bucket = crate::scanner::now_ms() / 900_000;
+    let since_bucket = now_bucket.saturating_sub(i64::from(hours.saturating_mul(4)));
+    let rows = s
+        .0
+        .db
+        .occupancy_since_bucket(since_bucket)
+        .unwrap_or_default();
+    let mut time_buckets = Vec::new();
+    let mut frequency_buckets = Vec::new();
+    for row in &rows {
+        if !time_buckets.contains(&row.time_bucket_15min) {
+            time_buckets.push(row.time_bucket_15min);
+        }
+        if !frequency_buckets.contains(&row.frequency_bucket_hz) {
+            frequency_buckets.push(row.frequency_bucket_hz);
+        }
+    }
+    time_buckets.sort_unstable();
+    frequency_buckets.sort_unstable();
+    Json(json!({
+        "hours": hours,
+        "since_bucket": since_bucket,
+        "time_buckets": time_buckets,
+        "frequency_buckets_hz": frequency_buckets,
+        "cells": rows.iter().map(|row| json!({
+            "time_bucket_15min": row.time_bucket_15min,
+            "frequency_bucket_hz": row.frequency_bucket_hz,
+            "avg_power_db": row.avg_power_db,
+            "peak_power_db": row.peak_power_db,
+            "avg_above_floor_db": row.avg_above_floor_db,
+            "sample_count": row.sample_count,
+            "noise_floor_db": row.noise_floor_db,
+            "occupancy": crate::scanner::occupancy_fraction(row),
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 #[derive(Deserialize)]

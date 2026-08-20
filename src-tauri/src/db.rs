@@ -26,6 +26,7 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
         conn.execute_batch(include_str!("../migrations/002_receiver_workspace.sql"))?;
+        conn.execute_batch(include_str!("../migrations/003_trunk_watchlist.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
@@ -362,6 +363,75 @@ impl Db {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn occupancy_since_bucket(
+        &self,
+        since_bucket: i64,
+    ) -> anyhow::Result<Vec<SpectrumOccupancy>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db \
+             FROM spectrum_occupancy WHERE time_bucket_15min >= ?1 \
+             ORDER BY time_bucket_15min ASC, frequency_bucket_hz ASC",
+        )?;
+        let rows = q.query_map([since_bucket], |r| {
+            Ok(SpectrumOccupancy {
+                frequency_bucket_hz: r.get::<_, i64>(0)? as u64,
+                time_bucket_15min: r.get(1)?,
+                avg_power_db: r.get(2)?,
+                peak_power_db: r.get(3)?,
+                avg_above_floor_db: r.get(4)?,
+                sample_count: r.get(5)?,
+                noise_floor_db: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_talkgroup_watchlist(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT system_name, talkgroup_id FROM talkgroup_watchlist ORDER BY system_name, talkgroup_id",
+        )?;
+        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_talkgroup_watched(
+        &self,
+        system_name: &str,
+        talkgroup_id: &str,
+        watched: bool,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        let c = self.conn();
+        if watched {
+            c.execute(
+                "INSERT INTO talkgroup_watchlist (system_name, talkgroup_id, created_ms) VALUES (?1,?2,?3) \
+                 ON CONFLICT(system_name, talkgroup_id) DO NOTHING",
+                rusqlite::params![system_name, talkgroup_id, now_ms],
+            )?;
+        } else {
+            c.execute(
+                "DELETE FROM talkgroup_watchlist WHERE system_name=?1 AND talkgroup_id=?2",
+                rusqlite::params![system_name, talkgroup_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn is_talkgroup_watched(&self, system_name: &str, talkgroup_id: &str) -> bool {
+        self.conn()
+            .query_row(
+                "SELECT 1 FROM talkgroup_watchlist WHERE system_name=?1 AND talkgroup_id=?2 LIMIT 1",
+                rusqlite::params![system_name, talkgroup_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     pub fn decoded_message_count(&self) -> anyhow::Result<i64> {
@@ -795,6 +865,59 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trunk_watchlist_migration_is_idempotent_and_tracks_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-watchlist-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        db.set_talkgroup_watched("County", "1234", true, 1_000).unwrap();
+        db.set_talkgroup_watched("County", "5678", true, 1_000).unwrap();
+        db.set_talkgroup_watched("County", "5678", false, 2_000).unwrap();
+        let rows = db.list_talkgroup_watchlist().unwrap();
+        assert_eq!(rows, vec![("County".into(), "1234".into())]);
+        assert!(db.is_talkgroup_watched("County", "1234"));
+        assert!(!db.is_talkgroup_watched("County", "5678"));
+        drop(db);
+        let reopened = Db::open(&path).unwrap();
+        assert_eq!(reopened.list_talkgroup_watchlist().unwrap().len(), 1);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn occupancy_since_bucket_returns_ordered_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-occupancy-heatmap-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        for (bucket, freq) in [(1_i64, 100_000_000_u64), (2, 101_000_000), (2, 100_000_000)] {
+            db.upsert_occupancy(&super::SpectrumOccupancy {
+                frequency_bucket_hz: freq,
+                time_bucket_15min: bucket,
+                avg_power_db: -70.0,
+                peak_power_db: -60.0,
+                avg_above_floor_db: 20.0,
+                sample_count: 1,
+                noise_floor_db: -90.0,
+            })
+            .unwrap();
+        }
+        let rows = db.occupancy_since_bucket(2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].time_bucket_15min, 2);
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 

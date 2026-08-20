@@ -2,6 +2,13 @@
   import { onMount } from 'svelte';
   import { Api } from '$lib/api';
   import { gainStageLabel, isCommonRfSetting } from '$lib/spectrum-display';
+  import {
+    DECODER_ALERT_PROTOCOL_OPTIONS,
+    loadDecoderAlertPrefs,
+    requestDecoderAlertPermission,
+    saveDecoderAlertPrefs,
+    type DecoderAlertPrefs,
+  } from '$lib/decoder-alerts';
 
   let cfg = $state<any>(null);
   let status = $state<any>(null);
@@ -14,6 +21,37 @@
   let expertMode = $state(false);
   let controlNotice = $state('');
   let sampleRateBusy = $state(false);
+  let decoderAlerts = $state<DecoderAlertPrefs>(loadDecoderAlertPrefs());
+  let alertPermission = $state<NotificationPermission | 'unsupported'>(
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  );
+  let alertNotice = $state('');
+
+  function toggleDecoderAlertProtocol(id: string, enabled: boolean) {
+    const protocols = new Set(decoderAlerts.protocols);
+    if (enabled) protocols.add(id);
+    else protocols.delete(id);
+    decoderAlerts = { ...decoderAlerts, protocols: [...protocols] };
+    saveDecoderAlertPrefs(decoderAlerts);
+  }
+
+  function toggleDecoderAlerts(enabled: boolean) {
+    decoderAlerts = { ...decoderAlerts, enabled };
+    saveDecoderAlertPrefs(decoderAlerts);
+  }
+
+  async function enableDecoderAlerts() {
+    alertNotice = 'Requesting notification permission…';
+    alertPermission = await requestDecoderAlertPermission();
+    if (alertPermission === 'granted') {
+      toggleDecoderAlerts(true);
+      alertNotice = 'Decoder alerts enabled for this browser.';
+    } else if (alertPermission === 'unsupported') {
+      alertNotice = 'Notifications are not supported in this browser.';
+    } else {
+      alertNotice = 'Notification permission was not granted.';
+    }
+  }
 
   async function refreshCaps() { try { caps = await Api.deviceCapabilities(); } catch (e) { deviceError = String(e); } }
   async function discoverDevices() {
@@ -61,6 +99,8 @@
 
   onMount(async () => {
     expertMode = localStorage.getItem('pulsescope.expert-mode') === '1';
+    decoderAlerts = loadDecoderAlertPrefs();
+    if (typeof Notification !== 'undefined') alertPermission = Notification.permission;
     try {
       cfg = await Api.settings();
       await discoverDevices();
@@ -234,6 +274,41 @@
     </section>
 
     <section class="card">
+      <h2>Decoder alerts</h2>
+      <p class="section-lead">
+        Browser notifications for normalized decoder events while PulseScope is open in the background.
+      </p>
+      <label class="row">
+        <span>Enable alerts<small>Uses the browser Notification API; no server push keys required.</small></span>
+        <input
+          type="checkbox"
+          checked={decoderAlerts.enabled}
+          onchange={(event) => {
+            const enabled = event.currentTarget.checked;
+            if (enabled && alertPermission !== 'granted') void enableDecoderAlerts();
+            else toggleDecoderAlerts(enabled);
+          }}
+        />
+      </label>
+      {#if alertPermission !== 'granted'}
+        <button onclick={enableDecoderAlerts}>Request notification permission</button>
+      {/if}
+      {#if alertNotice}<p class="control-notice" role="status">{alertNotice}</p>{/if}
+      <div class="alert-grid">
+        {#each DECODER_ALERT_PROTOCOL_OPTIONS as option}
+          <label class="alert-item">
+            <input
+              type="checkbox"
+              checked={decoderAlerts.protocols.includes(option.id)}
+              onchange={(event) => toggleDecoderAlertProtocol(option.id, event.currentTarget.checked)}
+            />
+            {option.label}
+          </label>
+        {/each}
+      </div>
+    </section>
+
+    <section class="card">
       <h2>Receiver location</h2>
       <div class="row"><label for="latitude">Latitude</label><input id="latitude" type="number" step="0.0001" bind:value={cfg.receiver_location.latitude_deg} /></div>
       <div class="row"><label for="longitude">Longitude</label><input id="longitude" type="number" step="0.0001" bind:value={cfg.receiver_location.longitude_deg} /></div>
@@ -269,6 +344,9 @@
   .status-summary { display:flex; flex-wrap:wrap; gap:8px 14px; margin-bottom:10px; padding:10px; background:var(--bg); border:1px solid var(--line); border-radius:7px; font:12px var(--mono); }
   .status-summary .ok { color:var(--ok); }
   .expert-summary { margin-top:10px; padding-top:8px; border-top:1px solid var(--line); }
+  .section-lead { margin: 0 0 10px; color: var(--fg-dim); font-size: 12px; }
+  .alert-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 8px; }
+  .alert-item { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--fg); }
   @media (max-width: 760px) {
     .settings-page { padding:10px; max-width:none; }
     .page-heading { align-items:stretch; flex-direction:column; }

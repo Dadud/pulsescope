@@ -371,6 +371,10 @@ export const Api = {
   trunkingDiscoveryStart: () => postJson('/trunking/discovery/start'),
   trunkingDiscoveryStop: () => postJson('/trunking/discovery/stop'),
   trunkingDiscoveryResults: () => getJson<any[]>('/trunking/discovery/results'),
+  trunkingWatchlist: () => getJson<any>('/trunking/watchlist'),
+  trunkingWatchlistToggle: (body: { system_name: string; talkgroup_id: string; watched: boolean }) =>
+    postJson('/trunking/watchlist/toggle', body),
+  trunkingWatchlistOnly: (enabled: boolean) => postJson('/trunking/watchlist-only', { enabled }),
 
   aeroStatus: () => getJson('/aero/status'),
   aeroMessages: () => getJson<any[]>('/aero/messages'),
@@ -408,6 +412,8 @@ export const Api = {
   signalSegmentBursts: () => postJson('/signal_id/segment_bursts'),
   signalPolyphaseExtract: () => postJson('/signal_id/polyphase_extract'),
   spectrumOccupancy: () => getJson('/spectrum_occupancy'),
+  spectrumOccupancyHeatmap: (hours = 24) =>
+    getJson(`/spectrum_occupancy/heatmap?hours=${encodeURIComponent(String(hours))}`),
 
   jobs: () => getJson<{jobs:any[]}>('/jobs'),
   createJob: (body:any) => postJson('/jobs', body),

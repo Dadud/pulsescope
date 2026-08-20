@@ -598,6 +598,7 @@ pub struct TrunkingRuntime {
     pub zones: Vec<serde_json::Value>,
     pub log: Vec<String>,
     pub reason: Option<String>,
+    pub watchlist_only: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
