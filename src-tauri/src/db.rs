@@ -551,7 +551,11 @@ impl Db {
         format!("{freq_bucket}:{time_bucket}")
     }
 
-    pub fn activity_timeline(&self, since_ms: i64, limit: u32) -> anyhow::Result<Vec<ActivityTimelineEntry>> {
+    pub fn activity_timeline(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<ActivityTimelineEntry>> {
         let mut entries = Vec::new();
         for message in self.recent_decoded_messages(limit)? {
             if message.timestamp_ms < since_ms {
@@ -1050,9 +1054,12 @@ mod tests {
                 .as_nanos()
         ));
         let db = Db::open(&path).unwrap();
-        db.set_talkgroup_watched("County", "1234", true, 1_000).unwrap();
-        db.set_talkgroup_watched("County", "5678", true, 1_000).unwrap();
-        db.set_talkgroup_watched("County", "5678", false, 2_000).unwrap();
+        db.set_talkgroup_watched("County", "1234", true, 1_000)
+            .unwrap();
+        db.set_talkgroup_watched("County", "5678", true, 1_000)
+            .unwrap();
+        db.set_talkgroup_watched("County", "5678", false, 2_000)
+            .unwrap();
         let rows = db.list_talkgroup_watchlist().unwrap();
         assert_eq!(rows, vec![("County".into(), "1234".into())]);
         assert!(db.is_talkgroup_watched("County", "1234"));

@@ -915,7 +915,7 @@ pub struct DeviceLayer {
     phase: Arc<Mutex<f32>>,
     counters: Arc<StreamCounters>,
     last_key: Arc<Mutex<Option<String>>>,
-    network_ingest: Arc<Mutex<Option<Arc<crate::network_iq::PsiqUdpIngest>>>>,
+    network_ingest: Arc<Mutex<Option<crate::network_iq::NetworkIqIngest>>>,
     active_network_id: Arc<Mutex<Option<String>>>,
     #[cfg(feature = "soapysdr")]
     hardware: Arc<Mutex<Option<soapy::Hardware>>>,
@@ -1117,11 +1117,16 @@ impl DeviceLayer {
         self.hardware.lock().take();
         *self.last_key.lock() = Some(format!("network:{}", source.id));
         let ingest = match source.kind.as_str() {
-            "raw_udp" => crate::network_iq::PsiqUdpIngest::start(
-                &source.host,
-                source.port as u16,
-                262_144,
-            )?,
+            "raw_udp" => crate::network_iq::NetworkIqIngest::PsiqUdp(
+                crate::network_iq::PsiqUdpIngest::start(&source.host, source.port as u16, 262_144)?,
+            ),
+            "rtl_tcp" => crate::network_iq::NetworkIqIngest::RtlTcp(
+                crate::network_iq::RtlTcpIngest::connect(
+                    &source.host,
+                    source.port as u16,
+                    262_144,
+                )?,
+            ),
             other => anyhow::bail!(
                 "network kind {other} is registered but ingest adapter is not available yet"
             ),
@@ -1366,7 +1371,7 @@ impl DeviceLayer {
     }
 
     pub fn read_iq(&self, count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
-        if let Some(ingest) = self.network_ingest.lock().clone() {
+        if let Some(ingest) = self.network_ingest.lock().as_ref() {
             let result = ingest.read(count);
             let sample_rate = ingest.sample_rate_hz();
             let center = ingest.center_freq_hz();

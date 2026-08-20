@@ -338,9 +338,9 @@
         <article>
           <div>
             <b>{source.label}</b>
-            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}{source.kind === 'raw_udp' ? ' · PSIQ ready' : ' · adapter planned'}</small>
+            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}{source.kind === 'raw_udp' || source.kind === 'rtl_tcp' ? ' · ingest ready' : ' · adapter planned'}</small>
           </div>
-          {#if source.kind === 'raw_udp'}
+          {#if source.kind === 'raw_udp' || source.kind === 'rtl_tcp'}
             <button class="primary" onclick={() => connectNetworkSource(source.id)}>Connect</button>
           {/if}
           <button aria-label={`Delete ${source.label}`} onclick={() => deleteNetworkSource(source.id)}>Delete</button>

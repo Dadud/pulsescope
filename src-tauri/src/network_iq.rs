@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use rustfft::num_complex::Complex;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::io::Read;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -95,7 +96,11 @@ pub struct PsiqUdpIngest {
 
 impl PsiqUdpIngest {
     pub fn start(host: &str, port: u16, capacity: usize) -> anyhow::Result<Arc<Self>> {
-        let bind_host = if host.trim().is_empty() { "0.0.0.0" } else { host.trim() };
+        let bind_host = if host.trim().is_empty() {
+            "0.0.0.0"
+        } else {
+            host.trim()
+        };
         let bind_addr: SocketAddr = format!("{bind_host}:{port}").parse()?;
         let socket = UdpSocket::bind(bind_addr)?;
         socket.set_nonblocking(true)?;
@@ -157,9 +162,9 @@ impl PsiqUdpIngest {
                                 if overflow >= guard.queue.len() {
                                     guard.queue.clear();
                                     let skip = overflow.saturating_sub(guard.queue.len());
-                                    guard.queue.extend(
-                                        samples[skip.min(samples.len())..].iter().copied(),
-                                    );
+                                    guard
+                                        .queue
+                                        .extend(samples[skip.min(samples.len())..].iter().copied());
                                 } else if overflow > 0 {
                                     guard.queue.drain(..overflow);
                                     guard.queue.extend(samples.iter().copied());
@@ -186,7 +191,8 @@ impl PsiqUdpIngest {
                     }
                     Err(_) => {
                         consecutive_errors = consecutive_errors.saturating_add(1);
-                        if consecutive_errors >= 8 && last_recovery.elapsed() >= Duration::from_secs(1)
+                        if consecutive_errors >= 8
+                            && last_recovery.elapsed() >= Duration::from_secs(1)
                         {
                             reconnects.fetch_add(1, Ordering::Relaxed);
                             consecutive_errors = 0;
@@ -246,6 +252,259 @@ impl Drop for PsiqUdpIngest {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread.lock().take() {
             let _ = handle.join();
+        }
+    }
+}
+
+pub fn network_kind_supported(kind: &str) -> bool {
+    matches!(kind, "raw_udp" | "rtl_tcp")
+}
+
+fn push_samples(state: &Mutex<IngestState>, capacity: usize, samples: &[Complex<f32>]) -> u64 {
+    let mut guard = state.lock();
+    let overflow = guard
+        .queue
+        .len()
+        .saturating_add(samples.len())
+        .saturating_sub(capacity);
+    if overflow >= guard.queue.len() {
+        guard.queue.clear();
+        let skip = overflow.saturating_sub(guard.queue.len());
+        guard
+            .queue
+            .extend(samples[skip.min(samples.len())..].iter().copied());
+    } else if overflow > 0 {
+        guard.queue.drain(..overflow);
+        guard.queue.extend(samples.iter().copied());
+    } else {
+        guard.queue.extend(samples.iter().copied());
+    }
+    guard.counters.queued_samples = guard.queue.len();
+    overflow as u64
+}
+
+fn rtl_tcp_sample(i: u8, q: u8) -> Complex<f32> {
+    Complex::new(
+        (f32::from(i) - 127.5) / 128.0,
+        (f32::from(q) - 127.5) / 128.0,
+    )
+}
+
+pub fn decode_rtl_tcp_iq(bytes: &[u8]) -> Vec<Complex<f32>> {
+    bytes
+        .chunks_exact(2)
+        .map(|pair| rtl_tcp_sample(pair[0], pair[1]))
+        .collect()
+}
+
+const RTL_TCP_DONGLE_MAGIC: u32 = 0x1234_5678;
+
+pub struct RtlTcpIngest {
+    stop: Arc<AtomicBool>,
+    state: Arc<Mutex<IngestState>>,
+    _capacity: usize,
+    thread: Mutex<Option<thread::JoinHandle<()>>>,
+    last_packet_ms: Arc<AtomicI64>,
+    packets_received: Arc<AtomicU64>,
+    packets_dropped: Arc<AtomicU64>,
+    parse_errors: Arc<AtomicU64>,
+    reconnects: Arc<AtomicU64>,
+    sample_rate_hz: Arc<AtomicU64>,
+    center_freq_hz: Arc<AtomicU64>,
+}
+
+impl RtlTcpIngest {
+    pub fn connect(host: &str, port: u16, capacity: usize) -> anyhow::Result<Arc<Self>> {
+        let addr = format!("{}:{}", host.trim(), port);
+        let stream = std::net::TcpStream::connect(&addr)?;
+        stream.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(IngestState {
+            queue: VecDeque::with_capacity(capacity.min(262_144)),
+            sample_rate_hz: 2_048_000,
+            center_freq_hz: 100_000_000,
+            counters: NetworkIngestCounters::default(),
+        }));
+        let last_packet_ms = Arc::new(AtomicI64::new(0));
+        let packets_received = Arc::new(AtomicU64::new(0));
+        let packets_dropped = Arc::new(AtomicU64::new(0));
+        let parse_errors = Arc::new(AtomicU64::new(0));
+        let reconnects = Arc::new(AtomicU64::new(0));
+        let sample_rate_hz = Arc::new(AtomicU64::new(2_048_000));
+        let center_freq_hz = Arc::new(AtomicU64::new(100_000_000));
+        let ingest = Arc::new(Self {
+            stop: stop.clone(),
+            state: state.clone(),
+            _capacity: capacity,
+            thread: Mutex::new(None),
+            last_packet_ms: last_packet_ms.clone(),
+            packets_received: packets_received.clone(),
+            packets_dropped: packets_dropped.clone(),
+            parse_errors: parse_errors.clone(),
+            reconnects: reconnects.clone(),
+            sample_rate_hz: sample_rate_hz.clone(),
+            center_freq_hz: center_freq_hz.clone(),
+        });
+        let stop_thread = stop.clone();
+        let reconnect_target = addr.clone();
+        let handle = thread::spawn(move || {
+            let mut stream = stream;
+            let mut buffer = vec![0u8; 8192];
+            let mut pending = Vec::<u8>::new();
+            let mut dongle_ready = false;
+            let mut consecutive_errors = 0u32;
+            let mut last_recovery = Instant::now() - Duration::from_secs(5);
+            while !stop_thread.load(Ordering::Acquire) {
+                match stream.read(&mut buffer) {
+                    Ok(0) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                    }
+                    Ok(len) => {
+                        consecutive_errors = 0;
+                        pending.extend_from_slice(&buffer[..len]);
+                        if !dongle_ready {
+                            if pending.len() >= 12 {
+                                let magic = u32::from_le_bytes([
+                                    pending[0], pending[1], pending[2], pending[3],
+                                ]);
+                                if magic != RTL_TCP_DONGLE_MAGIC {
+                                    parse_errors.fetch_add(1, Ordering::Relaxed);
+                                    pending.clear();
+                                    continue;
+                                }
+                                pending.drain(..12);
+                                dongle_ready = true;
+                            } else {
+                                continue;
+                            }
+                        }
+                        let usable = pending.len() - (pending.len() % 2);
+                        if usable >= 2 {
+                            let samples = decode_rtl_tcp_iq(&pending[..usable]);
+                            pending.drain(..usable);
+                            packets_received.fetch_add(1, Ordering::Relaxed);
+                            let now = crate::scanner::now_ms();
+                            last_packet_ms.store(now, Ordering::Relaxed);
+                            let dropped = push_samples(&state, capacity, &samples);
+                            packets_dropped.fetch_add(dropped, Ordering::Relaxed);
+                            let mut guard = state.lock();
+                            guard.counters.packets_received =
+                                packets_received.load(Ordering::Relaxed);
+                            guard.counters.packets_dropped =
+                                packets_dropped.load(Ordering::Relaxed);
+                            guard.counters.last_packet_ms = now;
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            || error.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                    }
+                }
+                if consecutive_errors >= 8 && last_recovery.elapsed() >= Duration::from_secs(1) {
+                    reconnects.fetch_add(1, Ordering::Relaxed);
+                    consecutive_errors = 0;
+                    last_recovery = Instant::now();
+                    dongle_ready = false;
+                    pending.clear();
+                    match std::net::TcpStream::connect(&reconnect_target) {
+                        Ok(next) => {
+                            let _ = next.set_nonblocking(true);
+                            stream = next;
+                        }
+                        Err(_) => thread::sleep(Duration::from_millis(50)),
+                    }
+                }
+            }
+        });
+        *ingest.thread.lock() = Some(handle);
+        Ok(ingest)
+    }
+
+    pub fn read(&self, count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            {
+                let mut guard = self.state.lock();
+                if guard.queue.len() >= count {
+                    let out: Vec<_> = guard.queue.drain(..count).collect();
+                    guard.counters.queued_samples = guard.queue.len();
+                    return Ok(out);
+                }
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("RTL-TCP stream timed out waiting for {count} samples");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub fn counters(&self) -> NetworkIngestCounters {
+        let mut guard = self.state.lock();
+        guard.counters.packets_received = self.packets_received.load(Ordering::Relaxed);
+        guard.counters.packets_dropped = self.packets_dropped.load(Ordering::Relaxed);
+        guard.counters.parse_errors = self.parse_errors.load(Ordering::Relaxed);
+        guard.counters.reconnects = self.reconnects.load(Ordering::Relaxed);
+        guard.counters.last_packet_ms = self.last_packet_ms.load(Ordering::Relaxed);
+        guard.counters.sample_rate_hz = self.sample_rate_hz.load(Ordering::Relaxed) as u32;
+        guard.counters.center_freq_hz = self.center_freq_hz.load(Ordering::Relaxed);
+        guard.counters.queued_samples = guard.queue.len();
+        guard.counters.clone()
+    }
+
+    pub fn sample_rate_hz(&self) -> u32 {
+        self.sample_rate_hz.load(Ordering::Relaxed) as u32
+    }
+
+    pub fn center_freq_hz(&self) -> u64 {
+        self.center_freq_hz.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for RtlTcpIngest {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.thread.lock().take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub enum NetworkIqIngest {
+    PsiqUdp(Arc<PsiqUdpIngest>),
+    RtlTcp(Arc<RtlTcpIngest>),
+}
+
+impl NetworkIqIngest {
+    pub fn read(&self, count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
+        match self {
+            Self::PsiqUdp(ingest) => ingest.read(count),
+            Self::RtlTcp(ingest) => ingest.read(count),
+        }
+    }
+
+    pub fn counters(&self) -> NetworkIngestCounters {
+        match self {
+            Self::PsiqUdp(ingest) => ingest.counters(),
+            Self::RtlTcp(ingest) => ingest.counters(),
+        }
+    }
+
+    pub fn sample_rate_hz(&self) -> u32 {
+        match self {
+            Self::PsiqUdp(ingest) => ingest.sample_rate_hz(),
+            Self::RtlTcp(ingest) => ingest.sample_rate_hz(),
+        }
+    }
+
+    pub fn center_freq_hz(&self) -> u64 {
+        match self {
+            Self::PsiqUdp(ingest) => ingest.center_freq_hz(),
+            Self::RtlTcp(ingest) => ingest.center_freq_hz(),
         }
     }
 }
@@ -311,5 +570,37 @@ mod tests {
         assert_eq!(second.len(), 1024);
         assert_eq!(ingest.center_freq_hz(), 146_500_000);
         let _counters = ingest.counters();
+    }
+
+    #[test]
+    fn decode_rtl_tcp_iq_normalizes_unsigned_bytes() {
+        let samples = decode_rtl_tcp_iq(&[128, 127, 0, 255]);
+        assert!((samples[0].re - 0.0).abs() < 0.01);
+        assert!((samples[1].re + 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn rtl_tcp_mock_server_stream() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(&RTL_TCP_DONGLE_MAGIC.to_le_bytes())
+                .unwrap();
+            stream.write_all(&0u32.to_le_bytes()).unwrap();
+            stream.write_all(&28u32.to_le_bytes()).unwrap();
+            let iq: Vec<u8> = (0..8192)
+                .flat_map(|index| [128u8.wrapping_add(index as u8), 127])
+                .collect();
+            stream.write_all(&iq).unwrap();
+        });
+        let ingest = RtlTcpIngest::connect("127.0.0.1", port, 65_536).unwrap();
+        let samples = ingest.read(4096).expect("rtl_tcp read");
+        assert_eq!(samples.len(), 4096);
+        assert!(ingest.counters().packets_received >= 1);
+        server.join().unwrap();
     }
 }

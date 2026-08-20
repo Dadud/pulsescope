@@ -96,7 +96,10 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         )
         .route("/v2/bandplans", get(bandplans_v2))
         .route("/v2/listening-modes", get(listening_modes_v2))
-        .route("/v2/listening-modes/:id/apply", post(listening_mode_apply_v2))
+        .route(
+            "/v2/listening-modes/:id/apply",
+            post(listening_mode_apply_v2),
+        )
         .route(
             "/v2/network-sources",
             get(network_sources_v2).post(network_source_upsert_v2),
@@ -164,7 +167,10 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/v2/spectrum/stream", get(spectrum_stream_ws))
         .route("/signal_events", get(signal_events))
         .route("/spectrum_occupancy", get(spectrum_occupancy))
-        .route("/spectrum_occupancy/heatmap", get(spectrum_occupancy_heatmap))
+        .route(
+            "/spectrum_occupancy/heatmap",
+            get(spectrum_occupancy_heatmap),
+        )
         .route("/activity/timeline", get(activity_timeline))
         .route("/signal_id/file", post(signal_id_file))
         .route("/signal_id/fingerprints", get(signal_id_fps))
@@ -197,7 +203,10 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/trunking/lock", post(trunking_lock))
         .route("/trunking/calls", get(trunking_calls))
         .route("/trunking/watchlist", get(trunking_watchlist))
-        .route("/trunking/watchlist/toggle", post(trunking_watchlist_toggle))
+        .route(
+            "/trunking/watchlist/toggle",
+            post(trunking_watchlist_toggle),
+        )
         .route("/trunking/watchlist-only", post(trunking_watchlist_only))
         .route("/trunking/import", post(trunking_import))
         .route("/trunking/discovery/start", post(trunking_disc_start))
@@ -530,6 +539,13 @@ fn hardware_tune_allowed(s: &ApiState) -> Result<(), (StatusCode, Json<Value>)> 
             ),
         )),
     }
+}
+
+fn pause_scanner_for_hardware_reconfigure(s: &ApiState) {
+    if let Some(handle) = s.0.scanner.write().take() {
+        handle.abort();
+    }
+    s.0.receiver_session.lock().release("scanner");
 }
 
 fn hardware_reconfigure_allowed(
@@ -897,12 +913,11 @@ async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
         }));
     }
     for source in s.0.db.list_network_iq_sources().unwrap_or_default() {
-        let active = s
-            .0
-            .device
-            .active_network_source_id()
-            .is_some_and(|active_id| active_id == source.id);
-        let adapter_ready = source.kind == "raw_udp";
+        let active =
+            s.0.device
+                .active_network_source_id()
+                .is_some_and(|active_id| active_id == source.id);
+        let adapter_ready = crate::network_iq::network_kind_supported(&source.kind);
         discovered.push(json!({
             "id": source.id,
             "driver": source.kind,
@@ -949,12 +964,10 @@ async fn device_select_v2(
         )
             .into_response();
     }
-    if let Err(response) = hardware_reconfigure_allowed(&s, "device-select") {
-        return response.into_response();
-    }
+    pause_scanner_for_hardware_reconfigure(&s);
 
     if let Some(source) = s.0.db.get_network_iq_source(&id).unwrap_or(None) {
-        if source.kind != "raw_udp" {
+        if !crate::network_iq::network_kind_supported(&source.kind) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
@@ -986,7 +999,9 @@ async fn device_select_v2(
     }
 
     let discovered = crate::device::DeviceLayer::discover();
-    let local = discovered.iter().find(|device| device.hardware_key == id || device.key == id);
+    let local = discovered
+        .iter()
+        .find(|device| device.hardware_key == id || device.key == id);
     if let Some(device) = local {
         if let Err(error) = s.0.device.connect(&device.key) {
             return (
@@ -1647,11 +1662,16 @@ async fn listening_mode_apply_v2(
         let _ = s.0.device.set_frequency(original.center_freq_hz);
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":error.to_string(),"rolled_back":true,"actual":s.0.device.status()})),
+            Json(
+                json!({"error":error.to_string(),"rolled_back":true,"actual":s.0.device.status()}),
+            ),
         )
             .into_response();
     }
-    if let Some(deemphasis_us) = mode.deemphasis_us.filter(|value| *value == 50 || *value == 75) {
+    if let Some(deemphasis_us) = mode
+        .deemphasis_us
+        .filter(|value| *value == 50 || *value == 75)
+    {
         {
             let mut config = s.0.config.write();
             config.demodulator.de_emphasis_us = deemphasis_us;
@@ -1669,7 +1689,13 @@ async fn listening_mode_apply_v2(
             .vfo_states
             .iter()
             .position(|vfo| vfo.id == 0)
-            .or_else(|| if runtime.vfo_states.is_empty() { None } else { Some(0) });
+            .or_else(|| {
+                if runtime.vfo_states.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }
+            });
         if let Some(index) = index {
             let vfo = &mut runtime.vfo_states[index];
             vfo.frequency_hz = mode.center_frequency_hz;
@@ -2018,9 +2044,7 @@ async fn device_connect(
     State(s): State<ApiState>,
     Json(req): Json<DevKeyReq>,
 ) -> impl IntoResponse {
-    if let Err(response) = hardware_reconfigure_allowed(&s, "device-connect") {
-        return response.into_response();
-    }
+    pause_scanner_for_hardware_reconfigure(&s);
     if let Err(e) = s.0.device.connect(&req.key) {
         return Json(json!({"ok": false, "error": e.to_string()})).into_response();
     }
@@ -3296,16 +3320,15 @@ async fn trunking_watchlist_toggle(
     State(s): State<ApiState>,
     Json(req): Json<WatchlistToggleReq>,
 ) -> impl IntoResponse {
-    let ok = s
-        .0
-        .db
-        .set_talkgroup_watched(
-            &req.system_name,
-            &req.talkgroup_id,
-            req.watched,
-            crate::scanner::now_ms(),
-        )
-        .is_ok();
+    let ok =
+        s.0.db
+            .set_talkgroup_watched(
+                &req.system_name,
+                &req.talkgroup_id,
+                req.watched,
+                crate::scanner::now_ms(),
+            )
+            .is_ok();
     Json(json!({"ok": ok}))
 }
 
@@ -4673,7 +4696,10 @@ struct PlaybackSeekReq {
     offset_samples: u64,
 }
 
-async fn playback_seek(State(s): State<ApiState>, Json(req): Json<PlaybackSeekReq>) -> impl IntoResponse {
+async fn playback_seek(
+    State(s): State<ApiState>,
+    Json(req): Json<PlaybackSeekReq>,
+) -> impl IntoResponse {
     let mut guard = s.0.playback.lock();
     let Some(reader) = guard.as_mut() else {
         return (
@@ -4682,7 +4708,10 @@ async fn playback_seek(State(s): State<ApiState>, Json(req): Json<PlaybackSeekRe
         );
     };
     match reader.seek_samples(req.offset_samples) {
-        Ok(()) => (StatusCode::OK, Json(json!({"ok":true,"status":reader.status()}))),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({"ok":true,"status":reader.status()})),
+        ),
         Err(error) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok":false,"error":error.to_string()})),
@@ -4703,7 +4732,10 @@ async fn activity_timeline(
     let hours = q.hours.unwrap_or(24).clamp(1, 168);
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let since_ms = crate::scanner::now_ms() - i64::from(hours) * 3_600_000;
-    let entries = s.0.db.activity_timeline(since_ms, limit).unwrap_or_default();
+    let entries =
+        s.0.db
+            .activity_timeline(since_ms, limit)
+            .unwrap_or_default();
     Json(json!({
         "hours": hours,
         "since_ms": since_ms,
@@ -5712,11 +5744,10 @@ async fn spectrum_occupancy_heatmap(
     let hours = q.hours.unwrap_or(24).clamp(1, 168);
     let now_bucket = crate::scanner::now_ms() / 900_000;
     let since_bucket = now_bucket.saturating_sub(i64::from(hours.saturating_mul(4)));
-    let rows = s
-        .0
-        .db
-        .occupancy_since_bucket(since_bucket)
-        .unwrap_or_default();
+    let rows =
+        s.0.db
+            .occupancy_since_bucket(since_bucket)
+            .unwrap_or_default();
     let mut time_buckets = Vec::new();
     let mut frequency_buckets = Vec::new();
     for row in &rows {

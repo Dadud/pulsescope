@@ -80,7 +80,8 @@
       "evidence": [
         {"type": "test", "ref": "network_iq::tests::psiq_udp_loopback_preserves_timestamps_and_recovers"},
         {"type": "test", "ref": "network_iq::tests::parse_psiq_packet_round_trip"},
-        {"type": "build", "ref": "PSIQ raw_udp ingest adapter and v2 device select"}
+        {"type": "test", "ref": "network_iq::tests::rtl_tcp_mock_server_stream"},
+        {"type": "build", "ref": "PSIQ raw_udp and RTL-TCP ingest adapters with v2 device select"}
       ]
     },
     {
