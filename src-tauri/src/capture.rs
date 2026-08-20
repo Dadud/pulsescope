@@ -208,18 +208,28 @@ pub struct PlaybackReader {
     file: File,
     pub path: std::path::PathBuf,
     pub samples_read: u64,
+    pub total_samples: u64,
     pub eof: bool,
 }
 impl PlaybackReader {
     pub fn open(path: std::path::PathBuf) -> anyhow::Result<Self> {
         let mut file = File::open(&path)?;
+        let total_samples = file.metadata()?.len() / 8;
         file.seek(SeekFrom::Start(0))?;
         Ok(Self {
             file,
             path,
             samples_read: 0,
+            total_samples,
             eof: false,
         })
+    }
+    pub fn seek_samples(&mut self, offset: u64) -> anyhow::Result<()> {
+        let clamped = offset.min(self.total_samples);
+        self.file.seek(SeekFrom::Start(clamped * 8))?;
+        self.samples_read = clamped;
+        self.eof = clamped >= self.total_samples;
+        Ok(())
     }
     pub fn read_samples(&mut self, count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
         let mut bytes = vec![0u8; count * 8];
@@ -240,7 +250,15 @@ impl PlaybackReader {
         Ok(out)
     }
     pub fn status(&self) -> serde_json::Value {
-        serde_json::json!({"playing": !self.eof, "path": self.path, "samples_read": self.samples_read, "format": "cf32-le", "eof": self.eof})
+        serde_json::json!({
+            "playing": !self.eof,
+            "path": self.path,
+            "samples_read": self.samples_read,
+            "total_samples": self.total_samples,
+            "progress": if self.total_samples == 0 { 0.0 } else { self.samples_read as f64 / self.total_samples as f64 },
+            "format": "cf32-le",
+            "eof": self.eof
+        })
     }
 }
 
@@ -356,6 +374,29 @@ mod tests {
         assert_eq!(reader.samples_read, 2);
         assert!(reader.read_samples(1).unwrap().is_empty());
         assert!(reader.eof);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn playback_reader_seek_samples_updates_progress() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-playback-seek-{}.cf32",
+            std::process::id()
+        ));
+        let mut bytes = Vec::new();
+        for value in [1.0f32, 2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let mut reader = PlaybackReader::open(path.clone()).unwrap();
+        assert_eq!(reader.total_samples, 4);
+        reader.seek_samples(2).unwrap();
+        let samples = reader.read_samples(2).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].re, 3.0);
+        reader.seek_samples(99).unwrap();
+        assert_eq!(reader.samples_read, 4);
         let _ = std::fs::remove_file(path);
     }
     #[test]

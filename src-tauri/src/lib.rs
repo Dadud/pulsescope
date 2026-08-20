@@ -2,6 +2,7 @@
 //
 // The binary target is `src/main.rs`; this file exposes the library
 // crate so the Tauri macro and integration tests can reach the modules.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub mod adsb;
 pub mod ais;
@@ -22,7 +23,9 @@ pub mod demod;
 pub mod depmanager;
 pub mod device;
 pub mod hd_radio;
+pub mod listening_modes;
 pub mod lora;
+pub mod network_iq;
 pub mod operations;
 pub mod paths;
 pub mod pocsag;

@@ -11,10 +11,12 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Receiver session recovery | Fixture verified | normal | yes | Retune recovers in 700 ms and USB recovery in 20 s without restarting the service. |
-| Multi-device registry and allocator | Planned | expert | yes | Discover, select, allocate, and independently recover two simultaneous receivers. |
+| Multi-device registry and allocator | Beta | expert | yes | Discover, select, allocate, and independently recover two simultaneous receivers. |
 | Versioned RadioDevice contract | Beta | expert | yes | Every control and capability is reported at runtime and unsupported controls are rejected. |
 | Profiles, bookmarks and bandplans | Beta | normal | yes | Persistence, backup, profile application, capability rejection, and multi-client consistency pass API and browser tests. |
 | Independent LAN listener sessions | Beta | expert | yes | At least three browsers maintain independent viewport and VFO state while shared hardware retunes remain revision-safe. |
+| Listening mode presets | Beta | normal | no | Capability-aware one-tap presets tune the shared hardware window and suggest decoder packs without silent substitution. |
+| Network IQ source registry | Beta | expert | no | Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2; raw_udp PSIQ sources are selectable through v2 device select. |
 
 ## Hardware
 
@@ -27,7 +29,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | PlutoSDR and libiio | Planned | expert | no | libiio adapter tests and a physical PlutoSDR eight-hour run. |
 | USRP and UHD | Planned | expert | no | UHD adapter tests and a physical USRP eight-hour run. |
 | bladeRF, Lime, RX888, Fobos, FUNcube and Hydra | Planned | expert | no | Per-family capability audit, integration fixture, and physical-device certification before promotion. |
-| KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ | Planned | expert | no | Versioned network-source adapter with loss, reconnect, and timestamp tests. |
+| KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ | Beta | expert | no | Versioned network-source adapter with loss, reconnect, and timestamp tests. |
 
 ## Media
 
@@ -58,6 +60,9 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Installable touch-first PWA | Beta | normal | yes | Install, tune, listen, background/resume, saved station, and responsive browser tests on iOS and Android. |
 | Tauri desktop wrapper | Beta | expert | yes | Remote and managed-local server modes pass API conformance tests on Windows, macOS, and Linux. |
 | Capacitor iOS and Android clients | Planned | hidden | no | Background audio, lock-screen controls, notifications, credentials, discovery, and deep links pass device tests. |
+| Spectrum occupancy heatmap | Beta | normal | no | Rolling frequency/time heatmap renders from persisted 15-minute occupancy buckets with selectable 6–48 h windows. |
+| Decoder event browser alerts | Beta | normal | no | User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open or backgrounded via the service worker. |
+| Cross-protocol activity timeline | Beta | normal | no | Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering and frequency/time correlation groups. |
 
 ## Decoder
 
@@ -73,6 +78,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | HD Radio through nrsc5 | Beta | expert | no | nrsc5 OFDM recorded-IQ fixture plus SIS/ID3 events. Parser unit tests do not satisfy availability. |
 | rtl_433, ACARS, VDL2, paging and UAT | Beta | normal | no | Per-protocol recorded-IQ fixtures and normalized events. |
 | FT8, WSPR, JS8, CW, RTTY, NAVTEX, SSTV and WEFAX | Beta | normal | no | Per-protocol recorded-IQ/audio fixtures and normalized events. |
+| Trunk talkgroup watchlist follower | Beta | normal | no | Persisted watchlist filters P25 TSBK grants when watchlist-only mode is enabled; encrypted calls remain labeled only. |
 
 ## Packaging
 
@@ -96,3 +102,9 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 |---|---|---|:---:|---|
 | Versioned API v2 contract | Beta | expert | yes | Devices, receivers, sessions, media, jobs, recordings, health, backup and update endpoints pass conformance tests. |
 | Idempotent commands and sequenced events | Beta | expert | yes | Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time. |
+
+## Recordings
+
+| Feature | Status | Surface | Required | Open gate / acceptance criterion |
+|---|---|---|:---:|---|
+| Recording IQ replay and metadata | Beta | normal | no | IQ recordings write metadata sidecars; playback exposes progress, seek, and v2 recordings listing. |

@@ -4,6 +4,7 @@
   import { page } from '$app/state';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import DecoderAlertBridge from '$lib/components/DecoderAlertBridge.svelte';
   import { normalizeRoute } from '$lib/navigation';
 
   let { children } = $props();
@@ -94,6 +95,8 @@
   currentRoute={currentRoute}
   onClose={() => (paletteOpen = false)}
 />
+
+<DecoderAlertBridge />
 
 <style>
   .app-shell {

@@ -2,6 +2,13 @@
   import { onMount } from 'svelte';
   import { Api } from '$lib/api';
   import { gainStageLabel, isCommonRfSetting } from '$lib/spectrum-display';
+  import {
+    DECODER_ALERT_PROTOCOL_OPTIONS,
+    loadDecoderAlertPrefs,
+    requestDecoderAlertPermission,
+    saveDecoderAlertPrefs,
+    type DecoderAlertPrefs,
+  } from '$lib/decoder-alerts';
 
   let cfg = $state<any>(null);
   let status = $state<any>(null);
@@ -14,8 +21,102 @@
   let expertMode = $state(false);
   let controlNotice = $state('');
   let sampleRateBusy = $state(false);
+  let decoderAlerts = $state<DecoderAlertPrefs>(loadDecoderAlertPrefs());
+  let alertPermission = $state<NotificationPermission | 'unsupported'>(
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  );
+  let alertNotice = $state('');
+  let networkSources = $state<any[]>([]);
+  let networkNotice = $state('');
+  let networkError = $state('');
+  let networkLabel = $state('');
+  let networkKind = $state('rtl_tcp');
+  let networkHost = $state('');
+  let networkPort = $state(1234);
+  let networkEnabled = $state(false);
+
+  function toggleDecoderAlertProtocol(id: string, enabled: boolean) {
+    const protocols = new Set(decoderAlerts.protocols);
+    if (enabled) protocols.add(id);
+    else protocols.delete(id);
+    decoderAlerts = { ...decoderAlerts, protocols: [...protocols] };
+    saveDecoderAlertPrefs(decoderAlerts);
+  }
+
+  function toggleDecoderAlerts(enabled: boolean) {
+    decoderAlerts = { ...decoderAlerts, enabled };
+    saveDecoderAlertPrefs(decoderAlerts);
+  }
+
+  async function enableDecoderAlerts() {
+    alertNotice = 'Requesting notification permission…';
+    alertPermission = await requestDecoderAlertPermission();
+    if (alertPermission === 'granted') {
+      toggleDecoderAlerts(true);
+      alertNotice = 'Decoder alerts enabled for this browser.';
+    } else if (alertPermission === 'unsupported') {
+      alertNotice = 'Notifications are not supported in this browser.';
+    } else {
+      alertNotice = 'Notification permission was not granted.';
+    }
+  }
 
   async function refreshCaps() { try { caps = await Api.deviceCapabilities(); } catch (e) { deviceError = String(e); } }
+  async function loadNetworkSources() {
+    networkError = '';
+    try {
+      const data = await Api.networkSourcesV2();
+      networkSources = Array.isArray(data?.sources) ? data.sources : [];
+    } catch (e) {
+      networkError = String(e);
+    }
+  }
+  async function saveNetworkSource() {
+    networkError = '';
+    networkNotice = 'Saving network source…';
+    try {
+      await Api.saveNetworkSourceV2({
+        label: networkLabel,
+        kind: networkKind,
+        host: networkHost,
+        port: Number(networkPort),
+        enabled: networkEnabled,
+      });
+      networkLabel = '';
+      networkHost = '';
+      networkPort = 1234;
+      networkEnabled = false;
+      networkNotice = 'Network source saved. Adapter ingest remains planned until the missing gate passes.';
+      await loadNetworkSources();
+      await discoverDevices();
+    } catch (e) {
+      networkError = String(e);
+      networkNotice = '';
+    }
+  }
+  async function deleteNetworkSource(id: string) {
+    networkError = '';
+    try {
+      await Api.deleteNetworkSourceV2(id);
+      await loadNetworkSources();
+      await discoverDevices();
+    } catch (e) {
+      networkError = String(e);
+    }
+  }
+  async function connectNetworkSource(id: string) {
+    networkError = '';
+    networkNotice = 'Connecting network IQ source…';
+    try {
+      await Api.selectDeviceV2(id);
+      networkNotice = 'Network IQ source selected. PSIQ raw_udp ingest is active when packets arrive.';
+      await loadNetworkSources();
+      status = await Api.deviceStatus();
+    } catch (e) {
+      networkError = String(e);
+      networkNotice = '';
+    }
+  }
   async function discoverDevices() {
     deviceError = '';
     try {
@@ -61,11 +162,14 @@
 
   onMount(async () => {
     expertMode = localStorage.getItem('pulsescope.expert-mode') === '1';
+    decoderAlerts = loadDecoderAlertPrefs();
+    if (typeof Notification !== 'undefined') alertPermission = Notification.permission;
     try {
       cfg = await Api.settings();
       await discoverDevices();
       banks = await Api.banks();
       await refreshCaps();
+      await loadNetworkSources();
     } catch (e) { console.warn(e); }
   });
 
@@ -174,6 +278,80 @@
     </section>
   {/if}
 
+  <section class="card">
+    <h2>Decoder alerts</h2>
+    <p class="section-lead">
+      Browser notifications for normalized decoder events while PulseScope is open in the background.
+    </p>
+    <label class="row">
+      <span>Enable alerts<small>Uses the browser Notification API; no server push keys required.</small></span>
+      <input
+        type="checkbox"
+        checked={decoderAlerts.enabled}
+        onchange={(event) => {
+          const enabled = event.currentTarget.checked;
+          if (enabled && alertPermission !== 'granted') void enableDecoderAlerts();
+          else toggleDecoderAlerts(enabled);
+        }}
+      />
+    </label>
+    {#if alertPermission !== 'granted'}
+      <button onclick={enableDecoderAlerts}>Request notification permission</button>
+    {/if}
+    {#if alertNotice}<p class="control-notice" role="status">{alertNotice}</p>{/if}
+    <div class="alert-grid">
+      {#each DECODER_ALERT_PROTOCOL_OPTIONS as option}
+        <label class="alert-item">
+          <input
+            type="checkbox"
+            checked={decoderAlerts.protocols.includes(option.id)}
+            onchange={(event) => toggleDecoderAlertProtocol(option.id, event.currentTarget.checked)}
+          />
+          {option.label}
+        </label>
+      {/each}
+    </div>
+  </section>
+
+  {#if expertMode}<section class="card">
+    <h2>Network IQ sources</h2>
+    <p class="section-lead">
+      Register RTL-TCP, SpyServer, raw UDP, or KA9Q endpoints for the multi-device registry. Ingest adapters remain behind the network-iq missing gate.
+    </p>
+    {#if networkNotice}<p class="control-notice" role="status">{networkNotice}</p>{/if}
+    {#if networkError}<div class="device-error" role="alert">{networkError}</div>{/if}
+    <div class="network-form">
+      <label>Label<input bind:value={networkLabel} placeholder="Roof RTL-TCP" /></label>
+      <label>Kind<select bind:value={networkKind}>
+        <option value="rtl_tcp">RTL-TCP</option>
+        <option value="spyserver">SpyServer</option>
+        <option value="raw_udp">Raw UDP</option>
+        <option value="ka9q">KA9Q</option>
+      </select></label>
+      <label>Host<input bind:value={networkHost} placeholder="192.168.1.50" /></label>
+      <label>Port<input type="number" min="1" bind:value={networkPort} /></label>
+      <label class="row"><span>Enabled when adapter ships</span><input type="checkbox" bind:checked={networkEnabled} /></label>
+      <button class="primary" onclick={saveNetworkSource} disabled={!networkLabel.trim() || !networkHost.trim()}>Add source</button>
+    </div>
+    <div class="network-list">
+      {#each networkSources as source (source.id)}
+        <article>
+          <div>
+            <b>{source.label}</b>
+            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}{source.kind === 'raw_udp' || source.kind === 'rtl_tcp' ? ' · ingest ready' : ' · adapter planned'}</small>
+          </div>
+          {#if source.kind === 'raw_udp' || source.kind === 'rtl_tcp'}
+            <button class="primary" onclick={() => connectNetworkSource(source.id)}>Connect</button>
+          {/if}
+          <button aria-label={`Delete ${source.label}`} onclick={() => deleteNetworkSource(source.id)}>Delete</button>
+        </article>
+      {:else}
+        <p class="empty">No network IQ sources registered yet.</p>
+      {/each}
+    </div>
+    <button onclick={loadNetworkSources}>Refresh registry</button>
+  </section>{/if}
+
   {#if expertMode}<section class="card">
     <h2>Per-band scan overrides</h2>
     {#each banks as bank (bank.name)}
@@ -269,6 +447,14 @@
   .status-summary { display:flex; flex-wrap:wrap; gap:8px 14px; margin-bottom:10px; padding:10px; background:var(--bg); border:1px solid var(--line); border-radius:7px; font:12px var(--mono); }
   .status-summary .ok { color:var(--ok); }
   .expert-summary { margin-top:10px; padding-top:8px; border-top:1px solid var(--line); }
+  .section-lead { margin: 0 0 10px; color: var(--fg-dim); font-size: 12px; }
+  .alert-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 8px; }
+  .alert-item { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--fg); }
+  .network-form { display: grid; gap: 8px; margin-bottom: 12px; }
+  .network-form label { display: grid; gap: 4px; color: var(--fg-dim); font-size: 11px; }
+  .network-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .network-list article > div { display: grid; gap: 2px; min-width: 0; }
+  .network-list small { color: var(--fg-dim); font-size: 11px; }
   @media (max-width: 760px) {
     .settings-page { padding:10px; max-width:none; }
     .page-heading { align-items:stretch; flex-direction:column; }

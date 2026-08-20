@@ -23,8 +23,12 @@
     },
     {
       "id": "multi-device-registry", "name": "Multi-device registry and allocator", "group": "receiver",
-      "status": "planned", "visibility": "expert", "required": true,
-      "acceptance_gate": "Discover, select, allocate, and independently recover two simultaneous receivers.", "evidence": []
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Discover, select, allocate, and independently recover two simultaneous receivers.",
+      "evidence": [
+        {"type": "build", "ref": "v2 device select API connects registered PSIQ raw_udp sources and local devices"},
+        {"type": "test", "ref": "network_iq::tests::psiq_udp_loopback_preserves_timestamps_and_recovers"}
+      ]
     },
     {
       "id": "radio-device-contract", "name": "Versioned RadioDevice contract", "group": "receiver",
@@ -71,8 +75,14 @@
     },
     {
       "id": "network-iq", "name": "KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ", "group": "hardware",
-      "status": "planned", "visibility": "expert", "required": false,
-      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests.", "evidence": []
+      "status": "development", "visibility": "expert", "required": false,
+      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests.",
+      "evidence": [
+        {"type": "test", "ref": "network_iq::tests::psiq_udp_loopback_preserves_timestamps_and_recovers"},
+        {"type": "test", "ref": "network_iq::tests::parse_psiq_packet_round_trip"},
+        {"type": "test", "ref": "network_iq::tests::rtl_tcp_mock_server_stream"},
+        {"type": "build", "ref": "PSIQ raw_udp and RTL-TCP ingest adapters with v2 device select"}
+      ]
     },
     {
       "id": "spectrum-stream", "name": "Bounded binary spectrum stream", "group": "media",
@@ -304,6 +314,62 @@
       "id": "command-event-consistency", "name": "Idempotent commands and sequenced events", "group": "api",
       "status": "development", "visibility": "expert", "required": true,
       "acceptance_gate": "Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time.", "evidence": []
+    },
+    {
+      "id": "spectrum-occupancy-heatmap", "name": "Spectrum occupancy heatmap", "group": "client",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Rolling frequency/time heatmap renders from persisted 15-minute occupancy buckets with selectable 6–48 h windows.",
+      "evidence": [{"type": "build", "ref": "Occupancy route canvas heatmap and /spectrum_occupancy/heatmap API"}]
+    },
+    {
+      "id": "trunk-talkgroup-watchlist", "name": "Trunk talkgroup watchlist follower", "group": "decoder",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Persisted watchlist filters P25 TSBK grants when watchlist-only mode is enabled; encrypted calls remain labeled only.",
+      "evidence": [
+        {"type": "test", "ref": "trunking::tests::filter_grants_honors_watchlist_only_mode"},
+        {"type": "build", "ref": "Trunking watchlist API and UI"}
+      ]
+    },
+    {
+      "id": "decoder-event-push-alerts", "name": "Decoder event browser alerts", "group": "client",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open or backgrounded via the service worker.",
+      "evidence": [
+        {"type": "build", "ref": "DecoderAlertBridge, settings controls, decoder-alerts helper, and service-worker notification bridge"}
+      ]
+    },
+    {
+      "id": "recording-iq-replay", "name": "Recording IQ replay and metadata", "group": "recordings",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "IQ recordings write metadata sidecars; playback exposes progress, seek, and v2 recordings listing.",
+      "evidence": [
+        {"type": "test", "ref": "capture::tests::playback_reader_seek_samples_updates_progress"},
+        {"type": "build", "ref": "Recording route replay UI and /recording/iq/playback APIs"}
+      ]
+    },
+    {
+      "id": "activity-timeline", "name": "Cross-protocol activity timeline", "group": "client",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering and frequency/time correlation groups.",
+      "evidence": [
+        {"type": "test", "ref": "db::tests::activity_timeline_assigns_correlation_groups"},
+        {"type": "build", "ref": "Activity route and /activity/timeline API"}
+      ]
+    },
+    {
+      "id": "listening-mode-presets", "name": "Listening mode presets", "group": "receiver",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Capability-aware one-tap presets tune the shared hardware window and suggest decoder packs without silent substitution.",
+      "evidence": [{"type": "build", "ref": "listening_modes presets, v2 apply API, and Profiles quick modes UI"}]
+    },
+    {
+      "id": "network-iq-source-registry", "name": "Network IQ source registry", "group": "receiver",
+      "status": "development", "visibility": "expert", "required": false,
+      "acceptance_gate": "Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2; raw_udp PSIQ sources are selectable through v2 device select.",
+      "evidence": [
+        {"type": "test", "ref": "db::tests::network_source_migration_persists_registry_entries"},
+        {"type": "build", "ref": "Settings network registry UI, Connect action, and /v2/devices/:id/select API"}
+      ]
     }
   ]
 }

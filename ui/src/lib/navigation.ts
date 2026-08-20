@@ -18,7 +18,7 @@ export const navSections: NavSection[] = [
     items: [
       { label: 'Receiver', href: '#/', description: 'Spectrum, waterfall, VFOs, tuning' },
       { label: 'Monitor', href: '#/monitor', description: 'System health and decoder jobs' },
-      { label: 'Occupancy', href: '#/occupancy', description: 'Spectrum utilization meters' },
+      { label: 'Occupancy', href: '#/occupancy', description: 'Band-use heatmap and utilization' },
       { label: 'Signal ID', href: '#/signal-id', description: 'Fingerprints and burst segmentation' },
       { label: 'Blacklist', href: '#/blacklist', description: 'Frequency exclusion list' },
     ],
@@ -28,6 +28,7 @@ export const navSections: NavSection[] = [
     label: 'Decode',
     items: [
       { label: 'Messages', href: '#/messages', description: 'Full decoded message log' },
+      { label: 'Activity', href: '#/activity', description: 'Cross-protocol RF timeline' },
       { label: 'Trunking', href: '#/trunking', description: 'P25, NXDN, EDACS, DMR' },
       { label: 'Aero', href: '#/aero', description: 'Inmarsat AERO' },
       { label: 'Iridium', href: '#/iridium', description: 'Iridium burst decoder' },

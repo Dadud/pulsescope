@@ -371,6 +371,10 @@ export const Api = {
   trunkingDiscoveryStart: () => postJson('/trunking/discovery/start'),
   trunkingDiscoveryStop: () => postJson('/trunking/discovery/stop'),
   trunkingDiscoveryResults: () => getJson<any[]>('/trunking/discovery/results'),
+  trunkingWatchlist: () => getJson<any>('/trunking/watchlist'),
+  trunkingWatchlistToggle: (body: { system_name: string; talkgroup_id: string; watched: boolean }) =>
+    postJson('/trunking/watchlist/toggle', body),
+  trunkingWatchlistOnly: (enabled: boolean) => postJson('/trunking/watchlist-only', { enabled }),
 
   aeroStatus: () => getJson('/aero/status'),
   aeroMessages: () => getJson<any[]>('/aero/messages'),
@@ -408,6 +412,39 @@ export const Api = {
   signalSegmentBursts: () => postJson('/signal_id/segment_bursts'),
   signalPolyphaseExtract: () => postJson('/signal_id/polyphase_extract'),
   spectrumOccupancy: () => getJson('/spectrum_occupancy'),
+  spectrumOccupancyHeatmap: (hours = 24) =>
+    getJson(`/spectrum_occupancy/heatmap?hours=${encodeURIComponent(String(hours))}`),
+  activityTimeline: (hours = 24, limit = 200) =>
+    getJson(`/activity/timeline?hours=${encodeURIComponent(String(hours))}&limit=${encodeURIComponent(String(limit))}`),
+
+  recordingsV2: () => getJson('/api/v2/recordings'),
+  playbackStart: (path: string) => postJson('/recording/iq/playback/start', { path }),
+  playbackStop: () => postJson('/recording/iq/playback/stop'),
+  playbackStatus: () => getJson('/recording/iq/playback/status'),
+  playbackSeek: (offset_samples: number) =>
+    postJson('/recording/iq/playback/seek', { offset_samples }),
+  listeningModesV2: () => getJson('/api/v2/listening-modes'),
+  applyListeningModeV2: (id: string) => postJson(`/api/v2/listening-modes/${encodeURIComponent(id)}/apply`),
+  networkSourcesV2: () => getJson('/api/v2/network-sources'),
+  saveNetworkSourceV2: (body: any) => postJson('/api/v2/network-sources', body),
+  deleteNetworkSourceV2: (id: string) => deleteJson(`/api/v2/network-sources/${encodeURIComponent(id)}`),
+  devicesV2: () => getJson('/api/v2/devices'),
+  selectDeviceV2: async (id: string) => {
+    const receivers = await getJson<{ receivers?: Array<{ revision?: number }> }>('/api/v2/receivers');
+    let expectedRevision = receivers?.receivers?.[0]?.revision ?? 0;
+    const result = await postJson<{ revision?: number }>(
+      `/api/v2/devices/${encodeURIComponent(id)}/select`,
+      {
+        command_id: crypto.randomUUID(),
+        expected_revision: expectedRevision,
+      },
+    );
+    if (typeof result?.revision === 'number') {
+      expectedRevision = result.revision;
+    }
+    return result;
+  },
+  protocolSlices: () => getJson('/protocols/slices'),
 
   jobs: () => getJson<{jobs:any[]}>('/jobs'),
   createJob: (body:any) => postJson('/jobs', body),

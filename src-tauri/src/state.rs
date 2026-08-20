@@ -598,6 +598,7 @@ pub struct TrunkingRuntime {
     pub zones: Vec<serde_json::Value>,
     pub log: Vec<String>,
     pub reason: Option<String>,
+    pub watchlist_only: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -617,6 +618,8 @@ pub struct RecordingState {
     pub samples_written: u64,
     pub bytes_written: u64,
     pub write_error: Option<String>,
+    pub center_freq_hz: u64,
+    pub sample_rate_hz: u32,
 }
 
 impl RecordingState {
@@ -629,7 +632,27 @@ impl RecordingState {
             "bytes_written": self.bytes_written,
             "write_error": self.write_error,
             "format": "cf32-le",
+            "center_freq_hz": self.center_freq_hz,
+            "sample_rate_hz": self.sample_rate_hz,
         })
+    }
+
+    pub fn write_metadata_sidecar(&self) -> anyhow::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let meta_path = path.with_extension("meta.json");
+        let payload = serde_json::json!({
+            "format": "cf32-le",
+            "path": path,
+            "started_ms": self.started_ms,
+            "samples_written": self.samples_written,
+            "bytes_written": self.bytes_written,
+            "center_freq_hz": self.center_freq_hz,
+            "sample_rate_hz": self.sample_rate_hz,
+        });
+        std::fs::write(meta_path, serde_json::to_vec_pretty(&payload)?)?;
+        Ok(())
     }
 
     pub fn write_iq(&mut self, samples: &[rustfft::num_complex::Complex<f32>]) {
@@ -658,8 +681,11 @@ impl RecordingState {
         if let Some(mut file) = self.file.take() {
             let _ = file.flush();
         }
+        let _ = self.write_metadata_sidecar();
         let status = self.status();
         self.started_ms = None;
+        self.center_freq_hz = 0;
+        self.sample_rate_hz = 0;
         status
     }
 }

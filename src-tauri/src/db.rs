@@ -26,6 +26,8 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
         conn.execute_batch(include_str!("../migrations/002_receiver_workspace.sql"))?;
+        conn.execute_batch(include_str!("../migrations/003_trunk_watchlist.sql"))?;
+        conn.execute_batch(include_str!("../migrations/004_network_sources.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
@@ -176,6 +178,32 @@ pub struct ScheduledJob {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkIqSource {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub host: String,
+    pub port: i64,
+    pub enabled: bool,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityTimelineEntry {
+    pub kind: String,
+    pub timestamp_ms: i64,
+    pub frequency_hz: u64,
+    pub protocol: String,
+    pub summary: String,
+    pub detail: String,
+    #[serde(default)]
+    pub correlation_group: String,
+    #[serde(default)]
+    pub correlation_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpectrumOccupancy {
     pub frequency_bucket_hz: u64,
     pub time_bucket_15min: i64,
@@ -270,9 +298,17 @@ impl Db {
     }
 
     pub fn recent_signal_events(&self, limit: u32) -> anyhow::Result<Vec<SignalEvent>> {
+        self.signal_events_since(0, limit)
+    }
+
+    pub fn signal_events_since(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<SignalEvent>> {
         let c = self.conn();
-        let mut q = c.prepare("SELECT id,frequency_hz,signal_class,top_family,top_confidence,sub_protocol,symbol_rate,bandwidth_hz,snr_db,decode_success,decode_protocol,decode_summary,likely_proprietary,waterfall_psd,range_name,timestamp_ms,is_novel FROM signal_events ORDER BY timestamp_ms DESC LIMIT ?1")?;
-        let rows = q.query_map([limit.clamp(1, 1000)], |r| {
+        let mut q = c.prepare("SELECT id,frequency_hz,signal_class,top_family,top_confidence,sub_protocol,symbol_rate,bandwidth_hz,snr_db,decode_success,decode_protocol,decode_summary,likely_proprietary,waterfall_psd,range_name,timestamp_ms,is_novel FROM signal_events WHERE timestamp_ms >= ?1 ORDER BY timestamp_ms DESC LIMIT ?2")?;
+        let rows = q.query_map(rusqlite::params![since_ms, limit.clamp(1, 1000)], |r| {
             Ok(SignalEvent {
                 id: Some(r.get(0)?),
                 frequency_hz: r.get::<_, i64>(1)? as u64,
@@ -364,6 +400,193 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn occupancy_since_bucket(
+        &self,
+        since_bucket: i64,
+    ) -> anyhow::Result<Vec<SpectrumOccupancy>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT frequency_bucket_hz,time_bucket_15min,avg_power_db,peak_power_db,avg_above_floor_db,sample_count,noise_floor_db \
+             FROM spectrum_occupancy WHERE time_bucket_15min >= ?1 \
+             ORDER BY time_bucket_15min ASC, frequency_bucket_hz ASC",
+        )?;
+        let rows = q.query_map([since_bucket], |r| {
+            Ok(SpectrumOccupancy {
+                frequency_bucket_hz: r.get::<_, i64>(0)? as u64,
+                time_bucket_15min: r.get(1)?,
+                avg_power_db: r.get(2)?,
+                peak_power_db: r.get(3)?,
+                avg_above_floor_db: r.get(4)?,
+                sample_count: r.get(5)?,
+                noise_floor_db: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_talkgroup_watchlist(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT system_name, talkgroup_id FROM talkgroup_watchlist ORDER BY system_name, talkgroup_id",
+        )?;
+        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_talkgroup_watched(
+        &self,
+        system_name: &str,
+        talkgroup_id: &str,
+        watched: bool,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        let c = self.conn();
+        if watched {
+            c.execute(
+                "INSERT INTO talkgroup_watchlist (system_name, talkgroup_id, created_ms) VALUES (?1,?2,?3) \
+                 ON CONFLICT(system_name, talkgroup_id) DO NOTHING",
+                rusqlite::params![system_name, talkgroup_id, now_ms],
+            )?;
+        } else {
+            c.execute(
+                "DELETE FROM talkgroup_watchlist WHERE system_name=?1 AND talkgroup_id=?2",
+                rusqlite::params![system_name, talkgroup_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn is_talkgroup_watched(&self, system_name: &str, talkgroup_id: &str) -> bool {
+        self.conn()
+            .query_row(
+                "SELECT 1 FROM talkgroup_watchlist WHERE system_name=?1 AND talkgroup_id=?2 LIMIT 1",
+                rusqlite::params![system_name, talkgroup_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    pub fn list_network_iq_sources(&self) -> anyhow::Result<Vec<NetworkIqSource>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT id,label,kind,host,port,enabled,created_ms,updated_ms FROM network_iq_sources ORDER BY label",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(NetworkIqSource {
+                id: r.get(0)?,
+                label: r.get(1)?,
+                kind: r.get(2)?,
+                host: r.get(3)?,
+                port: r.get(4)?,
+                enabled: r.get::<_, i64>(5)? != 0,
+                created_ms: r.get(6)?,
+                updated_ms: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn upsert_network_iq_source(&self, source: &NetworkIqSource) -> anyhow::Result<()> {
+        self.conn().execute(
+            "INSERT INTO network_iq_sources (id,label,kind,host,port,enabled,created_ms,updated_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(id) DO UPDATE SET label=excluded.label,kind=excluded.kind,host=excluded.host,port=excluded.port,enabled=excluded.enabled,updated_ms=excluded.updated_ms",
+            rusqlite::params![
+                source.id,
+                source.label,
+                source.kind,
+                source.host,
+                source.port,
+                source.enabled,
+                source.created_ms,
+                source.updated_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_network_iq_source(&self, id: &str) -> anyhow::Result<usize> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM network_iq_sources WHERE id=?1", [id])?)
+    }
+
+    pub fn get_network_iq_source(&self, id: &str) -> anyhow::Result<Option<NetworkIqSource>> {
+        Ok(self
+            .list_network_iq_sources()?
+            .into_iter()
+            .find(|source| source.id == id))
+    }
+
+    pub fn set_active_network_source(&self, id: &str) -> anyhow::Result<Option<NetworkIqSource>> {
+        self.get_network_iq_source(id)
+    }
+
+    pub fn clear_active_network_sources(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn correlation_group_key(frequency_hz: u64, timestamp_ms: i64) -> String {
+        let freq_bucket = (frequency_hz / 25_000) * 25_000;
+        let time_bucket = timestamp_ms / (15 * 60 * 1000);
+        format!("{freq_bucket}:{time_bucket}")
+    }
+
+    pub fn activity_timeline(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<ActivityTimelineEntry>> {
+        let mut entries = Vec::new();
+        for message in self.decoded_messages_since(since_ms, limit)? {
+            entries.push(ActivityTimelineEntry {
+                kind: "decoded_message".into(),
+                timestamp_ms: message.timestamp_ms,
+                frequency_hz: message.frequency_hz,
+                protocol: message.protocol.clone(),
+                summary: message.content.clone(),
+                detail: message.address.clone(),
+                correlation_group: String::new(),
+                correlation_count: 0,
+            });
+        }
+        for event in self.signal_events_since(since_ms, limit)? {
+            entries.push(ActivityTimelineEntry {
+                kind: if event.is_novel {
+                    "novel_signal".into()
+                } else {
+                    "signal_event".into()
+                },
+                timestamp_ms: event.timestamp_ms,
+                frequency_hz: event.frequency_hz,
+                protocol: event.decode_protocol.clone(),
+                summary: event.decode_summary.clone(),
+                detail: event.signal_class.clone(),
+                correlation_group: String::new(),
+                correlation_count: 0,
+            });
+        }
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
+        entries.truncate(limit as usize);
+        let mut group_counts = std::collections::HashMap::new();
+        for entry in &entries {
+            *group_counts
+                .entry(Self::correlation_group_key(
+                    entry.frequency_hz,
+                    entry.timestamp_ms,
+                ))
+                .or_insert(0u32) += 1;
+        }
+        for entry in &mut entries {
+            let key = Self::correlation_group_key(entry.frequency_hz, entry.timestamp_ms);
+            entry.correlation_group = key.clone();
+            entry.correlation_count = *group_counts.get(&key).unwrap_or(&1);
+        }
+        Ok(entries)
+    }
+
     pub fn decoded_message_count(&self) -> anyhow::Result<i64> {
         Ok(self
             .conn()
@@ -441,12 +664,21 @@ impl Db {
     }
 
     pub fn recent_decoded_messages(&self, limit: u32) -> anyhow::Result<Vec<DecodedMessage>> {
+        self.decoded_messages_since(0, limit)
+    }
+
+    pub fn decoded_messages_since(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<DecodedMessage>> {
         let c = self.conn();
         let mut stmt = c.prepare(
             "SELECT id, frequency_hz, protocol, message_type, address, function_code, content, \
-             raw, encryption, timestamp_ms FROM decoded_messages ORDER BY id DESC LIMIT ?1",
+             raw, encryption, timestamp_ms FROM decoded_messages WHERE timestamp_ms >= ?1 \
+             ORDER BY timestamp_ms DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map([limit], |r| {
+        let rows = stmt.query_map(rusqlite::params![since_ms, limit], |r| {
             Ok(DecodedMessage {
                 id: Some(r.get::<_, i64>(0)?),
                 frequency_hz: r.get::<_, i64>(1)? as u64,
@@ -795,6 +1027,148 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trunk_watchlist_migration_is_idempotent_and_tracks_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-watchlist-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        db.set_talkgroup_watched("County", "1234", true, 1_000)
+            .unwrap();
+        db.set_talkgroup_watched("County", "5678", true, 1_000)
+            .unwrap();
+        db.set_talkgroup_watched("County", "5678", false, 2_000)
+            .unwrap();
+        let rows = db.list_talkgroup_watchlist().unwrap();
+        assert_eq!(rows, vec![("County".into(), "1234".into())]);
+        assert!(db.is_talkgroup_watched("County", "1234"));
+        assert!(!db.is_talkgroup_watched("County", "5678"));
+        drop(db);
+        let reopened = Db::open(&path).unwrap();
+        assert_eq!(reopened.list_talkgroup_watchlist().unwrap().len(), 1);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn activity_timeline_assigns_correlation_groups() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-activity-timeline-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let bucket = 1_700_000_000_000_i64;
+        db.insert_classified_signal_event(
+            146_000_000,
+            12.0,
+            12_500,
+            "2m",
+            bucket,
+            "voice",
+            "amateur",
+            0.8,
+            "fm",
+            false,
+            "aprs",
+            "first",
+            false,
+            false,
+        )
+        .unwrap();
+        db.insert_classified_signal_event(
+            146_010_000,
+            10.0,
+            12_500,
+            "2m",
+            bucket + 1_000,
+            "data",
+            "amateur",
+            0.7,
+            "aprs",
+            false,
+            "aprs",
+            "second",
+            false,
+            false,
+        )
+        .unwrap();
+        let entries = db.activity_timeline(bucket - 1_000, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].correlation_group, entries[1].correlation_group);
+        assert_eq!(entries[0].correlation_count, 2);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn network_source_migration_persists_registry_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-network-source-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let source = super::NetworkIqSource {
+            id: "rtl-roof".into(),
+            label: "Roof RTL-TCP".into(),
+            kind: "rtl_tcp".into(),
+            host: "192.168.1.50".into(),
+            port: 1234,
+            enabled: false,
+            created_ms: 1_000,
+            updated_ms: 1_000,
+        };
+        db.upsert_network_iq_source(&source).unwrap();
+        let listed = db.list_network_iq_sources().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label, "Roof RTL-TCP");
+        db.delete_network_iq_source("rtl-roof").unwrap();
+        assert!(db.list_network_iq_sources().unwrap().is_empty());
+        drop(db);
+        let reopened = Db::open(&path).unwrap();
+        assert!(reopened.list_network_iq_sources().unwrap().is_empty());
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn occupancy_since_bucket_returns_ordered_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-occupancy-heatmap-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        for (bucket, freq) in [(1_i64, 100_000_000_u64), (2, 101_000_000), (2, 100_000_000)] {
+            db.upsert_occupancy(&super::SpectrumOccupancy {
+                frequency_bucket_hz: freq,
+                time_bucket_15min: bucket,
+                avg_power_db: -70.0,
+                peak_power_db: -60.0,
+                avg_above_floor_db: 20.0,
+                sample_count: 1,
+                noise_floor_db: -90.0,
+            })
+            .unwrap();
+        }
+        let rows = db.occupancy_since_bucket(2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].time_bucket_15min, 2);
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 
