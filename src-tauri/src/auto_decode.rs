@@ -6,15 +6,18 @@
 use rustfft::num_complex::Complex;
 
 use crate::ais::IqDecoder as AisIqDecoder;
+use crate::aprs::AprsDecoder;
 use crate::aviation::{AcarsIqDecoder, BitOrder, UatIqDecoder, Vdl2IqDecoder};
 use crate::db::DecodedMessage;
-use crate::aprs::AprsDecoder;
-use crate::demod::{decode_cw, decode_navtex, decode_rds, decode_rtty, demodulate, low_pass_complex, mix_down, Mode};
+use crate::demod::{
+    decode_cw, decode_navtex, decode_rds, decode_rtty, demodulate, low_pass_complex, mix_down, Mode,
+};
 use crate::pocsag::{IqDecoder as PocsagIqDecoder, PocsagBaud};
 use crate::signal_id::{classify, Classification};
 
 const TARGET_AGC_RMS: f32 = 0.18;
 
+#[allow(clippy::too_many_arguments)]
 pub fn try_decode_signal(
     iq: &[Complex<f32>],
     device_center_hz: u64,
@@ -37,7 +40,7 @@ pub fn try_decode_signal(
     } else {
         mode
     };
-    let demod_rate = sample_rate.min(500_000).max(8_000);
+    let demod_rate = sample_rate.clamp(8_000, 500_000);
     let demod_audio = extract_demod_audio(
         iq,
         device_center_hz,
@@ -57,12 +60,21 @@ pub fn try_decode_signal(
 
     let mut out = Vec::new();
     if classification.decode_success {
-        out.push(decoded_from_classification(&classification, frequency_hz, timestamp_ms));
+        out.push(decoded_from_classification(
+            &classification,
+            frequency_hz,
+            timestamp_ms,
+        ));
     }
 
-    let channel_iq = extract_channel_iq(iq, device_center_hz, frequency_hz, sample_rate, demod_mode);
+    let channel_iq =
+        extract_channel_iq(iq, device_center_hz, frequency_hz, sample_rate, demod_mode);
     let mut tried = std::collections::HashSet::new();
-    for candidate in classification.candidates.iter().filter(|c| c.confidence >= threshold) {
+    for candidate in classification
+        .candidates
+        .iter()
+        .filter(|c| c.confidence >= threshold)
+    {
         if candidate.decoder == "none" || tried.contains(&candidate.decoder) {
             continue;
         }
@@ -164,7 +176,7 @@ pub fn extract_demod_audio(
     let mut prev = None;
     let mut pcm = demodulate(parsed, &filtered, &mut prev);
     apply_agc(&mut pcm, TARGET_AGC_RMS);
-  if output_rate != sample_rate && output_rate > 0 {
+    if output_rate != sample_rate && output_rate > 0 {
         let factor = (sample_rate / output_rate).max(1) as usize;
         pcm = crate::demod::decimate_average(&pcm, factor);
     }
@@ -184,6 +196,7 @@ fn apply_agc(samples: &mut [f32], target_rms: f32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_native_decoder(
     decoder: &str,
     channel_iq: &[(f32, f32)],
@@ -198,22 +211,20 @@ pub fn run_native_decoder(
     match decoder {
         "native_ais" => {
             if let Ok(mut dec) = AisIqDecoder::new(sample_rate as f64) {
-                for result in dec.push_iq(channel_iq) {
-                    if let Ok(msg) = result {
-                        let content = serde_json::to_string(&msg).unwrap_or_else(|_| "ais".into());
-                        out.push(DecodedMessage {
-                            id: None,
-                            frequency_hz,
-                            protocol: "ais".into(),
-                            message_type: "position".into(),
-                            address: String::new(),
-                            function_code: String::new(),
-                            content,
-                            raw: String::new(),
-                            encryption: "none".into(),
-                            timestamp_ms,
-                        });
-                    }
+                for msg in dec.push_iq(channel_iq).into_iter().flatten() {
+                    let content = serde_json::to_string(&msg).unwrap_or_else(|_| "ais".into());
+                    out.push(DecodedMessage {
+                        id: None,
+                        frequency_hz,
+                        protocol: "ais".into(),
+                        message_type: "position".into(),
+                        address: String::new(),
+                        function_code: String::new(),
+                        content,
+                        raw: String::new(),
+                        encryption: "none".into(),
+                        timestamp_ms,
+                    });
                 }
             }
         }
@@ -325,7 +336,10 @@ pub fn run_native_decoder(
                     frequency_hz,
                     protocol: "rds".into(),
                     message_type: "rds".into(),
-                    address: rds.pi_code.map(|pi| format!("{pi:04X}")).unwrap_or_default(),
+                    address: rds
+                        .pi_code
+                        .map(|pi| format!("{pi:04X}"))
+                        .unwrap_or_default(),
                     function_code: String::new(),
                     content,
                     raw: String::new(),

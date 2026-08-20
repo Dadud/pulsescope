@@ -1173,7 +1173,11 @@ impl DeviceLayer {
     }
 
     pub fn capabilities(&self) -> DeviceCapabilities {
-        let status = self.status();
+        let status = {
+            let mut locked = self.state.lock().clone();
+            locked.stream = self.counters.snapshot();
+            locked
+        };
         #[cfg(feature = "soapysdr")]
         if let Some(hardware) = self.hardware.lock().as_ref() {
             let mut capabilities = hardware.capabilities();

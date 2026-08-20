@@ -759,8 +759,6 @@ mod recording_tests {
                 frequency_hz: 100_000_000,
                 mode: "wfm".into(),
                 muted: true,
-                volume: 0.7,
-                audio_agc: true,
                 squelch_open: false,
                 strength_db: -120.0,
                 audio_level_db: -120.0,
@@ -768,6 +766,7 @@ mod recording_tests {
                 last_hit_ms: 0,
                 snr_db: 0.0,
                 noise_floor_db: -120.0,
+                ..Default::default()
             }],
             latest_spectrum_ms,
             ..Default::default()

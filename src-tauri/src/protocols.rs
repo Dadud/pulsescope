@@ -175,6 +175,8 @@ mod tests {
             bias_tee_on: false,
             saturation: false,
             stream: crate::device::StreamCountersSnapshot::default(),
+            min_freq_hz: 24_000_000,
+            max_freq_hz: 1_700_000_000,
         }
     }
     #[test]

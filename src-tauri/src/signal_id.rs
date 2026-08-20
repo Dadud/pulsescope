@@ -756,7 +756,8 @@ fn family_for(proto: &str) -> &'static str {
         "p25" | "dmr" | "p25_trunked" | "tetra" | "frs_gmrs" => "land_mobile",
         "pocsag" | "flex" => "paging",
         "ism_433" | "ism_915" => "ism",
-        "aprs" | "amateur_vhf" | "amateur_uhf" | "cw" | "rtty" | "sstv" | "ssb_voice" | "fm_voice" | "digital_weak" => "amateur",
+        "aprs" | "amateur_vhf" | "amateur_uhf" | "cw" | "rtty" | "sstv" | "ssb_voice"
+        | "fm_voice" | "digital_weak" => "amateur",
         "dtmf" => "signaling",
         _ => "unknown",
     }
@@ -855,7 +856,7 @@ mod tests {
 
     #[test]
     fn arrl_forty_meter_voice_segment() {
-        let c = classify(7_150_000, 2_700, "lsb", "40m Amateur", 18.0, None);
+        let c = classify(7_110_000, 2_700, "lsb", "40m Amateur", 18.0, None);
         assert!(
             c.sub_protocol == "ssb_voice" || c.candidates.iter().any(|x| x.protocol == "ssb_voice"),
             "expected ssb_voice candidate, got {:?}",

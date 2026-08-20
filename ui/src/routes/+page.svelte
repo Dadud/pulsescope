@@ -706,6 +706,8 @@
       }
       appliedBandwidthHz = Number(status.bandwidth_hz ?? appliedBandwidthHz);
       usableSpanHz = Number(status.usable_span_hz ?? usableSpanHz);
+      if (status.min_freq_hz != null) deviceMinHz = Number(status.min_freq_hz);
+      if (status.max_freq_hz != null) deviceMaxHz = Number(status.max_freq_hz);
       applyVfos(nextVfos);
     } catch (e) { console.warn('runtime polling failed', e); }
   }

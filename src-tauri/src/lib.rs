@@ -6,10 +6,10 @@
 pub mod adsb;
 pub mod ais;
 pub mod api;
-pub mod arrl_bandplan;
-pub mod auto_decode;
 pub mod aprs;
+pub mod arrl_bandplan;
 pub mod audio;
+pub mod auto_decode;
 pub mod aviation;
 pub mod ble;
 pub mod capture;

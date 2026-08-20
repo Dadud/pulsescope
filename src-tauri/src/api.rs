@@ -1921,16 +1921,37 @@ async fn scan_config(State(s): State<ApiState>) -> impl IntoResponse {
     }))
 }
 
-#[derive(Deserialize)] struct SpectrumModeReq { mode: String }
-async fn scanner_spectrum_mode(State(s): State<ApiState>, Json(req): Json<SpectrumModeReq>) -> Json<Value> {
-    let mode = if req.mode.eq_ignore_ascii_case("full") { "full" } else { "band" };
-    send_vfo(s, crate::scanner::ScannerCommand::SetSpectrumViewMode { mode: mode.into() });
+#[derive(Deserialize)]
+struct SpectrumModeReq {
+    mode: String,
+}
+async fn scanner_spectrum_mode(
+    State(s): State<ApiState>,
+    Json(req): Json<SpectrumModeReq>,
+) -> Json<Value> {
+    let mode = if req.mode.eq_ignore_ascii_case("full") {
+        "full"
+    } else {
+        "band"
+    };
+    send_vfo(
+        &s,
+        crate::scanner::ScannerCommand::SetSpectrumViewMode { mode: mode.into() },
+    );
     Json(json!({"ok": true, "spectrum_view_mode": mode}))
 }
 
-#[derive(Deserialize)] struct ScannerPanReq { center_hz: u64 }
+#[derive(Deserialize)]
+struct ScannerPanReq {
+    center_hz: u64,
+}
 async fn scanner_pan(State(s): State<ApiState>, Json(req): Json<ScannerPanReq>) -> Json<Value> {
-    send_vfo(s, crate::scanner::ScannerCommand::PanCenter { center_hz: req.center_hz });
+    send_vfo(
+        &s,
+        crate::scanner::ScannerCommand::PanCenter {
+            center_hz: req.center_hz,
+        },
+    );
     let status = s.0.device.status();
     Json(json!({
         "ok": true,
@@ -2502,7 +2523,12 @@ async fn spectrum(State(s): State<ApiState>) -> impl IntoResponse {
     let view_start = status.center_freq_hz.saturating_sub(half);
     let view_end = status.center_freq_hz + half;
     let band = runtime.active_range.as_ref().and_then(|name| {
-        s.0.config.read().scan_ranges.iter().find(|r| r.name == *name)
+        s.0.config
+            .read()
+            .scan_ranges
+            .iter()
+            .find(|r| r.name == *name)
+            .cloned()
     });
     Json(json!({
         "bins": runtime.latest_spectrum,
@@ -2519,8 +2545,8 @@ async fn spectrum(State(s): State<ApiState>) -> impl IntoResponse {
         "device_max_freq_hz": status.max_freq_hz,
         "view_start_hz": view_start,
         "view_end_hz": view_end,
-        "band_start_hz": band.map(|r| r.start_hz),
-        "band_end_hz": band.map(|r| r.end_hz),
+        "band_start_hz": band.as_ref().map(|r| r.start_hz),
+        "band_end_hz": band.as_ref().map(|r| r.end_hz),
         "noise_floor_db": runtime.noise_floor_db,
     }))
 }
@@ -4915,30 +4941,68 @@ async fn vfo_diagnostics(State(s): State<ApiState>) -> impl IntoResponse {
             .unwrap_or_default();
     Json(vfos.into_iter().map(|v| json!({"id": v.id, "frequency_hz": v.frequency_hz, "strength_db": v.strength_db, "audio_level_db": v.audio_level_db, "squelch_open": v.squelch_open, "muted": v.muted})).collect::<Vec<_>>())
 }
-#[derive(Deserialize)] struct VfoLockReq { locked: bool }
-async fn vfo_lock(State(s): State<ApiState>, Path(id): Path<u32>, Json(req): Json<VfoLockReq>) -> impl IntoResponse {
-    send_vfo(&s, crate::scanner::ScannerCommand::SetVfoLocked { id, locked: req.locked });
+#[derive(Deserialize)]
+struct VfoLockReq {
+    locked: bool,
+}
+async fn vfo_lock(
+    State(s): State<ApiState>,
+    Path(id): Path<u32>,
+    Json(req): Json<VfoLockReq>,
+) -> impl IntoResponse {
+    send_vfo(
+        &s,
+        crate::scanner::ScannerCommand::SetVfoLocked {
+            id,
+            locked: req.locked,
+        },
+    );
     Json(json!({"ok": true, "id": id, "locked": req.locked}))
 }
 
-#[derive(Deserialize)] struct VfoDecodeReq { decoder: Option<String> }
-async fn vfo_decode(State(s): State<ApiState>, Path(id): Path<u32>, Json(req): Json<VfoDecodeReq>) -> impl IntoResponse {
-    let v = s.0.scanner.read().as_ref().and_then(|h| h.state.lock().vfo_states.iter().find(|v| v.id == id).cloned());
+#[derive(Deserialize)]
+struct VfoDecodeReq {
+    decoder: Option<String>,
+}
+async fn vfo_decode(
+    State(s): State<ApiState>,
+    Path(id): Path<u32>,
+    Json(req): Json<VfoDecodeReq>,
+) -> impl IntoResponse {
+    let v = s.0.scanner.read().as_ref().and_then(|h| {
+        h.state
+            .lock()
+            .vfo_states
+            .iter()
+            .find(|v| v.id == id)
+            .cloned()
+    });
     let Some(v) = v else {
         return Json(json!({"ok": false, "error": "vfo not found"}));
     };
-    let range_name = s.0.scanner.read().as_ref()
-        .and_then(|h| h.state.lock().active_range.clone())
-        .unwrap_or_default();
-    let channel_bw = s.0.config.read().scan_ranges.iter()
-        .find(|r| r.name == range_name)
-        .map(|r| r.channel_bw_hz)
-        .unwrap_or(12_500);
+    let range_name =
+        s.0.scanner
+            .read()
+            .as_ref()
+            .and_then(|h| h.state.lock().active_range.clone())
+            .unwrap_or_default();
+    let channel_bw =
+        s.0.config
+            .read()
+            .scan_ranges
+            .iter()
+            .find(|r| r.name == range_name)
+            .map(|r| r.channel_bw_hz)
+            .unwrap_or(12_500);
     let cfg = s.0.config.read();
     let use_arrl = cfg.scanner.use_arrl_bandplan;
     let threshold = cfg.scanner.auto_decode_threshold;
     let status = s.0.device.status();
-    let snr_db = if v.squelch_open { v.strength_db.max(12.0) } else { v.strength_db.max(6.0) };
+    let snr_db = if v.squelch_open {
+        v.strength_db.max(12.0)
+    } else {
+        v.strength_db.max(6.0)
+    };
     let demod_mode = if use_arrl {
         crate::arrl_bandplan::recommended_mode(v.frequency_hz, &v.mode)
     } else {
@@ -4956,8 +5020,12 @@ async fn vfo_decode(State(s): State<ApiState>, Path(id): Path<u32>, Json(req): J
     };
 
     let timestamp_ms = crate::scanner::now_ms();
-    let mut messages = if let Some(decoder) = req.decoder.as_ref().filter(|d| !d.is_empty() && d != "none") {
-        let demod_rate = status.sample_rate.min(500_000).max(8_000);
+    let messages = if let Some(decoder) = req
+        .decoder
+        .as_ref()
+        .filter(|d| !d.is_empty() && d.as_str() != "none")
+    {
+        let demod_rate = status.sample_rate.clamp(8_000, 500_000);
         let demod_audio = crate::auto_decode::extract_demod_audio(
             &iq,
             status.center_freq_hz,

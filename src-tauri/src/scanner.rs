@@ -441,6 +441,7 @@ fn clamp_center_hz(
     center_hz.clamp(limit_min, limit_max)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_and_decode_hit(
     iq: &[Complex<f32>],
     frequency_hz: u64,
@@ -459,7 +460,7 @@ fn classify_and_decode_hit(
     } else {
         mode
     };
-    let demod_rate = sample_rate.min(500_000).max(8_000);
+    let demod_rate = sample_rate.clamp(8_000, 500_000);
     let demod_audio = auto_decode::extract_demod_audio(
         iq,
         device_center_hz,
@@ -1413,7 +1414,13 @@ async fn scanner_loop(
                                     ..Default::default()
                                 });
                                 let vfo = runtime.vfo_states.last_mut().expect("vfo slot");
-                                apply_classification_to_vfo(vfo, &classification, &cfg, frequency_hz, mode);
+                                apply_classification_to_vfo(
+                                    vfo,
+                                    &classification,
+                                    &cfg,
+                                    frequency_hz,
+                                    mode,
+                                );
                                 Some(runtime.vfo_states.len() - 1)
                             } else {
                                 None
@@ -1428,7 +1435,13 @@ async fn scanner_loop(
                             vfo.last_hit_ms = now;
                             vfo.snr_db = snr;
                             vfo.noise_floor_db = noise_floor;
-                            apply_classification_to_vfo(vfo, &classification, &cfg, frequency_hz, mode);
+                            apply_classification_to_vfo(
+                                vfo,
+                                &classification,
+                                &cfg,
+                                frequency_hz,
+                                mode,
+                            );
                         }
                     }
                     if active_range.as_ref().is_some_and(|range| range.hold_ms > 0) {
