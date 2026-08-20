@@ -323,8 +323,40 @@
     {
       "id": "decoder-event-push-alerts", "name": "Decoder event browser alerts", "group": "client",
       "status": "development", "visibility": "normal", "required": false,
-      "acceptance_gate": "User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open.",
-      "evidence": [{"type": "build", "ref": "DecoderAlertBridge, settings controls, and decoder-alerts helper"}]
+      "acceptance_gate": "User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open or backgrounded via the service worker.",
+      "evidence": [
+        {"type": "build", "ref": "DecoderAlertBridge, settings controls, decoder-alerts helper, and service-worker notification bridge"}
+      ]
+    },
+    {
+      "id": "recording-iq-replay", "name": "Recording IQ replay and metadata", "group": "recordings",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "IQ recordings write metadata sidecars; playback exposes progress, seek, and v2 recordings listing.",
+      "evidence": [
+        {"type": "test", "ref": "capture::tests::playback_reader_seek_samples_updates_progress"},
+        {"type": "build", "ref": "Recording route replay UI and /recording/iq/playback APIs"}
+      ]
+    },
+    {
+      "id": "activity-timeline", "name": "Cross-protocol activity timeline", "group": "client",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering.",
+      "evidence": [{"type": "build", "ref": "Activity route and /activity/timeline API"}]
+    },
+    {
+      "id": "listening-mode-presets", "name": "Listening mode presets", "group": "receiver",
+      "status": "development", "visibility": "normal", "required": false,
+      "acceptance_gate": "Capability-aware one-tap presets tune the shared hardware window and suggest decoder packs without silent substitution.",
+      "evidence": [{"type": "build", "ref": "listening_modes presets, v2 apply API, and Profiles quick modes UI"}]
+    },
+    {
+      "id": "network-iq-source-registry", "name": "Network IQ source registry", "group": "receiver",
+      "status": "development", "visibility": "expert", "required": false,
+      "acceptance_gate": "Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2 as planned sources until ingest adapters ship.",
+      "evidence": [
+        {"type": "test", "ref": "db::tests::network_source_migration_persists_registry_entries"},
+        {"type": "build", "ref": "Settings network registry UI and /v2/network-sources API"}
+      ]
     }
   ]
 }

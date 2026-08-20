@@ -94,6 +94,16 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
             axum::routing::delete(bookmark_delete_v2),
         )
         .route("/v2/bandplans", get(bandplans_v2))
+        .route("/v2/listening-modes", get(listening_modes_v2))
+        .route("/v2/listening-modes/:id/apply", post(listening_mode_apply_v2))
+        .route(
+            "/v2/network-sources",
+            get(network_sources_v2).post(network_source_upsert_v2),
+        )
+        .route(
+            "/v2/network-sources/:id",
+            axum::routing::delete(network_source_delete_v2),
+        )
         .route("/v2/decoders/catalog", get(decoder_catalog_v2))
         .route("/v2/decoder-jobs", get(decoder_jobs_v2))
         .route("/v2/recordings", get(recordings_v2))
@@ -154,6 +164,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/signal_events", get(signal_events))
         .route("/spectrum_occupancy", get(spectrum_occupancy))
         .route("/spectrum_occupancy/heatmap", get(spectrum_occupancy_heatmap))
+        .route("/activity/timeline", get(activity_timeline))
         .route("/signal_id/file", post(signal_id_file))
         .route("/signal_id/fingerprints", get(signal_id_fps))
         .route(
@@ -288,6 +299,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/recording/iq/playback/start", post(playback_start))
         .route("/recording/iq/playback/stop", post(playback_stop))
         .route("/recording/iq/playback/status", get(playback_status))
+        .route("/recording/iq/playback/seek", post(playback_seek))
         .route(
             "/recordings/annotations",
             get(rec_annotations).post(rec_annotation_new),
@@ -883,6 +895,19 @@ async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
             "certification": "compatibility"
         }));
     }
+    for source in s.0.db.list_network_iq_sources().unwrap_or_default() {
+        discovered.push(json!({
+            "id": source.id,
+            "driver": source.kind,
+            "label": source.label,
+            "connection": format!("{}:{}", source.host, source.port),
+            "active": source.enabled,
+            "lifecycle": if source.enabled { "registered" } else { "planned" },
+            "certification": "planned",
+            "network_source": true,
+            "missing_gate": "network-source adapter with loss, reconnect, and timestamp tests"
+        }));
+    }
     Json(json!({"contract_version": 2, "active_device_id": active_id, "devices": discovered}))
 }
 
@@ -1471,6 +1496,158 @@ async fn bandplans_v2(State(s): State<ApiState>) -> impl IntoResponse {
     Json(json!({"contract_version":2,"source":"server configuration","bands":bands}))
 }
 
+async fn listening_modes_v2() -> impl IntoResponse {
+    Json(json!({
+        "contract_version": 2,
+        "modes": crate::listening_modes::presets(),
+    }))
+}
+
+async fn listening_mode_apply_v2(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(mode) = crate::listening_modes::find(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"listening mode not found"})),
+        )
+            .into_response();
+    };
+    let original = s.0.device.status();
+    let apply = (|| -> anyhow::Result<()> {
+        if mode.bandwidth_hz > mode.sample_rate_hz {
+            anyhow::bail!("bandwidth_hz must not exceed sample_rate_hz");
+        }
+        let analog_hz = s.0.device.set_sample_contract(mode.sample_rate_hz)?;
+        if mode.bandwidth_hz > analog_hz {
+            anyhow::bail!(
+                "bandwidth_hz {} exceeds analog contract {analog_hz} Hz",
+                mode.bandwidth_hz
+            );
+        }
+        if mode.bandwidth_hz > 0 && mode.bandwidth_hz != analog_hz {
+            s.0.device.set_bandwidth(mode.bandwidth_hz)?;
+        }
+        s.0.device.set_frequency(mode.center_frequency_hz)?;
+        Ok(())
+    })();
+    if let Err(error) = apply {
+        let _ = s.0.device.set_sample_rate(original.sample_rate);
+        let _ = s.0.device.set_bandwidth(original.bandwidth_hz);
+        let _ = s.0.device.set_frequency(original.center_freq_hz);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error.to_string(),"rolled_back":true,"actual":s.0.device.status()})),
+        )
+            .into_response();
+    }
+    if let Some(deemphasis_us) = mode.deemphasis_us.filter(|value| *value == 50 || *value == 75) {
+        {
+            let mut config = s.0.config.write();
+            config.demodulator.de_emphasis_us = deemphasis_us;
+            let _ = config.save(&s.0.data_dir);
+        }
+        if let Some(handle) = s.0.scanner.read().as_ref() {
+            handle.state.lock().wfm_deemphasis_us = deemphasis_us;
+        }
+    }
+    if let Some(handle) = s.0.scanner.read().as_ref() {
+        handle.flush_iq();
+        s.0.audio.clear_queue();
+        let mut runtime = handle.state.lock();
+        let index = runtime
+            .vfo_states
+            .iter()
+            .position(|vfo| vfo.id == 0)
+            .or_else(|| if runtime.vfo_states.is_empty() { None } else { Some(0) });
+        if let Some(index) = index {
+            let vfo = &mut runtime.vfo_states[index];
+            vfo.frequency_hz = mode.center_frequency_hz;
+            vfo.mode = mode.mode.to_string();
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "mode": mode,
+            "actual": s.0.device.status(),
+            "suggested_decoders": mode.suggested_decoders,
+        })),
+    )
+        .into_response()
+}
+
+async fn network_sources_v2(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(json!({
+        "contract_version": 2,
+        "sources": s.0.db.list_network_iq_sources().unwrap_or_default(),
+        "missing_gate": "network-source adapter with loss, reconnect, and timestamp tests",
+    }))
+}
+
+#[derive(Deserialize)]
+struct NetworkSourceUpsertReq {
+    id: Option<String>,
+    label: String,
+    kind: String,
+    host: String,
+    port: i64,
+    enabled: Option<bool>,
+}
+
+async fn network_source_upsert_v2(
+    State(s): State<ApiState>,
+    Json(req): Json<NetworkSourceUpsertReq>,
+) -> impl IntoResponse {
+    if req.label.trim().is_empty() || req.host.trim().is_empty() || req.port <= 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"label, host, and positive port are required"})),
+        )
+            .into_response();
+    }
+    let kind = req.kind.trim().to_lowercase();
+    if !matches!(kind.as_str(), "rtl_tcp" | "spyserver" | "raw_udp" | "ka9q") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"kind must be rtl_tcp, spyserver, raw_udp, or ka9q"})),
+        )
+            .into_response();
+    }
+    let now = crate::scanner::now_ms();
+    let id = req
+        .id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let source = crate::db::NetworkIqSource {
+        id,
+        label: req.label.trim().to_string(),
+        kind,
+        host: req.host.trim().to_string(),
+        port: req.port,
+        enabled: req.enabled.unwrap_or(false),
+        created_ms: now,
+        updated_ms: now,
+    };
+    match s.0.db.upsert_network_iq_source(&source) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "source": source}))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn network_source_delete_v2(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    Json(json!({"ok": s.0.db.delete_network_iq_source(&id).is_ok()}))
+}
+
 #[derive(Deserialize)]
 struct SessionCommandV2Req {
     command_id: String,
@@ -1540,13 +1717,33 @@ async fn recordings_v2(State(s): State<ApiState>) -> impl IntoResponse {
         .flatten()
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
-            metadata.is_file().then(
-                || json!({"name":entry.file_name().to_string_lossy(),"size_bytes":metadata.len()}),
-            )
+            if !metadata.is_file() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".cf32") {
+                return None;
+            }
+            let file_path = entry.path();
+            let mut item = json!({
+                "name": name,
+                "path": name,
+                "size_bytes": metadata.len(),
+                "samples": metadata.len() / 8,
+            });
+            let meta_path = file_path.with_extension("meta.json");
+            if meta_path.exists() {
+                if let Ok(raw) = std::fs::read_to_string(&meta_path) {
+                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        item["metadata"] = meta;
+                    }
+                }
+            }
+            Some(item)
         })
         .collect::<Vec<_>>();
     Json(
-        json!({"contract_version":2,"active":s.0.recording.lock().status(),"recordings":recordings}),
+        json!({"contract_version":2,"active":s.0.recording.lock().status(),"playback":s.0.playback.lock().as_ref().map(|reader| reader.status()).unwrap_or_else(|| json!({"playing":false})),"recordings":recordings}),
     )
 }
 
@@ -3949,6 +4146,7 @@ async fn rec_iq_start(
     };
     match std::fs::File::create(&path) {
         Ok(file) => {
+            let status = s.0.device.status();
             let mut rec = s.0.recording.lock();
             rec.file = Some(file);
             rec.path = Some(path.clone());
@@ -3956,6 +4154,8 @@ async fn rec_iq_start(
             rec.samples_written = 0;
             rec.bytes_written = 0;
             rec.write_error = None;
+            rec.center_freq_hz = status.center_freq_hz;
+            rec.sample_rate_hz = status.sample_rate;
             Json(json!({"ok": true, "status": rec.status()}))
         }
         Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
@@ -4355,6 +4555,49 @@ async fn playback_status(State(s): State<ApiState>) -> impl IntoResponse {
                 .unwrap_or_else(|| json!({"playing":false,"format":"cf32-le"})),
         ),
     )
+}
+
+#[derive(Deserialize)]
+struct PlaybackSeekReq {
+    offset_samples: u64,
+}
+
+async fn playback_seek(State(s): State<ApiState>, Json(req): Json<PlaybackSeekReq>) -> impl IntoResponse {
+    let mut guard = s.0.playback.lock();
+    let Some(reader) = guard.as_mut() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok":false,"error":"playback is not active"})),
+        );
+    };
+    match reader.seek_samples(req.offset_samples) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok":true,"status":reader.status()}))),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok":false,"error":error.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct TimelineQuery {
+    hours: Option<u32>,
+    limit: Option<u32>,
+}
+
+async fn activity_timeline(
+    State(s): State<ApiState>,
+    Query(q): Query<TimelineQuery>,
+) -> impl IntoResponse {
+    let hours = q.hours.unwrap_or(24).clamp(1, 168);
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let since_ms = crate::scanner::now_ms() - i64::from(hours) * 3_600_000;
+    let entries = s.0.db.activity_timeline(since_ms, limit).unwrap_or_default();
+    Json(json!({
+        "hours": hours,
+        "since_ms": since_ms,
+        "entries": entries,
+    }))
 }
 
 async fn rec_annotations(State(s): State<ApiState>) -> impl IntoResponse {

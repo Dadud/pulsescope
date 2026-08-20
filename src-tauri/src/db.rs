@@ -27,6 +27,7 @@ impl Db {
         conn.execute_batch(include_str!("../migrations/001_init.sql"))?;
         conn.execute_batch(include_str!("../migrations/002_receiver_workspace.sql"))?;
         conn.execute_batch(include_str!("../migrations/003_trunk_watchlist.sql"))?;
+        conn.execute_batch(include_str!("../migrations/004_network_sources.sql"))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
@@ -174,6 +175,28 @@ pub struct ScheduledJob {
     pub last_error: String,
     pub created_ms: i64,
     pub updated_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkIqSource {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub host: String,
+    pub port: i64,
+    pub enabled: bool,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityTimelineEntry {
+    pub kind: String,
+    pub timestamp_ms: i64,
+    pub frequency_hz: u64,
+    pub protocol: String,
+    pub summary: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -432,6 +455,87 @@ impl Db {
             .ok()
             .flatten()
             .is_some()
+    }
+
+    pub fn list_network_iq_sources(&self) -> anyhow::Result<Vec<NetworkIqSource>> {
+        let c = self.conn();
+        let mut q = c.prepare(
+            "SELECT id,label,kind,host,port,enabled,created_ms,updated_ms FROM network_iq_sources ORDER BY label",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(NetworkIqSource {
+                id: r.get(0)?,
+                label: r.get(1)?,
+                kind: r.get(2)?,
+                host: r.get(3)?,
+                port: r.get(4)?,
+                enabled: r.get::<_, i64>(5)? != 0,
+                created_ms: r.get(6)?,
+                updated_ms: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn upsert_network_iq_source(&self, source: &NetworkIqSource) -> anyhow::Result<()> {
+        self.conn().execute(
+            "INSERT INTO network_iq_sources (id,label,kind,host,port,enabled,created_ms,updated_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(id) DO UPDATE SET label=excluded.label,kind=excluded.kind,host=excluded.host,port=excluded.port,enabled=excluded.enabled,updated_ms=excluded.updated_ms",
+            rusqlite::params![
+                source.id,
+                source.label,
+                source.kind,
+                source.host,
+                source.port,
+                source.enabled,
+                source.created_ms,
+                source.updated_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_network_iq_source(&self, id: &str) -> anyhow::Result<usize> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM network_iq_sources WHERE id=?1", [id])?)
+    }
+
+    pub fn activity_timeline(&self, since_ms: i64, limit: u32) -> anyhow::Result<Vec<ActivityTimelineEntry>> {
+        let mut entries = Vec::new();
+        for message in self.recent_decoded_messages(limit)? {
+            if message.timestamp_ms < since_ms {
+                continue;
+            }
+            entries.push(ActivityTimelineEntry {
+                kind: "decoded_message".into(),
+                timestamp_ms: message.timestamp_ms,
+                frequency_hz: message.frequency_hz,
+                protocol: message.protocol.clone(),
+                summary: message.content.clone(),
+                detail: message.address.clone(),
+            });
+        }
+        for event in self.recent_signal_events(limit)? {
+            if event.timestamp_ms < since_ms {
+                continue;
+            }
+            entries.push(ActivityTimelineEntry {
+                kind: if event.is_novel {
+                    "novel_signal".into()
+                } else {
+                    "signal_event".into()
+                },
+                timestamp_ms: event.timestamp_ms,
+                frequency_hz: event.frequency_hz,
+                protocol: event.decode_protocol.clone(),
+                summary: event.decode_summary.clone(),
+                detail: event.signal_class.clone(),
+            });
+        }
+        entries.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        entries.truncate(limit as usize);
+        Ok(entries)
     }
 
     pub fn decoded_message_count(&self) -> anyhow::Result<i64> {
@@ -888,6 +992,39 @@ mod tests {
         drop(db);
         let reopened = Db::open(&path).unwrap();
         assert_eq!(reopened.list_talkgroup_watchlist().unwrap().len(), 1);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn network_source_migration_persists_registry_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-network-source-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let source = super::NetworkIqSource {
+            id: "rtl-roof".into(),
+            label: "Roof RTL-TCP".into(),
+            kind: "rtl_tcp".into(),
+            host: "192.168.1.50".into(),
+            port: 1234,
+            enabled: false,
+            created_ms: 1_000,
+            updated_ms: 1_000,
+        };
+        db.upsert_network_iq_source(&source).unwrap();
+        let listed = db.list_network_iq_sources().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label, "Roof RTL-TCP");
+        db.delete_network_iq_source("rtl-roof").unwrap();
+        assert!(db.list_network_iq_sources().unwrap().is_empty());
+        drop(db);
+        let reopened = Db::open(&path).unwrap();
+        assert!(reopened.list_network_iq_sources().unwrap().is_empty());
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }

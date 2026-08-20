@@ -15,6 +15,8 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Versioned RadioDevice contract | Beta | expert | yes | Every control and capability is reported at runtime and unsupported controls are rejected. |
 | Profiles, bookmarks and bandplans | Beta | normal | yes | Persistence, backup, profile application, capability rejection, and multi-client consistency pass API and browser tests. |
 | Independent LAN listener sessions | Beta | expert | yes | At least three browsers maintain independent viewport and VFO state while shared hardware retunes remain revision-safe. |
+| Listening mode presets | Beta | normal | no | Capability-aware one-tap presets tune the shared hardware window and suggest decoder packs without silent substitution. |
+| Network IQ source registry | Beta | expert | no | Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2 as planned sources until ingest adapters ship. |
 
 ## Hardware
 
@@ -59,7 +61,8 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Tauri desktop wrapper | Beta | expert | yes | Remote and managed-local server modes pass API conformance tests on Windows, macOS, and Linux. |
 | Capacitor iOS and Android clients | Planned | hidden | no | Background audio, lock-screen controls, notifications, credentials, discovery, and deep links pass device tests. |
 | Spectrum occupancy heatmap | Beta | normal | no | Rolling frequency/time heatmap renders from persisted 15-minute occupancy buckets with selectable 6–48 h windows. |
-| Decoder event browser alerts | Beta | normal | no | User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open. |
+| Decoder event browser alerts | Beta | normal | no | User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open or backgrounded via the service worker. |
+| Cross-protocol activity timeline | Beta | normal | no | Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering. |
 
 ## Decoder
 
@@ -99,3 +102,9 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 |---|---|---|:---:|---|
 | Versioned API v2 contract | Beta | expert | yes | Devices, receivers, sessions, media, jobs, recordings, health, backup and update endpoints pass conformance tests. |
 | Idempotent commands and sequenced events | Beta | expert | yes | Duplicate command IDs are idempotent, stale revisions rejected, and events carry sequence and capture time. |
+
+## Recordings
+
+| Feature | Status | Surface | Required | Open gate / acceptance criterion |
+|---|---|---|:---:|---|
+| Recording IQ replay and metadata | Beta | normal | no | IQ recordings write metadata sidecars; playback exposes progress, seek, and v2 recordings listing. |
