@@ -9,6 +9,8 @@
     protocol: string;
     summary: string;
     detail: string;
+    correlation_group?: string;
+    correlation_count?: number;
   }
 
   let entries = $state<TimelineEntry[]>([]);
@@ -86,6 +88,9 @@
         <div class="meta">
           <span class="kind">{entry.kind}</span>
           <span class="time">{fmtTime(entry.timestamp_ms)}</span>
+          {#if Number(entry.correlation_count ?? 0) > 1}
+            <span class="group">{entry.correlation_count} events @ {fmtHz(Number(entry.frequency_hz ?? 0))}</span>
+          {/if}
         </div>
         <div class="body">
           <b>{entry.protocol || entry.kind}</b>
@@ -116,6 +121,7 @@
   .item.novel { border-color: var(--accent); }
   .meta { display: flex; justify-content: space-between; gap: 8px; font: 11px var(--mono); color: var(--fg-dim); margin-bottom: 6px; }
   .kind { text-transform: uppercase; color: var(--accent-2); }
+  .group { color: var(--accent); font-size: 10px; }
   .body { display: grid; gap: 4px; font: 12px var(--mono); }
   .body p { margin: 0; color: var(--fg); white-space: pre-wrap; word-break: break-word; }
   .empty { text-align: center; padding: 24px; }

@@ -104,6 +104,19 @@
       networkError = String(e);
     }
   }
+  async function connectNetworkSource(id: string) {
+    networkError = '';
+    networkNotice = 'Connecting network IQ source…';
+    try {
+      await Api.selectDeviceV2(id);
+      networkNotice = 'Network IQ source selected. PSIQ raw_udp ingest is active when packets arrive.';
+      await loadNetworkSources();
+      status = await Api.deviceStatus();
+    } catch (e) {
+      networkError = String(e);
+      networkNotice = '';
+    }
+  }
   async function discoverDevices() {
     deviceError = '';
     try {
@@ -325,8 +338,11 @@
         <article>
           <div>
             <b>{source.label}</b>
-            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}</small>
+            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}{source.kind === 'raw_udp' ? ' · PSIQ ready' : ' · adapter planned'}</small>
           </div>
+          {#if source.kind === 'raw_udp'}
+            <button class="primary" onclick={() => connectNetworkSource(source.id)}>Connect</button>
+          {/if}
           <button aria-label={`Delete ${source.label}`} onclick={() => deleteNetworkSource(source.id)}>Delete</button>
         </article>
       {:else}
@@ -436,7 +452,7 @@
   .alert-item { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--fg); }
   .network-form { display: grid; gap: 8px; margin-bottom: 12px; }
   .network-form label { display: grid; gap: 4px; color: var(--fg-dim); font-size: 11px; }
-  .network-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .network-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
   .network-list article > div { display: grid; gap: 2px; min-width: 0; }
   .network-list small { color: var(--fg-dim); font-size: 11px; }
   @media (max-width: 760px) {

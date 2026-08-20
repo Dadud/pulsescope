@@ -428,6 +428,13 @@ export const Api = {
   networkSourcesV2: () => getJson('/api/v2/network-sources'),
   saveNetworkSourceV2: (body: any) => postJson('/api/v2/network-sources', body),
   deleteNetworkSourceV2: (id: string) => deleteJson(`/api/v2/network-sources/${encodeURIComponent(id)}`),
+  devicesV2: () => getJson('/api/v2/devices'),
+  selectDeviceV2: (id: string, expectedRevision = 0) =>
+    postJson(`/api/v2/devices/${encodeURIComponent(id)}/select`, {
+      command_id: crypto.randomUUID(),
+      expected_revision: expectedRevision,
+    }),
+  protocolSlices: () => getJson('/protocols/slices'),
 
   jobs: () => getJson<{jobs:any[]}>('/jobs'),
   createJob: (body:any) => postJson('/jobs', body),
