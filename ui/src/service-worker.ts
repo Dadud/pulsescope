@@ -20,14 +20,41 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+self.addEventListener('message', (event) => {
+  const data = event.data as { type?: string; title?: string; body?: string; tag?: string; hash?: string };
+  if (data?.type !== 'decoder-alert' || !data.title) return;
+  event.waitUntil(
+  self.registration.showNotification(data.title, {
+    body: data.body ?? '',
+    tag: data.tag ?? undefined,
+    data: { hash: data.hash ?? '#/messages' },
+  }),
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const hash = (event.notification.data?.hash as string | undefined) ?? '#/messages';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ('focus' in client) {
+          const url = new URL(client.url);
+          url.hash = hash;
+          return client.focus().then(() => client.navigate(url.toString()));
+        }
+      }
+      return self.clients.openWindow(`${self.location.origin}/${hash.startsWith('#') ? hash : `#${hash}`}`);
+    }),
+  );
+});
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname === '/spectrum' || url.pathname.startsWith('/audio/')) return;
 
   if (request.mode === 'navigate') {
-    // Receiver shells must update immediately after deployment. Fall back to
-    // the cached shell only when the LAN appliance is genuinely unreachable.
     event.respondWith(fetch(request, { cache: 'no-store' }).catch(() => caches.match('/index.html').then((response) => response ?? Response.error())));
     return;
   }

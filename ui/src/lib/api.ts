@@ -414,6 +414,20 @@ export const Api = {
   spectrumOccupancy: () => getJson('/spectrum_occupancy'),
   spectrumOccupancyHeatmap: (hours = 24) =>
     getJson(`/spectrum_occupancy/heatmap?hours=${encodeURIComponent(String(hours))}`),
+  activityTimeline: (hours = 24, limit = 200) =>
+    getJson(`/activity/timeline?hours=${encodeURIComponent(String(hours))}&limit=${encodeURIComponent(String(limit))}`),
+
+  recordingsV2: () => getJson('/api/v2/recordings'),
+  playbackStart: (path: string) => postJson('/recording/iq/playback/start', { path }),
+  playbackStop: () => postJson('/recording/iq/playback/stop'),
+  playbackStatus: () => getJson('/recording/iq/playback/status'),
+  playbackSeek: (offset_samples: number) =>
+    postJson('/recording/iq/playback/seek', { offset_samples }),
+  listeningModesV2: () => getJson('/api/v2/listening-modes'),
+  applyListeningModeV2: (id: string) => postJson(`/api/v2/listening-modes/${encodeURIComponent(id)}/apply`),
+  networkSourcesV2: () => getJson('/api/v2/network-sources'),
+  saveNetworkSourceV2: (body: any) => postJson('/api/v2/network-sources', body),
+  deleteNetworkSourceV2: (id: string) => deleteJson(`/api/v2/network-sources/${encodeURIComponent(id)}`),
 
   jobs: () => getJson<{jobs:any[]}>('/jobs'),
   createJob: (body:any) => postJson('/jobs', body),

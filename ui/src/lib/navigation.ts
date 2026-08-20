@@ -28,6 +28,7 @@ export const navSections: NavSection[] = [
     label: 'Decode',
     items: [
       { label: 'Messages', href: '#/messages', description: 'Full decoded message log' },
+      { label: 'Activity', href: '#/activity', description: 'Cross-protocol RF timeline' },
       { label: 'Trunking', href: '#/trunking', description: 'P25, NXDN, EDACS, DMR' },
       { label: 'Aero', href: '#/aero', description: 'Inmarsat AERO' },
       { label: 'Iridium', href: '#/iridium', description: 'Iridium burst decoder' },

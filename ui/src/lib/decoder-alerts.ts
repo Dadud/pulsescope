@@ -70,12 +70,24 @@ function formatFrequency(hz: number) {
 
 const recentKeys = new Set<string>();
 
+function postServiceWorkerAlert(payload: {
+  title: string;
+  body: string;
+  tag: string;
+  hash: string;
+}) {
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return;
+  navigator.serviceWorker.controller.postMessage({
+    type: 'decoder-alert',
+    ...payload,
+  });
+}
+
 export function maybeNotifyDecodedMessage(
   message: DecodedMessage,
   prefs: DecoderAlertPrefs = loadDecoderAlertPrefs(),
 ) {
-  if (!prefs.enabled || typeof Notification === 'undefined') return;
-  if (Notification.permission !== 'granted') return;
+  if (!prefs.enabled) return;
   if (!protocolMatches(message.protocol ?? '', prefs.protocols)) return;
 
   const key = `${message.protocol}:${message.address}:${message.content}:${message.timestamp_ms ?? 0}`;
@@ -85,20 +97,23 @@ export function maybeNotifyDecodedMessage(
 
   const title = `${message.protocol.toUpperCase()} · ${formatFrequency(Number(message.frequency_hz ?? 0))}`;
   const body = message.content || message.message_type || message.address || 'Decoder event';
+  const hash = message.protocol.toLowerCase().includes('p25') ? '#/trunking' : '#/messages';
+
+  if (document.hidden) {
+    postServiceWorkerAlert({ title, body, tag: key, hash });
+    return;
+  }
+
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+
   try {
-    const notification = new Notification(title, {
-      body,
-      tag: key,
-      silent: false,
-    });
+    const notification = new Notification(title, { body, tag: key, silent: false });
     notification.onclick = () => {
       window.focus();
-      window.location.hash = message.protocol.toLowerCase().includes('p25')
-        ? '#/trunking'
-        : '#/messages';
+      window.location.hash = hash;
       notification.close();
     };
-  } catch (error) {
-    console.warn('decoder alert notification failed', error);
+  } catch {
+    postServiceWorkerAlert({ title, body, tag: key, hash });
   }
 }
