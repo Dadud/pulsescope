@@ -390,10 +390,21 @@ export const Api = {
   gpsStatus: () => getJson('/gps/status'),
   glonassStatus: () => getJson('/glonass/status'),
   goesStatus: () => getJson('/goes_lrit/status'),
-  satelliteEnable: (system: 'gps' | 'glonass' | 'goes', enabled: boolean) =>
-    postJson(`/${system === 'goes' ? 'goes_lrit' : system}/enable`, { enabled }),
-  satelliteClear: (system: 'gps' | 'glonass' | 'goes') =>
+  goesProducts: () => getJson('/goes_lrit/products'),
+  goesCheck: () => postJson('/goes_lrit/check'),
+  radiosondeStatus: () => getJson('/radiosonde/status'),
+  radiosondeTelemetry: () => getJson<any[]>('/radiosonde/telemetry'),
+  radiosondeEnable: (enabled: boolean) => postJson('/radiosonde/enable', { enabled }),
+  radiosondeClear: () => postJson('/radiosonde/clear'),
+  satelliteEnable: (system: 'gps' | 'glonass' | 'goes' | 'radiosonde', enabled: boolean) =>
+    postJson(
+      `/${system === 'goes' ? 'goes_lrit' : system}/enable`,
+      { enabled }
+    ),
+  satelliteClear: (system: 'gps' | 'glonass' | 'goes' | 'radiosonde') =>
     postJson(`/${system === 'goes' ? 'goes_lrit' : system}/clear`),
+  scanGoes: () => getJson('/scan/goes'),
+  scanRadiosonde: () => getJson('/scan/radiosonde'),
 
   hdRadioStatus: () => getJson('/hd_radio/status'),
   hdRadioMessages: () => getJson<any[]>('/hd_radio/messages'),

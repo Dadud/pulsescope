@@ -261,10 +261,17 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/goes_lrit/enable", post(goes_enable))
         .route("/goes_lrit/check", post(goes_check))
         .route("/goes_lrit/status", get(goes_status))
+        .route("/goes_lrit/products", get(goes_products))
+        .route("/goes_lrit/clear", post(goes_clear))
         .route(
             "/goes_lrit/satellite",
             get(goes_satellite).put(goes_satellite_put),
         )
+        // ── radiosonde ───────────────────────────────────────────────────
+        .route("/radiosonde/enable", post(radiosonde_enable))
+        .route("/radiosonde/status", get(radiosonde_status))
+        .route("/radiosonde/telemetry", get(radiosonde_telemetry))
+        .route("/radiosonde/clear", post(radiosonde_clear))
         // ── hd radio ─────────────────────────────────────────────────────
         .route("/hd_radio/check", post(hd_radio_check))
         .route("/hd_radio/enable", post(hd_radio_enable))
@@ -301,6 +308,8 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/scan/aero", get(scan_aero))
         .route("/scan/ble", get(scan_ble))
         .route("/scan/lora", get(scan_lora))
+        .route("/scan/goes", get(scan_goes))
+        .route("/scan/radiosonde", get(scan_radiosonde))
         .route("/jobs", get(jobs_list).post(jobs_create))
         .route("/jobs/:id", axum::routing::delete(jobs_delete))
         // ── recording ────────────────────────────────────────────────────
@@ -769,15 +778,34 @@ async fn diagnostic_bundle_export(State(s): State<ApiState>) -> impl IntoRespons
 
 async fn protocol_slices(State(s): State<ApiState>) -> impl IntoResponse {
     let device = s.0.device.status();
-    Json(
-        crate::protocols::slices()
-            .into_iter()
-            .map(|slice| {
-                let hardware = crate::protocols::capability_check(&slice, &device);
-                json!({"slice": slice, "hardware": hardware, "running": false})
+    let slices = crate::protocols::slices()
+        .into_iter()
+        .map(|slice| {
+            let hardware = crate::protocols::capability_check(&slice, &device);
+            json!({
+                "id": slice.id,
+                "name": slice.name,
+                "description": slice.frequency_plan,
+                "frequency_plan": slice.frequency_plan,
+                "center_frequency_hz": slice.center_frequency_hz,
+                "rf_bandwidth_hz": slice.rf_bandwidth_hz,
+                "required_sample_rate_hz": slice.required_sample_rate_hz,
+                "synchronization": slice.synchronization,
+                "modulation": slice.modulation,
+                "fec": slice.fec,
+                "checksum": slice.checksum,
+                "message_schema": slice.message_schema,
+                "fixture": slice.fixture,
+                "ui_outcome": slice.ui_outcome,
+                "transport": slice.transport,
+                "available": slice.available,
+                "completion_reason": slice.completion_reason,
+                "hardware": hardware,
+                "running": false
             })
-            .collect::<Vec<_>>(),
-    )
+        })
+        .collect::<Vec<_>>();
+    Json(json!({"slices": slices}))
 }
 
 async fn protocol_capability(
@@ -1977,6 +2005,13 @@ async fn decoder_catalog_v2(State(s): State<ApiState>) -> impl IntoResponse {
         decoder_development_entry("m17", "M17", "discriminator", "planned_sidecar"),
         decoder_fixture_verified_entry("ble", "BLE advertising", "iq", "live"),
         decoder_fixture_verified_entry("lora", "LoRa mesh / Modbus", "iq", "live"),
+        decoder_fixture_verified_entry(
+            "goes",
+            "GOES LRIT/HRIT product identification",
+            "iq",
+            "live",
+        ),
+        decoder_fixture_verified_entry("radiosonde", "Radiosonde GFSK telemetry", "iq", "live"),
         decoder_development_entry("hd_radio", "HD Radio / NRSC-5", "iq", "planned_sidecar"),
     ];
     for decoder in
@@ -2599,6 +2634,12 @@ async fn start_configured_sidecars(s: &ApiState) {
     if cfg.dsd.enabled {
         manifest_ids.push("dsd-fme");
     }
+    if cfg.radiosonde.enabled {
+        manifest_ids.push("rs41mod");
+    }
+    if cfg.goes_lrit.enabled {
+        manifest_ids.push("satdump");
+    }
     s.0.decoder_scheduler
         .sync_manifest_jobs(
             &s.0.sidecars,
@@ -2608,6 +2649,29 @@ async fn start_configured_sidecars(s: &ApiState) {
             s.0.events.clone(),
         )
         .await;
+
+    if cfg.radiosonde.enabled && !s.0.sidecars.is_running("rs41mod") {
+        if let Some(path) = crate::radiosonde::find_rs41mod().or_else(|| {
+            let configured = std::path::PathBuf::from(&cfg.radiosonde.path);
+            configured.exists().then_some(configured)
+        }) {
+            match s
+                .0
+                .sidecars
+                .spawn_decoder(
+                    "rs41mod",
+                    path,
+                    crate::radiosonde::rs41mod_stdin_args(),
+                    s.0.db.clone(),
+                    s.0.events.clone(),
+                )
+                .await
+            {
+                Ok(()) => tracing::info!("rs41mod sidecar started"),
+                Err(error) => tracing::warn!(error = %error, "rs41mod sidecar failed to start"),
+            }
+        }
+    }
 
     tracing::debug!("manifest decoder sync complete for configured sidecars");
 }
@@ -3612,24 +3676,68 @@ async fn glonass_status(State(s): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn goes_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
-    let mut c = s.0.config.write();
-    c.goes_lrit.enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
-    let _ = c.save(&s.0.data_dir);
-    Json(json!({"ok":true,"enabled":c.goes_lrit.enabled}))
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    {
+        let mut c = s.0.config.write();
+        c.goes_lrit.enabled = enabled;
+        let _ = c.save(&s.0.data_dir);
+    }
+    if enabled {
+        start_configured_sidecars(&s).await;
+    } else {
+        let _ = s.0.sidecars.kill("satdump").await;
+    }
+    Json(goes_status_body(&s))
 }
-async fn goes_check() -> impl IntoResponse {
-    Json(json!({"ok": true, "available": false, "reason":"satdump sidecar not configured"}))
+async fn goes_check(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(goes_status_body(&s))
+}
+fn goes_status_body(s: &ApiState) -> Value {
+    let c = s.0.config.read();
+    let satdump = crate::goes::find_satdump();
+    let satdump_path = if c.goes_lrit.satdump_path.is_empty() {
+        satdump.as_ref().map(|p| p.display().to_string())
+    } else {
+        Some(c.goes_lrit.satdump_path.clone())
+    };
+    json!({
+        "enabled": c.goes_lrit.enabled,
+        "available": true,
+        "native": true,
+        "native_cadu": true,
+        "image_pipeline": false,
+        "satellite": c.goes_lrit.satellite,
+        "path": satdump_path.clone().unwrap_or_default(),
+        "satdump": satdump_path,
+        "sample_rate_hz": c.goes_lrit.sample_rate_hz,
+        "output_image_dir": c.goes_lrit.output_image_dir,
+        "products_from_output_dir": false,
+        "running": s.0.sidecars.is_running("satdump"),
+        "missing_gate": "hardware live GOES pass; SatDump image reconstruction remains sidecar-only"
+    })
 }
 async fn goes_status(State(s): State<ApiState>) -> impl IntoResponse {
-    let c = s.0.config.read();
-    Json(
-        json!({"enabled":c.goes_lrit.enabled,"satellite":c.goes_lrit.satellite,"path":c.goes_lrit.satdump_path,"sample_rate_hz":c.goes_lrit.sample_rate_hz}),
-    )
+    Json(goes_status_body(&s))
+}
+async fn goes_products(State(s): State<ApiState>) -> impl IntoResponse {
+    let messages =
+        s.0.db
+            .messages_by_protocol(Some("goes"), 100)
+            .unwrap_or_default();
+    Json(json!({
+        "products": crate::goes::products_from_messages(&messages),
+        "source": "decoded_events",
+        "products_from_output_dir": false
+    }))
+}
+async fn goes_clear(State(s): State<ApiState>) -> impl IntoResponse {
+    let _ = s.0.db.delete_messages_by_protocol("goes");
+    Json(json!({"ok": true}))
 }
 async fn goes_satellite(State(s): State<ApiState>) -> impl IntoResponse {
     let c = s.0.config.read();
     Json(
-        json!({"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz}),
+        json!({"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz,"products_from_output_dir":false}),
     )
 }
 async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
@@ -3645,8 +3753,61 @@ async fn goes_satellite_put(State(s): State<ApiState>, Json(v): Json<Value>) -> 
     }
     let _ = c.save(&s.0.data_dir);
     Json(
-        json!({"ok":true,"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz}),
+        json!({"ok":true,"satellite":c.goes_lrit.satellite,"output_image_dir":c.goes_lrit.output_image_dir,"sample_rate_hz":c.goes_lrit.sample_rate_hz,"products_from_output_dir":false}),
     )
+}
+
+async fn radiosonde_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    {
+        let mut c = s.0.config.write();
+        c.radiosonde.enabled = enabled;
+        let _ = c.save(&s.0.data_dir);
+    }
+    if enabled {
+        start_configured_sidecars(&s).await;
+    } else {
+        let _ = s.0.sidecars.kill("rs41mod").await;
+    }
+    Json(radiosonde_status_body(&s))
+}
+fn radiosonde_status_body(s: &ApiState) -> Value {
+    let c = s.0.config.read();
+    let sidecar = crate::radiosonde::find_rs41mod();
+    let path = if c.radiosonde.path.is_empty() || c.radiosonde.path == "rs41mod" {
+        sidecar
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| c.radiosonde.path.clone())
+    } else {
+        c.radiosonde.path.clone()
+    };
+    json!({
+        "enabled": c.radiosonde.enabled,
+        "available": true,
+        "native": true,
+        "sonde_type": c.radiosonde.sonde_type,
+        "frequency_hz": c.radiosonde.frequency_hz,
+        "path": path,
+        "rs41mod": sidecar.as_ref().map(|p| p.display().to_string()),
+        "running": s.0.sidecars.is_running("rs41mod"),
+        "live_vaisala_sidecar": sidecar.is_some(),
+        "missing_gate": "hardware live radiosonde; Vaisala RS41 FEC remains rs41mod sidecar-only"
+    })
+}
+async fn radiosonde_status(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(radiosonde_status_body(&s))
+}
+async fn radiosonde_telemetry(State(s): State<ApiState>) -> impl IntoResponse {
+    Json(json!(s
+        .0
+        .db
+        .messages_by_protocol(Some("radiosonde"), 100)
+        .unwrap_or_default()))
+}
+async fn radiosonde_clear(State(s): State<ApiState>) -> impl IntoResponse {
+    let _ = s.0.db.delete_messages_by_protocol("radiosonde");
+    Json(json!({"ok": true}))
 }
 
 async fn hd_radio_enable(State(s): State<ApiState>, Json(v): Json<Value>) -> impl IntoResponse {
@@ -4294,6 +4455,87 @@ async fn scan_lora(State(s): State<ApiState>) -> Json<Value> {
             "available": true,
             "native": true,
             "messages": s.0.db.messages_by_protocols(crate::lora::LORA_PROTOCOLS, 50).unwrap_or_default(),
+            "error": e
+        })),
+    }
+}
+
+async fn scan_goes(State(s): State<ApiState>) -> Json<Value> {
+    let status = s.0.device.status();
+    if !status.connected {
+        return Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocol(Some("goes"), 50).unwrap_or_default(),
+            "reason": "no device connected — GOES LRIT/HRIT needs ~1.694 GHz coverage"
+        }));
+    }
+    let count = (status.sample_rate as usize / 5).clamp(4_096, 800_000);
+    match live_iq_snapshot(&s, count) {
+        Ok(iq) => {
+            let products = crate::goes::decode_iq(&iq, status.sample_rate);
+            for product in &products {
+                if product.valid {
+                    let _ =
+                        s.0.db
+                            .insert_decoded_message(&product.to_decoded(status.center_freq_hz));
+                }
+            }
+            Json(json!({
+                "available": true,
+                "native": true,
+                "sample_rate_hz": status.sample_rate,
+                "samples": iq.len(),
+                "message_count": products.len(),
+                "messages": products,
+                "products_from_output_dir": false,
+                "note": "Native CADU product identification; SatDump image reconstruction is sidecar-only"
+            }))
+        }
+        Err(e) => Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocol(Some("goes"), 50).unwrap_or_default(),
+            "error": e
+        })),
+    }
+}
+
+async fn scan_radiosonde(State(s): State<ApiState>) -> Json<Value> {
+    let status = s.0.device.status();
+    if !status.connected {
+        return Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocol(Some("radiosonde"), 50).unwrap_or_default(),
+            "reason": "no device connected — radiosondes are typically 400.15–406 MHz"
+        }));
+    }
+    let count = (status.sample_rate as usize / 5).clamp(8_192, 800_000);
+    match live_iq_snapshot(&s, count) {
+        Ok(iq) => {
+            let frames = crate::radiosonde::decode_iq(&iq, status.sample_rate);
+            for telemetry in &frames {
+                if telemetry.checksum_valid {
+                    let _ =
+                        s.0.db
+                            .insert_decoded_message(&telemetry.to_decoded(status.center_freq_hz));
+                }
+            }
+            Json(json!({
+                "available": true,
+                "native": true,
+                "sample_rate_hz": status.sample_rate,
+                "samples": iq.len(),
+                "message_count": frames.len(),
+                "messages": frames,
+                "note": "Checksum-valid native GFSK frames only; live Vaisala RS41 FEC remains rs41mod sidecar-only"
+            }))
+        }
+        Err(e) => Json(json!({
+            "available": true,
+            "native": true,
+            "messages": s.0.db.messages_by_protocol(Some("radiosonde"), 50).unwrap_or_default(),
             "error": e
         })),
     }
@@ -5125,7 +5367,15 @@ async fn feature_packs(State(s): State<ApiState>) -> impl IntoResponse {
             c.radiosonde.enabled,
             "rs41mod",
             &c.radiosonde.path,
-            &["rs41"],
+            &["radiosonde", "rs41"],
+        ),
+        pack(
+            "goes",
+            "GOES LRIT/HRIT",
+            c.goes_lrit.enabled,
+            "satdump",
+            &c.goes_lrit.satdump_path,
+            &["goes"],
         ),
     ];
     Json(json!({"groups": packs, "count": packs.len()}))
@@ -5167,6 +5417,10 @@ async fn feature_pack_enable(
                 c.radiosonde.enabled = enabled;
                 true
             }
+            "goes" => {
+                c.goes_lrit.enabled = enabled;
+                true
+            }
             _ => false,
         }
     };
@@ -5185,6 +5439,7 @@ async fn feature_pack_enable(
         "aprs" => "direwolf",
         "dsd" => "dsd-fme",
         "radiosonde" => "rs41mod",
+        "goes" => "satdump",
         _ => "",
     };
     if enabled {
@@ -6178,8 +6433,21 @@ mod readiness_tests {
     #[test]
     fn recorded_iq_e2e_catalog_ids_are_available() {
         for id in [
-            "adsb", "ais", "aprs", "pocsag", "rtty", "navtex", "uat", "acars", "vdl2", "rds", "cw",
-            "ble", "lora",
+            "adsb",
+            "ais",
+            "aprs",
+            "pocsag",
+            "rtty",
+            "navtex",
+            "uat",
+            "acars",
+            "vdl2",
+            "rds",
+            "cw",
+            "ble",
+            "lora",
+            "goes",
+            "radiosonde",
         ] {
             let decoder = decoder_fixture_verified_entry(id, id, "iq", "live");
             assert_eq!(decoder["id"], *id);

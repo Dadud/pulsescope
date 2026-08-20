@@ -284,6 +284,7 @@ const DECODER_SYSTEM_META: &[(&str, &[&str], &[&str])] = &[
     ("jt9", &["wsjtx"], &["jt9", "jt9-64", "wsjtx"]),
     ("wsprd", &["wsjtx"], &["wsprd", "wsprd-64"]),
     ("rs41mod", &["rs41mod"], &["rs41mod"]),
+    ("satdump", &["satdump"], &["satdump"]),
 ];
 
 fn system_packages(name: &str) -> &'static [&'static str] {

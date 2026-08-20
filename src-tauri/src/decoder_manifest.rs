@@ -191,4 +191,16 @@ mod tests {
         manifest.payload.resources.cpu_percent = 101;
         assert!(manifest.validate_shape().is_err());
     }
+
+    #[test]
+    fn sidecar_templates_validate_shape() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/decoder-manifests");
+        for name in ["satdump.template.json", "rs41mod.template.json"] {
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            let manifest: SignedDecoderManifest = serde_json::from_str(&text).unwrap();
+            manifest.validate_shape().unwrap();
+            assert!(!manifest.payload.executable.is_empty());
+            assert!(manifest.payload.output_schema.contains(".v1"));
+        }
+    }
 }

@@ -299,6 +299,22 @@ pub fn decode_tsbk_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMe
         .collect()
 }
 
+pub fn decode_radiosonde_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMessage> {
+    crate::radiosonde::decode_iq(iq, sample_rate_hz)
+        .into_iter()
+        .filter(|tel| tel.checksum_valid)
+        .map(|tel| tel.to_decoded(402_500_000))
+        .collect()
+}
+
+pub fn decode_goes_iq(iq: &[Complex<f32>], sample_rate_hz: u32) -> Vec<DecodedMessage> {
+    crate::goes::decode_iq(iq, sample_rate_hz)
+        .into_iter()
+        .filter(|product| product.valid)
+        .map(|product| product.to_decoded(1_694_100_000))
+        .collect()
+}
+
 pub fn decode_uat_bits(bits: &[u8]) -> Vec<DecodedMessage> {
     let bools: Vec<bool> = bits.iter().map(|bit| *bit != 0).collect();
     let mut decoder = crate::aviation::UatDecoder::new();
@@ -406,6 +422,8 @@ pub fn run_recorded_fixture(
                     decode_lora_iq(&iq, artifact.sample_rate_hz)
                 }
                 "p25-tsbk" => decode_tsbk_iq(&iq, artifact.sample_rate_hz),
+                "radiosonde" => decode_radiosonde_iq(&iq, artifact.sample_rate_hz),
+                "goes" => decode_goes_iq(&iq, artifact.sample_rate_hz),
                 _ => anyhow::bail!("unsupported IQ protocol {}", entry.protocol),
             })
         }
@@ -708,6 +726,21 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
         &crate::trunking::synthesize_tsbk_control_iq(tsbk_rate),
     )?;
 
+    let radiosonde_rate = crate::radiosonde::RADIOSONDE_FIXTURE_SAMPLE_RATE_HZ;
+    let radiosonde_sha = write_iq_artifact(
+        root,
+        "radiosonde-rs41-pulse.iq.json",
+        radiosonde_rate,
+        &crate::radiosonde::synthesize_pulse_rs41_iq(radiosonde_rate),
+    )?;
+    let goes_rate = crate::goes::GOES_FIXTURE_SAMPLE_RATE_HZ;
+    let goes_sha = write_iq_artifact(
+        root,
+        "goes-lrit-info.iq.json",
+        goes_rate,
+        &crate::goes::synthesize_lrit_info_iq(goes_rate),
+    )?;
+
     let manifest = RecordedFixtureManifest {
         schema: "pulsescope.recorded-iq-fixture".into(),
         version: 1,
@@ -948,6 +981,22 @@ pub fn write_canonical_fixtures(root: &Path) -> anyhow::Result<()> {
                 Some("1234"),
                 Some("56789"),
             ),
+            iq_entry(
+                "radiosonde-rs41-pulse",
+                "radiosonde",
+                "radiosonde-rs41-pulse.iq.json",
+                radiosonde_sha,
+                Some("PULSE001"),
+                Some("checksum_valid=true"),
+            ),
+            iq_entry(
+                "goes-lrit-info",
+                "goes",
+                "goes-lrit-info.iq.json",
+                goes_sha,
+                Some("GOES-19"),
+                Some("LRIT-INFO"),
+            ),
         ],
     };
     std::fs::write(
@@ -1046,5 +1095,27 @@ mod tests {
         );
         assert!(lora.iter().any(|m| m.protocol == "meshtastic"));
         assert!(lora.iter().any(|m| m.content.contains("HELLO")));
+    }
+
+    #[test]
+    fn goes_and_radiosonde_iq_fixtures_decode_to_normalized_events() {
+        let sonde = decode_radiosonde_iq(
+            &crate::radiosonde::synthesize_pulse_rs41_iq(
+                crate::radiosonde::RADIOSONDE_FIXTURE_SAMPLE_RATE_HZ,
+            ),
+            crate::radiosonde::RADIOSONDE_FIXTURE_SAMPLE_RATE_HZ,
+        );
+        assert!(sonde.iter().any(|m| m.address == "PULSE001"));
+        assert!(sonde
+            .iter()
+            .any(|m| m.content.contains("checksum_valid=true")));
+
+        let goes = decode_goes_iq(
+            &crate::goes::synthesize_lrit_info_iq(crate::goes::GOES_FIXTURE_SAMPLE_RATE_HZ),
+            crate::goes::GOES_FIXTURE_SAMPLE_RATE_HZ,
+        );
+        assert!(goes.iter().any(|m| m.address == "GOES-19"));
+        assert!(goes.iter().any(|m| m.content.contains("LRIT-INFO")));
+        assert!(goes.iter().any(|m| m.content.contains("valid=true")));
     }
 }

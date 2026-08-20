@@ -32,7 +32,7 @@ export const navSections: NavSection[] = [
       { label: 'Trunking', href: '#/trunking', description: 'P25, NXDN, EDACS, DMR' },
       { label: 'Aero', href: '#/aero', description: 'Inmarsat AERO' },
       { label: 'Iridium', href: '#/iridium', description: 'Iridium burst decoder' },
-      { label: 'Satellites', href: '#/satellites', description: 'GPS, GLONASS, GOES LRIT' },
+      { label: 'Satellites', href: '#/satellites', description: 'GOES LRIT products and radiosondes' },
       { label: 'HD Radio', href: '#/hd-radio', description: 'NRSC5 FM HD Radio' },
       { label: 'BLE', href: '#/ble', description: 'Bluetooth Low Energy' },
       { label: 'LoRa', href: '#/lora', description: 'LoRa regional plans' },

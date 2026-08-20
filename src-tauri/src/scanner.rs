@@ -1714,6 +1714,8 @@ struct NativeRangeDecoders {
     last_rds_pi: Option<u16>,
     lora_iq: Vec<Complex<f32>>,
     ble_iq: Vec<Complex<f32>>,
+    radiosonde_iq: Vec<Complex<f32>>,
+    goes_iq: Vec<Complex<f32>>,
     sample_rate: u32,
 }
 
@@ -1740,6 +1742,8 @@ impl NativeRangeDecoders {
             last_rds_pi: None,
             lora_iq: Vec::new(),
             ble_iq: Vec::new(),
+            radiosonde_iq: Vec::new(),
+            goes_iq: Vec::new(),
             sample_rate,
         }
     }
@@ -2136,6 +2140,10 @@ impl NativeRangeDecoders {
 
         let lora_band = range_name_matches(name, &["ism 433", "ism 915", "33cm", "lora", "70cm"]);
         let ble_band = range_name_matches(name, &["ism 2.4", "bluetooth", "ble"]);
+        let radiosonde_band = range_name_matches(name, &["radiosonde", "sonde"])
+            || crate::radiosonde::in_band(center_hz);
+        let goes_band =
+            range_name_matches(name, &["goes", "lrit", "hrit"]) || crate::goes::in_band(center_hz);
         if lora_band {
             self.lora_iq.extend_from_slice(iq);
             const LORA_CAP: usize = 400_000;
@@ -2177,6 +2185,50 @@ impl NativeRangeDecoders {
             }
         } else {
             self.ble_iq.clear();
+        }
+        if radiosonde_band {
+            self.radiosonde_iq.extend_from_slice(iq);
+            const SONDE_CAP: usize = 200_000;
+            if self.radiosonde_iq.len() > SONDE_CAP {
+                let drain = self.radiosonde_iq.len() - SONDE_CAP;
+                self.radiosonde_iq.drain(..drain);
+            }
+            if self.radiosonde_iq.len() >= 8_192 {
+                for telemetry in crate::radiosonde::decode_iq(&self.radiosonde_iq, sample_rate) {
+                    if telemetry.checksum_valid {
+                        publish_decoded(db, events_tx, telemetry.to_decoded(center_hz));
+                        self.radiosonde_iq.clear();
+                    }
+                }
+                if self.radiosonde_iq.len() >= SONDE_CAP / 2 {
+                    let drain = self.radiosonde_iq.len() / 2;
+                    self.radiosonde_iq.drain(..drain);
+                }
+            }
+        } else {
+            self.radiosonde_iq.clear();
+        }
+        if goes_band {
+            self.goes_iq.extend_from_slice(iq);
+            const GOES_CAP: usize = 400_000;
+            if self.goes_iq.len() > GOES_CAP {
+                let drain = self.goes_iq.len() - GOES_CAP;
+                self.goes_iq.drain(..drain);
+            }
+            if self.goes_iq.len() >= 4_096 {
+                for product in crate::goes::decode_iq(&self.goes_iq, sample_rate) {
+                    if product.valid {
+                        publish_decoded(db, events_tx, product.to_decoded(center_hz));
+                        self.goes_iq.clear();
+                    }
+                }
+                if self.goes_iq.len() >= GOES_CAP / 2 {
+                    let drain = self.goes_iq.len() / 2;
+                    self.goes_iq.drain(..drain);
+                }
+            }
+        } else {
+            self.goes_iq.clear();
         }
     }
 }

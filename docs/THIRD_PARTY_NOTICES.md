@@ -17,6 +17,7 @@ socket); this subprocess boundary is the project's GPL containment line.
 | direwolf   | APRS / AX.25 decode                      | https://github.com/wb2osz/direwolf        | GPL-2.0            |
 | nrsc5      | HD Radio / NRSC-5 decode                 | https://github.com/theori-io/nrsc5        | GPL-3.0            |
 | rs41mod    | RS41 radiosonde decode                   | https://github.com/rs1729/RS              | GPL-3.0            |
+| SatDump    | GOES HRIT/LRIT and multi-satellite decode | https://github.com/SatDump/SatDump        | GPL-3.0            |
 | dump978    | UAT 978 MHz ADS-B decode                 | https://github.com/mutability/dump978     | GPL-2.0            |
 | dumpvdl2   | VDL Mode 2 decode                        | https://github.com/szpajder/dumpvdl2      | GPL-3.0            |
 | acarsdec   | ACARS decode                             | https://github.com/TLeconte/acarsdec      | GPL-2.0-or-later   |

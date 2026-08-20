@@ -595,10 +595,13 @@ pub fn parse_line(protocol: &str, line: &str) -> Option<crate::db::DecodedMessag
     }
 
     if p.contains("rs41") || p.contains("radiosonde") {
-        msg.protocol = "rs41".into();
-        msg.message_type = "telemetry".into();
-        msg.address = field_after(line, "serial=").unwrap_or_default();
-        return Some(msg);
+        let telemetry = crate::radiosonde::parse_sidecar_line(line)?;
+        return Some(telemetry.to_decoded(default_frequency("radiosonde")));
+    }
+
+    if p.contains("satdump") || p == "goes" || p.contains("goes_lrit") {
+        let product = crate::goes::parse_sidecar_line(line)?;
+        return Some(product.to_decoded(default_frequency("goes")));
     }
 
     None
@@ -611,6 +614,7 @@ fn default_frequency(protocol: &str) -> u64 {
         "dumpvdl2" | "vdl2" => 136_975_000,
         "direwolf" | "aprs" => 144_390_000,
         "rs41" | "radiosonde" => 402_500_000,
+        "satdump" | "goes" | "goes_lrit" => 1_694_100_000,
         "nrsc5" | "hd_radio" => 88_500_000,
         _ => 0,
     }
@@ -771,8 +775,17 @@ mod tests {
         let clear = parse_line("dsd-neo", "P25 TG: 42 Encrypted: NO").unwrap();
         assert_eq!(clear.encryption, "none");
         let sonde = parse_line("rs41mod", "serial=RS41-001 lat=39.7").unwrap();
-        assert_eq!(sonde.protocol, "rs41");
+        assert_eq!(sonde.protocol, "radiosonde");
         assert_eq!(sonde.address, "RS41-001");
+        assert!(parse_line("rs41mod", "serial=RS41-001 crc=fail").is_none());
+        let goes = parse_line(
+            "satdump",
+            r#"{"satellite":"GOES-19","product":"LRIT-INFO","valid":true}"#,
+        )
+        .unwrap();
+        assert_eq!(goes.protocol, "goes");
+        assert_eq!(goes.address, "GOES-19");
+        assert!(parse_line("satdump", "/tmp/goes/out/image.png").is_none());
         let hd = parse_line("nrsc5", r#"{"type":"sis","name":"KXYZ-FM"}"#).unwrap();
         assert_eq!(hd.protocol, "hd_radio");
         assert_eq!(hd.address, "KXYZ-FM");

@@ -370,6 +370,26 @@
         {"type": "test", "ref": "db::tests::network_source_migration_persists_registry_entries"},
         {"type": "build", "ref": "Settings network registry UI, Connect action, and /v2/devices/:id/select API"}
       ]
+    },
+    {
+      "id": "decoder-goes-lrit", "name": "GOES LRIT/HRIT product identification", "group": "decoder",
+      "status": "fixture_verified", "visibility": "normal", "required": false,
+      "acceptance_gate": "Recorded BPSK CADU IQ recovers goes.product.v1 with CRC-32; gallery lists only valid decoded products, never configured output paths. SatDump image reconstruction remains sidecar-only.",
+      "evidence": [
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
+        {"type": "test", "ref": "goes::tests::fixture_iq_recovers_product"},
+        {"type": "test", "ref": "goes::tests::sidecar_ignores_output_directory_listings_and_invalid_products"}
+      ]
+    },
+    {
+      "id": "decoder-radiosonde", "name": "Radiosonde GFSK telemetry", "group": "decoder",
+      "status": "fixture_verified", "visibility": "normal", "required": false,
+      "acceptance_gate": "Recorded 4800 baud GFSK IQ recovers checksum-valid radiosonde.telemetry.v1; map/table show valid frames only. Live Vaisala RS41 FEC remains the rs41mod sidecar.",
+      "evidence": [
+        {"type": "test", "ref": "decoder_fixtures::tests::canonical_synthesis_passes_e2e_expectations"},
+        {"type": "test", "ref": "radiosonde::tests::fixture_iq_recovers_telemetry"},
+        {"type": "test", "ref": "radiosonde::tests::sidecar_drops_failed_checksum_lines"}
+      ]
     }
   ]
 }
