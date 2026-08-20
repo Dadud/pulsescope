@@ -291,10 +291,13 @@ fn rtl_tcp_sample(i: u8, q: u8) -> Complex<f32> {
 }
 
 pub fn decode_rtl_tcp_iq(bytes: &[u8]) -> Vec<Complex<f32>> {
-    bytes
-        .chunks_exact(2)
-        .map(|pair| rtl_tcp_sample(pair[0], pair[1]))
-        .collect()
+    let mut samples = Vec::with_capacity(bytes.len() / 2);
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        samples.push(rtl_tcp_sample(bytes[index], bytes[index + 1]));
+        index += 2;
+    }
+    samples
 }
 
 const RTL_TCP_DONGLE_MAGIC: u32 = 0x1234_5678;
