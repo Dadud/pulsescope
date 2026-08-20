@@ -429,11 +429,14 @@ export const Api = {
   saveNetworkSourceV2: (body: any) => postJson('/api/v2/network-sources', body),
   deleteNetworkSourceV2: (id: string) => deleteJson(`/api/v2/network-sources/${encodeURIComponent(id)}`),
   devicesV2: () => getJson('/api/v2/devices'),
-  selectDeviceV2: (id: string, expectedRevision = 0) =>
-    postJson(`/api/v2/devices/${encodeURIComponent(id)}/select`, {
+  selectDeviceV2: async (id: string) => {
+    const receivers = await getJson<{ receivers?: Array<{ revision?: number }> }>('/api/v2/receivers');
+    const expectedRevision = receivers?.receivers?.[0]?.revision ?? 0;
+    return postJson(`/api/v2/devices/${encodeURIComponent(id)}/select`, {
       command_id: crypto.randomUUID(),
       expected_revision: expectedRevision,
-    }),
+    });
+  },
   protocolSlices: () => getJson('/protocols/slices'),
 
   jobs: () => getJson<{jobs:any[]}>('/jobs'),
