@@ -1,6 +1,6 @@
 {
   "name": "PulseScope",
-  "install": "sudo apt-get update\nsudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libasound2-dev libssl-dev pkg-config\nrustup toolchain install 1.89.0 --profile minimal -c clippy -c rustfmt\nrustup default 1.89.0\npnpm install --frozen-lockfile\npnpm build\ncargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --bin pulsescope",
+  "install": "sudo apt-get update\nsudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libasound2-dev libssl-dev pkg-config\nrustup toolchain install stable --profile minimal -c clippy -c rustfmt\nrustup default stable\npnpm install --frozen-lockfile\npnpm build\ncargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --bin pulsescope",
   "terminals": [
     {
       "name": "pulsescope-server",
