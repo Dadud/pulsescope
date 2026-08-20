@@ -1,0 +1,14 @@
+{
+  "name": "PulseScope",
+  "install": "sudo apt-get update\nsudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libasound2-dev libssl-dev pkg-config\nrustup toolchain install stable --profile minimal -c clippy -c rustfmt\nrustup default stable\npnpm install --frozen-lockfile\npnpm build\ncargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features headless,mock-source --bin pulsescope",
+  "terminals": [
+    {
+      "name": "pulsescope-server",
+      "command": "PULSESCOPE_BIND=0.0.0.0 RUST_LOG=info ./src-tauri/target/debug/pulsescope --server",
+      "description": "PulseScope headless SDR server (mock IQ source) serving the v2 HTTP/WS API and bundled Svelte UI on http://localhost:8765. Health: GET /health and /health/ready; live spectrum: GET /spectrum; device: GET /device/status."
+    }
+  ],
+  "ports": [
+    { "name": "pulsescope", "port": 8765 }
+  ]
+}
