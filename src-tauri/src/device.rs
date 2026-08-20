@@ -1116,6 +1116,10 @@ impl DeviceLayer {
         #[cfg(feature = "soapysdr")]
         self.hardware.lock().take();
         *self.last_key.lock() = Some(format!("network:{}", source.id));
+        let current = self.state.lock();
+        let center_freq_hz = current.center_freq_hz;
+        let sample_rate_hz = current.sample_rate;
+        drop(current);
         let ingest = match source.kind.as_str() {
             "raw_udp" => crate::network_iq::NetworkIqIngest::PsiqUdp(
                 crate::network_iq::PsiqUdpIngest::start(&source.host, source.port as u16, 262_144)?,
@@ -1125,6 +1129,8 @@ impl DeviceLayer {
                     &source.host,
                     source.port as u16,
                     262_144,
+                    center_freq_hz,
+                    sample_rate_hz,
                 )?,
             ),
             other => anyhow::bail!(

@@ -541,11 +541,34 @@ fn hardware_tune_allowed(s: &ApiState) -> Result<(), (StatusCode, Json<Value>)> 
     }
 }
 
-fn pause_scanner_for_hardware_reconfigure(s: &ApiState) {
-    if let Some(handle) = s.0.scanner.write().take() {
-        handle.abort();
+fn pause_scanner_for_hardware_reconfigure(s: &ApiState) -> bool {
+    let running = s.0.scanner.read().is_some();
+    if running {
+        if let Some(handle) = s.0.scanner.write().take() {
+            handle.abort();
+        }
+        s.0.receiver_session.lock().release("scanner");
     }
-    s.0.receiver_session.lock().release("scanner");
+    running
+}
+
+fn restore_default_monitor_if_paused(s: &ApiState, paused: bool) {
+    if paused {
+        s.0.start_default_monitor();
+    }
+}
+
+fn release_scanner_session_for_connect(s: &ApiState) -> Result<(), (StatusCode, Json<Value>)> {
+    let session = s.0.receiver_session.lock();
+    match session.owner.as_deref() {
+        None | Some("scanner") => Ok(()),
+        Some(owner) => Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": format!("receiver is held by {owner}"), "session": session.clone()}),
+            ),
+        )),
+    }
 }
 
 fn hardware_reconfigure_allowed(
@@ -924,7 +947,13 @@ async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
             "label": source.label,
             "connection": format!("{}:{}", source.host, source.port),
             "active": active,
-            "lifecycle": if active { "streaming" } else if source.enabled { "registered" } else { "planned" },
+            "lifecycle": if active {
+                "streaming"
+            } else if source.enabled {
+                "registered"
+            } else {
+                "planned"
+            },
             "certification": if adapter_ready { "development" } else { "planned" },
             "network_source": true,
             "adapter_ready": adapter_ready,
@@ -964,10 +993,14 @@ async fn device_select_v2(
         )
             .into_response();
     }
-    pause_scanner_for_hardware_reconfigure(&s);
+    if let Err(response) = release_scanner_session_for_connect(&s) {
+        return response.into_response();
+    }
+    let paused_scanner = pause_scanner_for_hardware_reconfigure(&s);
 
     if let Some(source) = s.0.db.get_network_iq_source(&id).unwrap_or(None) {
         if !crate::network_iq::network_kind_supported(&source.kind) {
+            restore_default_monitor_if_paused(&s, paused_scanner);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
@@ -978,20 +1011,22 @@ async fn device_select_v2(
                 .into_response();
         }
         if let Err(error) = s.0.device.connect_network_source(&source) {
+            restore_default_monitor_if_paused(&s, paused_scanner);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": error.to_string()})),
             )
                 .into_response();
         }
-        let _ = s.0.db.set_active_network_source(&id);
         s.0.start_default_monitor();
         let status = s.0.device.status();
+        let revision = s.0.receiver_session.lock().revision;
         let result = json!({
             "ok": true,
             "device_id": id,
             "kind": "network",
             "status": status,
+            "revision": revision,
             "ingest_counters": s.0.device.network_ingest_counters(),
         });
         remember_command(&s, req.command_id, result.clone());
@@ -1004,13 +1039,13 @@ async fn device_select_v2(
         .find(|device| device.hardware_key == id || device.key == id);
     if let Some(device) = local {
         if let Err(error) = s.0.device.connect(&device.key) {
+            restore_default_monitor_if_paused(&s, paused_scanner);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": error.to_string()})),
             )
                 .into_response();
         }
-        let _ = s.0.db.clear_active_network_sources();
         let mut cfg = s.0.config.write();
         cfg.device.last_device_key = device.key.clone();
         cfg.device.last_device_label = device.label.clone();
@@ -1018,16 +1053,19 @@ async fn device_select_v2(
         drop(cfg);
         s.0.start_default_monitor();
         let status = s.0.device.status();
+        let revision = s.0.receiver_session.lock().revision;
         let result = json!({
             "ok": true,
             "device_id": id,
             "kind": "local",
             "status": status,
+            "revision": revision,
         });
         remember_command(&s, req.command_id, result.clone());
         return (StatusCode::OK, Json(result)).into_response();
     }
 
+    restore_default_monitor_if_paused(&s, paused_scanner);
     (
         StatusCode::NOT_FOUND,
         Json(json!({"error":"device not found","device_id":id})),
@@ -2044,8 +2082,12 @@ async fn device_connect(
     State(s): State<ApiState>,
     Json(req): Json<DevKeyReq>,
 ) -> impl IntoResponse {
-    pause_scanner_for_hardware_reconfigure(&s);
+    if let Err(response) = release_scanner_session_for_connect(&s) {
+        return response.into_response();
+    }
+    let paused_scanner = pause_scanner_for_hardware_reconfigure(&s);
     if let Err(e) = s.0.device.connect(&req.key) {
+        restore_default_monitor_if_paused(&s, paused_scanner);
         return Json(json!({"ok": false, "error": e.to_string()})).into_response();
     }
     let mut cfg = s.0.config.write();

@@ -431,11 +431,18 @@ export const Api = {
   devicesV2: () => getJson('/api/v2/devices'),
   selectDeviceV2: async (id: string) => {
     const receivers = await getJson<{ receivers?: Array<{ revision?: number }> }>('/api/v2/receivers');
-    const expectedRevision = receivers?.receivers?.[0]?.revision ?? 0;
-    return postJson(`/api/v2/devices/${encodeURIComponent(id)}/select`, {
-      command_id: crypto.randomUUID(),
-      expected_revision: expectedRevision,
-    });
+    let expectedRevision = receivers?.receivers?.[0]?.revision ?? 0;
+    const result = await postJson<{ revision?: number }>(
+      `/api/v2/devices/${encodeURIComponent(id)}/select`,
+      {
+        command_id: crypto.randomUUID(),
+        expected_revision: expectedRevision,
+      },
+    );
+    if (typeof result?.revision === 'number') {
+      expectedRevision = result.revision;
+    }
+    return result;
   },
   protocolSlices: () => getJson('/protocols/slices'),
 

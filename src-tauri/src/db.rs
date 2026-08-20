@@ -298,9 +298,17 @@ impl Db {
     }
 
     pub fn recent_signal_events(&self, limit: u32) -> anyhow::Result<Vec<SignalEvent>> {
+        self.signal_events_since(0, limit)
+    }
+
+    pub fn signal_events_since(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<SignalEvent>> {
         let c = self.conn();
-        let mut q = c.prepare("SELECT id,frequency_hz,signal_class,top_family,top_confidence,sub_protocol,symbol_rate,bandwidth_hz,snr_db,decode_success,decode_protocol,decode_summary,likely_proprietary,waterfall_psd,range_name,timestamp_ms,is_novel FROM signal_events ORDER BY timestamp_ms DESC LIMIT ?1")?;
-        let rows = q.query_map([limit.clamp(1, 1000)], |r| {
+        let mut q = c.prepare("SELECT id,frequency_hz,signal_class,top_family,top_confidence,sub_protocol,symbol_rate,bandwidth_hz,snr_db,decode_success,decode_protocol,decode_summary,likely_proprietary,waterfall_psd,range_name,timestamp_ms,is_novel FROM signal_events WHERE timestamp_ms >= ?1 ORDER BY timestamp_ms DESC LIMIT ?2")?;
+        let rows = q.query_map(rusqlite::params![since_ms, limit.clamp(1, 1000)], |r| {
             Ok(SignalEvent {
                 id: Some(r.get(0)?),
                 frequency_hz: r.get::<_, i64>(1)? as u64,
@@ -513,35 +521,10 @@ impl Db {
     }
 
     pub fn set_active_network_source(&self, id: &str) -> anyhow::Result<Option<NetworkIqSource>> {
-        let now = crate::scanner::now_ms();
-        let mut selected = None;
-        for mut source in self.list_network_iq_sources()? {
-            let enabled = source.id == id;
-            if enabled {
-                source.enabled = true;
-                source.updated_ms = now;
-                selected = Some(source.clone());
-            } else if source.enabled {
-                source.enabled = false;
-                source.updated_ms = now;
-            } else {
-                continue;
-            }
-            self.upsert_network_iq_source(&source)?;
-        }
-        Ok(selected)
+        self.get_network_iq_source(id)
     }
 
     pub fn clear_active_network_sources(&self) -> anyhow::Result<()> {
-        let now = crate::scanner::now_ms();
-        for mut source in self.list_network_iq_sources()? {
-            if !source.enabled {
-                continue;
-            }
-            source.enabled = false;
-            source.updated_ms = now;
-            self.upsert_network_iq_source(&source)?;
-        }
         Ok(())
     }
 
@@ -557,10 +540,7 @@ impl Db {
         limit: u32,
     ) -> anyhow::Result<Vec<ActivityTimelineEntry>> {
         let mut entries = Vec::new();
-        for message in self.recent_decoded_messages(limit)? {
-            if message.timestamp_ms < since_ms {
-                continue;
-            }
+        for message in self.decoded_messages_since(since_ms, limit)? {
             entries.push(ActivityTimelineEntry {
                 kind: "decoded_message".into(),
                 timestamp_ms: message.timestamp_ms,
@@ -572,10 +552,7 @@ impl Db {
                 correlation_count: 0,
             });
         }
-        for event in self.recent_signal_events(limit)? {
-            if event.timestamp_ms < since_ms {
-                continue;
-            }
+        for event in self.signal_events_since(since_ms, limit)? {
             entries.push(ActivityTimelineEntry {
                 kind: if event.is_novel {
                     "novel_signal".into()
@@ -687,12 +664,21 @@ impl Db {
     }
 
     pub fn recent_decoded_messages(&self, limit: u32) -> anyhow::Result<Vec<DecodedMessage>> {
+        self.decoded_messages_since(0, limit)
+    }
+
+    pub fn decoded_messages_since(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<DecodedMessage>> {
         let c = self.conn();
         let mut stmt = c.prepare(
             "SELECT id, frequency_hz, protocol, message_type, address, function_code, content, \
-             raw, encryption, timestamp_ms FROM decoded_messages ORDER BY id DESC LIMIT ?1",
+             raw, encryption, timestamp_ms FROM decoded_messages WHERE timestamp_ms >= ?1 \
+             ORDER BY timestamp_ms DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map([limit], |r| {
+        let rows = stmt.query_map(rusqlite::params![since_ms, limit], |r| {
             Ok(DecodedMessage {
                 id: Some(r.get::<_, i64>(0)?),
                 frequency_hz: r.get::<_, i64>(1)? as u64,

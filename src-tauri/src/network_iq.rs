@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use rustfft::num_complex::Complex;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -299,6 +299,15 @@ pub fn decode_rtl_tcp_iq(bytes: &[u8]) -> Vec<Complex<f32>> {
 
 const RTL_TCP_DONGLE_MAGIC: u32 = 0x1234_5678;
 
+fn send_rtl_tcp_u32(
+    stream: &mut std::net::TcpStream,
+    command: u8,
+    value: u32,
+) -> std::io::Result<()> {
+    stream.write_all(&[command])?;
+    stream.write_all(&value.to_le_bytes())
+}
+
 pub struct RtlTcpIngest {
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<IngestState>>,
@@ -314,15 +323,33 @@ pub struct RtlTcpIngest {
 }
 
 impl RtlTcpIngest {
-    pub fn connect(host: &str, port: u16, capacity: usize) -> anyhow::Result<Arc<Self>> {
+    pub fn connect(
+        host: &str,
+        port: u16,
+        capacity: usize,
+        center_freq_hz: u64,
+        sample_rate_hz: u32,
+    ) -> anyhow::Result<Arc<Self>> {
         let addr = format!("{}:{}", host.trim(), port);
-        let stream = std::net::TcpStream::connect(&addr)?;
+        let mut stream = std::net::TcpStream::connect(&addr)?;
+        let mut dongle = [0u8; 12];
+        stream.read_exact(&mut dongle)?;
+        let magic = u32::from_le_bytes([dongle[0], dongle[1], dongle[2], dongle[3]]);
+        if magic != RTL_TCP_DONGLE_MAGIC {
+            anyhow::bail!("unexpected RTL-TCP dongle magic {magic:#x}");
+        }
+        send_rtl_tcp_u32(&mut stream, 0x02, sample_rate_hz.max(1))?;
+        send_rtl_tcp_u32(
+            &mut stream,
+            0x01,
+            center_freq_hz.min(u32::MAX as u64) as u32,
+        )?;
         stream.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(IngestState {
             queue: VecDeque::with_capacity(capacity.min(262_144)),
-            sample_rate_hz: 2_048_000,
-            center_freq_hz: 100_000_000,
+            sample_rate_hz: sample_rate_hz.max(1),
+            center_freq_hz,
             counters: NetworkIngestCounters::default(),
         }));
         let last_packet_ms = Arc::new(AtomicI64::new(0));
@@ -330,8 +357,8 @@ impl RtlTcpIngest {
         let packets_dropped = Arc::new(AtomicU64::new(0));
         let parse_errors = Arc::new(AtomicU64::new(0));
         let reconnects = Arc::new(AtomicU64::new(0));
-        let sample_rate_hz = Arc::new(AtomicU64::new(2_048_000));
-        let center_freq_hz = Arc::new(AtomicU64::new(100_000_000));
+        let sample_rate_hz = Arc::new(AtomicU64::new(sample_rate_hz as u64));
+        let center_freq_hz = Arc::new(AtomicU64::new(center_freq_hz));
         let ingest = Arc::new(Self {
             stop: stop.clone(),
             state: state.clone(),
@@ -351,7 +378,6 @@ impl RtlTcpIngest {
             let mut stream = stream;
             let mut buffer = vec![0u8; 8192];
             let mut pending = Vec::<u8>::new();
-            let mut dongle_ready = false;
             let mut consecutive_errors = 0u32;
             let mut last_recovery = Instant::now() - Duration::from_secs(5);
             while !stop_thread.load(Ordering::Acquire) {
@@ -362,22 +388,6 @@ impl RtlTcpIngest {
                     Ok(len) => {
                         consecutive_errors = 0;
                         pending.extend_from_slice(&buffer[..len]);
-                        if !dongle_ready {
-                            if pending.len() >= 12 {
-                                let magic = u32::from_le_bytes([
-                                    pending[0], pending[1], pending[2], pending[3],
-                                ]);
-                                if magic != RTL_TCP_DONGLE_MAGIC {
-                                    parse_errors.fetch_add(1, Ordering::Relaxed);
-                                    pending.clear();
-                                    continue;
-                                }
-                                pending.drain(..12);
-                                dongle_ready = true;
-                            } else {
-                                continue;
-                            }
-                        }
                         let usable = pending.len() - (pending.len() % 2);
                         if usable >= 2 {
                             let samples = decode_rtl_tcp_iq(&pending[..usable]);
@@ -409,10 +419,22 @@ impl RtlTcpIngest {
                     reconnects.fetch_add(1, Ordering::Relaxed);
                     consecutive_errors = 0;
                     last_recovery = Instant::now();
-                    dongle_ready = false;
                     pending.clear();
                     match std::net::TcpStream::connect(&reconnect_target) {
-                        Ok(next) => {
+                        Ok(mut next) => {
+                            let mut dongle = [0u8; 12];
+                            if next.read_exact(&mut dongle).is_ok() {
+                                let _ = send_rtl_tcp_u32(
+                                    &mut next,
+                                    0x02,
+                                    sample_rate_hz.load(Ordering::Relaxed) as u32,
+                                );
+                                let _ = send_rtl_tcp_u32(
+                                    &mut next,
+                                    0x01,
+                                    center_freq_hz.load(Ordering::Relaxed) as u32,
+                                );
+                            }
                             let _ = next.set_nonblocking(true);
                             stream = next;
                         }
@@ -583,21 +605,28 @@ mod tests {
     fn rtl_tcp_mock_server_stream() {
         use std::io::Write;
         use std::net::TcpListener;
+        use std::sync::mpsc;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .write_all(&RTL_TCP_DONGLE_MAGIC.to_le_bytes())
                 .unwrap();
             stream.write_all(&0u32.to_le_bytes()).unwrap();
             stream.write_all(&28u32.to_le_bytes()).unwrap();
+            let mut tune = [0u8; 10];
+            stream.read_exact(&mut tune).unwrap();
             let iq: Vec<u8> = (0..8192)
                 .flat_map(|index| [128u8.wrapping_add(index as u8), 127])
                 .collect();
             stream.write_all(&iq).unwrap();
         });
-        let ingest = RtlTcpIngest::connect("127.0.0.1", port, 65_536).unwrap();
+        ready_rx.recv().unwrap();
+        let ingest =
+            RtlTcpIngest::connect("127.0.0.1", port, 65_536, 146_000_000, 2_048_000).unwrap();
         let samples = ingest.read(4096).expect("rtl_tcp read");
         assert_eq!(samples.len(), 4096);
         assert!(ingest.counters().packets_received >= 1);
