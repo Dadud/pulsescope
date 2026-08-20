@@ -25,8 +25,11 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/v2/features` | Machine-readable release maturity, visibility, evidence, and open gates |
-| GET | `/api/v2/devices` | Discovered devices and active lifecycle |
+| GET | `/api/v2/devices` | Discovered devices and active lifecycle. Registered network IQ sources include `adapter_ready` and ingest counters when selected. |
+| POST | `/api/v2/devices/:id/select` | Select a discovered USB device or a registered network IQ source (`raw_udp`, `rtl_tcp`, `spyserver`, `ka9q`) |
 | GET | `/api/v2/devices/:id/capabilities` | Runtime RF ranges, rates, bandwidth, MTU, antennas, gains, and settings |
+| GET/POST | `/api/v2/network-sources` | Persist RTL-TCP, SpyServer, PSIQ `raw_udp`, and KA9Q registry entries |
+| DELETE | `/api/v2/network-sources/:id` | Remove a network IQ registry entry |
 | GET | `/api/v2/receivers` | Receiver desired/actual state and revision |
 | POST | `/api/v2/receivers/:id/tune` | `{ command_id, expected_revision, frequency_hz }` |
 | GET | `/api/v2/receivers/:id/controls` | Generated control contract plus actual values |
@@ -45,6 +48,10 @@ The v2 API is mounted both at `/api/v2/...` and `/v2/...`; web clients should us
 | GET | `/api/v2/recordings` | Active recording and persisted files |
 | GET | `/api/v2/media/capabilities` | Truthful media transports and acceptance status |
 | POST | `/api/v2/media/sessions` | WebRTC negotiation (HTTP 501 with PCM fallback). Response includes the ICE-lite Opus SDP/RTP contract (PT 111, 20 ms, timestamp += 960, ice-ufrag/pwd, fingerprint placeholder) while ICE/DTLS and libopus remain unimplemented. |
+
+### Network IQ sources
+
+Implemented ingest kinds are `raw_udp` (PulseScope PSIQ), `rtl_tcp`, `spyserver`, and `ka9q`. `POST /api/v2/devices/:id/select` with a registry id occupies the shared hardware window. RTL-TCP and SpyServer forward live frequency and sample-rate commands; SpyServer rates must equal the reported `MaximumSampleRate / 2^n` and are rejected otherwise. PSIQ takes center and rate from packet metadata. KA9Q is receive-only RTP v2 or raw s16le IQ; a multicast host joins that group on `0.0.0.0:port`. KiwiSDR is not implemented.
 
 ### Binary spectrum stream v3
 

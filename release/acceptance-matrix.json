@@ -76,12 +76,15 @@
     {
       "id": "network-iq", "name": "KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ", "group": "hardware",
       "status": "development", "visibility": "expert", "required": false,
-      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests.",
+      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests for PSIQ, RTL-TCP, SpyServer, and KA9Q. KiwiSDR and physical soak remain open.",
       "evidence": [
         {"type": "test", "ref": "network_iq::tests::psiq_udp_loopback_preserves_timestamps_and_recovers"},
         {"type": "test", "ref": "network_iq::tests::parse_psiq_packet_round_trip"},
         {"type": "test", "ref": "network_iq::tests::rtl_tcp_mock_server_stream"},
-        {"type": "build", "ref": "PSIQ raw_udp and RTL-TCP ingest adapters with v2 device select"}
+        {"type": "test", "ref": "network_iq::tests::rtl_tcp_live_retune_sends_frequency_command"},
+        {"type": "test", "ref": "network_iq::tests::spyserver_mock_server_streams_and_retunes"},
+        {"type": "test", "ref": "network_iq::tests::ka9q_udp_loopback_counts_sequence_gaps"},
+        {"type": "build", "ref": "PSIQ, RTL-TCP, SpyServer, and KA9Q ingest adapters with live RTL-TCP/SpyServer retune; KiwiSDR is not implemented"}
       ]
     },
     {
@@ -365,10 +368,11 @@
     {
       "id": "network-iq-source-registry", "name": "Network IQ source registry", "group": "receiver",
       "status": "development", "visibility": "expert", "required": false,
-      "acceptance_gate": "Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2; raw_udp PSIQ sources are selectable through v2 device select.",
+      "acceptance_gate": "Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2 and are selectable through v2 device select. KiwiSDR remains unimplemented.",
       "evidence": [
         {"type": "test", "ref": "db::tests::network_source_migration_persists_registry_entries"},
-        {"type": "build", "ref": "Settings network registry UI, Connect action, and /v2/devices/:id/select API"}
+        {"type": "test", "ref": "network_iq::tests::network_kind_supported_covers_implemented_adapters_only"},
+        {"type": "build", "ref": "Settings network registry UI Connect action for PSIQ, RTL-TCP, SpyServer, and KA9Q"}
       ]
     },
     {

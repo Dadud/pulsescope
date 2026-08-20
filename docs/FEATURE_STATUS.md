@@ -16,7 +16,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Profiles, bookmarks and bandplans | Beta | normal | yes | Persistence, backup, profile application, capability rejection, and multi-client consistency pass API and browser tests. |
 | Independent LAN listener sessions | Beta | expert | yes | At least three browsers maintain independent viewport and VFO state while shared hardware retunes remain revision-safe. |
 | Listening mode presets | Beta | normal | no | Capability-aware one-tap presets tune the shared hardware window and suggest decoder packs without silent substitution. |
-| Network IQ source registry | Beta | expert | no | Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2; raw_udp PSIQ sources are selectable through v2 device select. |
+| Network IQ source registry | Beta | expert | no | Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2 and are selectable through v2 device select. KiwiSDR remains unimplemented. |
 
 ## Hardware
 
@@ -29,7 +29,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | PlutoSDR and libiio | Planned | expert | no | libiio adapter tests and a physical PlutoSDR eight-hour run. |
 | USRP and UHD | Planned | expert | no | UHD adapter tests and a physical USRP eight-hour run. |
 | bladeRF, Lime, RX888, Fobos, FUNcube and Hydra | Planned | expert | no | Per-family capability audit, integration fixture, and physical-device certification before promotion. |
-| KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ | Beta | expert | no | Versioned network-source adapter with loss, reconnect, and timestamp tests. |
+| KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ | Beta | expert | no | Versioned network-source adapter with loss, reconnect, and timestamp tests for PSIQ, RTL-TCP, SpyServer, and KA9Q. KiwiSDR and physical soak remain open. |
 
 ## Media
 

@@ -104,12 +104,16 @@
       networkError = String(e);
     }
   }
+  function networkKindReady(kind: string) {
+    return kind === 'raw_udp' || kind === 'rtl_tcp' || kind === 'spyserver' || kind === 'ka9q';
+  }
   async function connectNetworkSource(id: string) {
     networkError = '';
     networkNotice = 'Connecting network IQ source…';
     try {
+      const source = networkSources.find((item) => item.id === id);
       await Api.selectDeviceV2(id);
-      networkNotice = 'Network IQ source selected. PSIQ raw_udp ingest is active when packets arrive.';
+      networkNotice = `Network IQ source selected. ${source?.kind ?? 'network'} ingest is active when samples arrive.`;
       await loadNetworkSources();
       status = await Api.deviceStatus();
     } catch (e) {
@@ -316,7 +320,7 @@
   {#if expertMode}<section class="card">
     <h2>Network IQ sources</h2>
     <p class="section-lead">
-      Register RTL-TCP, SpyServer, raw UDP, or KA9Q endpoints for the multi-device registry. Ingest adapters remain behind the network-iq missing gate.
+      Register RTL-TCP, SpyServer, raw UDP (PSIQ), or KA9Q endpoints. Connect selects the source as the shared hardware window. KiwiSDR remains unimplemented; dual simultaneous receivers remain a separate allocator gate.
     </p>
     {#if networkNotice}<p class="control-notice" role="status">{networkNotice}</p>{/if}
     {#if networkError}<div class="device-error" role="alert">{networkError}</div>{/if}
@@ -330,7 +334,7 @@
       </select></label>
       <label>Host<input bind:value={networkHost} placeholder="192.168.1.50" /></label>
       <label>Port<input type="number" min="1" bind:value={networkPort} /></label>
-      <label class="row"><span>Enabled when adapter ships</span><input type="checkbox" bind:checked={networkEnabled} /></label>
+      <label class="row"><span>Enabled</span><input type="checkbox" bind:checked={networkEnabled} /></label>
       <button class="primary" onclick={saveNetworkSource} disabled={!networkLabel.trim() || !networkHost.trim()}>Add source</button>
     </div>
     <div class="network-list">
@@ -338,9 +342,9 @@
         <article>
           <div>
             <b>{source.label}</b>
-            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}{source.kind === 'raw_udp' || source.kind === 'rtl_tcp' ? ' · ingest ready' : ' · adapter planned'}</small>
+            <small>{source.kind} · {source.host}:{source.port}{source.enabled ? ' · enabled' : ' · disabled'}{networkKindReady(source.kind) ? ' · ingest ready' : ' · adapter planned'}</small>
           </div>
-          {#if source.kind === 'raw_udp' || source.kind === 'rtl_tcp'}
+          {#if networkKindReady(source.kind)}
             <button class="primary" onclick={() => connectNetworkSource(source.id)}>Connect</button>
           {/if}
           <button aria-label={`Delete ${source.label}`} onclick={() => deleteNetworkSource(source.id)}>Delete</button>

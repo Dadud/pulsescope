@@ -30,6 +30,8 @@ pages) and PulseScope invokes whichever it finds on `$PATH` or via configured
 paths in **Settings**. Per GPL §3(a), corresponding source for each is
 available at the upstream URL.
 
+PulseScope implements its own client adapters for rtl_tcp, Airspy SpyServer 2.x / SDR++ framing, PulseScope PSIQ `raw_udp`, and KA9Q radiod RTP/s16le UDP. Those adapters do not link or redistribute SpyServer, ka9q-radio, or librtlsdr. KiwiSDR is not implemented.
+
 ## SDR device abstraction
 
 | Component | Purpose                       | Upstream                            | License            |
