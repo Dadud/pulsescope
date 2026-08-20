@@ -197,6 +197,10 @@ pub struct ActivityTimelineEntry {
     pub protocol: String,
     pub summary: String,
     pub detail: String,
+    #[serde(default)]
+    pub correlation_group: String,
+    #[serde(default)]
+    pub correlation_count: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -501,6 +505,52 @@ impl Db {
             .execute("DELETE FROM network_iq_sources WHERE id=?1", [id])?)
     }
 
+    pub fn get_network_iq_source(&self, id: &str) -> anyhow::Result<Option<NetworkIqSource>> {
+        Ok(self
+            .list_network_iq_sources()?
+            .into_iter()
+            .find(|source| source.id == id))
+    }
+
+    pub fn set_active_network_source(&self, id: &str) -> anyhow::Result<Option<NetworkIqSource>> {
+        let now = crate::scanner::now_ms();
+        let mut selected = None;
+        for mut source in self.list_network_iq_sources()? {
+            let enabled = source.id == id;
+            if enabled {
+                source.enabled = true;
+                source.updated_ms = now;
+                selected = Some(source.clone());
+            } else if source.enabled {
+                source.enabled = false;
+                source.updated_ms = now;
+            } else {
+                continue;
+            }
+            self.upsert_network_iq_source(&source)?;
+        }
+        Ok(selected)
+    }
+
+    pub fn clear_active_network_sources(&self) -> anyhow::Result<()> {
+        let now = crate::scanner::now_ms();
+        for mut source in self.list_network_iq_sources()? {
+            if !source.enabled {
+                continue;
+            }
+            source.enabled = false;
+            source.updated_ms = now;
+            self.upsert_network_iq_source(&source)?;
+        }
+        Ok(())
+    }
+
+    fn correlation_group_key(frequency_hz: u64, timestamp_ms: i64) -> String {
+        let freq_bucket = (frequency_hz / 25_000) * 25_000;
+        let time_bucket = timestamp_ms / (15 * 60 * 1000);
+        format!("{freq_bucket}:{time_bucket}")
+    }
+
     pub fn activity_timeline(&self, since_ms: i64, limit: u32) -> anyhow::Result<Vec<ActivityTimelineEntry>> {
         let mut entries = Vec::new();
         for message in self.recent_decoded_messages(limit)? {
@@ -514,6 +564,8 @@ impl Db {
                 protocol: message.protocol.clone(),
                 summary: message.content.clone(),
                 detail: message.address.clone(),
+                correlation_group: String::new(),
+                correlation_count: 0,
             });
         }
         for event in self.recent_signal_events(limit)? {
@@ -531,10 +583,26 @@ impl Db {
                 protocol: event.decode_protocol.clone(),
                 summary: event.decode_summary.clone(),
                 detail: event.signal_class.clone(),
+                correlation_group: String::new(),
+                correlation_count: 0,
             });
         }
-        entries.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
         entries.truncate(limit as usize);
+        let mut group_counts = std::collections::HashMap::new();
+        for entry in &entries {
+            *group_counts
+                .entry(Self::correlation_group_key(
+                    entry.frequency_hz,
+                    entry.timestamp_ms,
+                ))
+                .or_insert(0u32) += 1;
+        }
+        for entry in &mut entries {
+            let key = Self::correlation_group_key(entry.frequency_hz, entry.timestamp_ms);
+            entry.correlation_group = key.clone();
+            entry.correlation_count = *group_counts.get(&key).unwrap_or(&1);
+        }
         Ok(entries)
     }
 
@@ -993,6 +1061,59 @@ mod tests {
         let reopened = Db::open(&path).unwrap();
         assert_eq!(reopened.list_talkgroup_watchlist().unwrap().len(), 1);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn activity_timeline_assigns_correlation_groups() {
+        let path = std::env::temp_dir().join(format!(
+            "pulsescope-activity-timeline-db-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let bucket = 1_700_000_000_000_i64;
+        db.insert_classified_signal_event(
+            146_000_000,
+            12.0,
+            12_500,
+            "2m",
+            bucket,
+            "voice",
+            "amateur",
+            0.8,
+            "fm",
+            false,
+            "aprs",
+            "first",
+            false,
+            false,
+        )
+        .unwrap();
+        db.insert_classified_signal_event(
+            146_010_000,
+            10.0,
+            12_500,
+            "2m",
+            bucket + 1_000,
+            "data",
+            "amateur",
+            0.7,
+            "aprs",
+            false,
+            "aprs",
+            "second",
+            false,
+            false,
+        )
+        .unwrap();
+        let entries = db.activity_timeline(bucket - 1_000, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].correlation_group, entries[1].correlation_group);
+        assert_eq!(entries[0].correlation_count, 2);
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 

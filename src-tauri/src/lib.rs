@@ -24,6 +24,7 @@ pub mod device;
 pub mod hd_radio;
 pub mod lora;
 pub mod listening_modes;
+pub mod network_iq;
 pub mod operations;
 pub mod paths;
 pub mod pocsag;

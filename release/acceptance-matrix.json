@@ -23,8 +23,12 @@
     },
     {
       "id": "multi-device-registry", "name": "Multi-device registry and allocator", "group": "receiver",
-      "status": "planned", "visibility": "expert", "required": true,
-      "acceptance_gate": "Discover, select, allocate, and independently recover two simultaneous receivers.", "evidence": []
+      "status": "development", "visibility": "expert", "required": true,
+      "acceptance_gate": "Discover, select, allocate, and independently recover two simultaneous receivers.",
+      "evidence": [
+        {"type": "build", "ref": "v2 device select API connects registered PSIQ raw_udp sources and local devices"},
+        {"type": "test", "ref": "network_iq::tests::psiq_udp_loopback_preserves_timestamps_and_recovers"}
+      ]
     },
     {
       "id": "radio-device-contract", "name": "Versioned RadioDevice contract", "group": "receiver",
@@ -71,8 +75,13 @@
     },
     {
       "id": "network-iq", "name": "KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ", "group": "hardware",
-      "status": "planned", "visibility": "expert", "required": false,
-      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests.", "evidence": []
+      "status": "development", "visibility": "expert", "required": false,
+      "acceptance_gate": "Versioned network-source adapter with loss, reconnect, and timestamp tests.",
+      "evidence": [
+        {"type": "test", "ref": "network_iq::tests::psiq_udp_loopback_preserves_timestamps_and_recovers"},
+        {"type": "test", "ref": "network_iq::tests::parse_psiq_packet_round_trip"},
+        {"type": "build", "ref": "PSIQ raw_udp ingest adapter and v2 device select"}
+      ]
     },
     {
       "id": "spectrum-stream", "name": "Bounded binary spectrum stream", "group": "media",
@@ -340,8 +349,11 @@
     {
       "id": "activity-timeline", "name": "Cross-protocol activity timeline", "group": "client",
       "status": "development", "visibility": "normal", "required": false,
-      "acceptance_gate": "Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering.",
-      "evidence": [{"type": "build", "ref": "Activity route and /activity/timeline API"}]
+      "acceptance_gate": "Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering and frequency/time correlation groups.",
+      "evidence": [
+        {"type": "test", "ref": "db::tests::activity_timeline_assigns_correlation_groups"},
+        {"type": "build", "ref": "Activity route and /activity/timeline API"}
+      ]
     },
     {
       "id": "listening-mode-presets", "name": "Listening mode presets", "group": "receiver",
@@ -352,10 +364,10 @@
     {
       "id": "network-iq-source-registry", "name": "Network IQ source registry", "group": "receiver",
       "status": "development", "visibility": "expert", "required": false,
-      "acceptance_gate": "Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2 as planned sources until ingest adapters ship.",
+      "acceptance_gate": "Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2; raw_udp PSIQ sources are selectable through v2 device select.",
       "evidence": [
         {"type": "test", "ref": "db::tests::network_source_migration_persists_registry_entries"},
-        {"type": "build", "ref": "Settings network registry UI and /v2/network-sources API"}
+        {"type": "build", "ref": "Settings network registry UI, Connect action, and /v2/devices/:id/select API"}
       ]
     }
   ]

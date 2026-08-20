@@ -915,6 +915,8 @@ pub struct DeviceLayer {
     phase: Arc<Mutex<f32>>,
     counters: Arc<StreamCounters>,
     last_key: Arc<Mutex<Option<String>>>,
+    network_ingest: Arc<Mutex<Option<Arc<crate::network_iq::PsiqUdpIngest>>>>,
+    active_network_id: Arc<Mutex<Option<String>>>,
     #[cfg(feature = "soapysdr")]
     hardware: Arc<Mutex<Option<soapy::Hardware>>>,
 }
@@ -941,6 +943,8 @@ impl DeviceLayer {
             phase: Arc::new(Mutex::new(0.0)),
             counters: Arc::new(StreamCounters::default()),
             last_key: Arc::new(Mutex::new(None)),
+            network_ingest: Arc::new(Mutex::new(None)),
+            active_network_id: Arc::new(Mutex::new(None)),
             #[cfg(feature = "soapysdr")]
             hardware: Arc::new(Mutex::new(None)),
         }
@@ -1008,6 +1012,7 @@ impl DeviceLayer {
     }
 
     pub fn connect(&self, key: &str) -> anyhow::Result<()> {
+        self.stop_network_ingest();
         self.state.lock().lifecycle = DeviceLifecycle::Probing;
         *self.last_key.lock() = Some(key.to_owned());
         if key != "driver=mock" {
@@ -1059,6 +1064,7 @@ impl DeviceLayer {
     }
 
     pub fn disconnect(&self) -> anyhow::Result<()> {
+        self.stop_network_ingest();
         #[cfg(feature = "soapysdr")]
         self.hardware.lock().take();
         let mut status = self.state.lock();
@@ -1081,6 +1087,59 @@ impl DeviceLayer {
         #[cfg(feature = "soapysdr")]
         self.hardware.lock().take();
         self.connect(&key)
+    }
+
+    fn stop_network_ingest(&self) {
+        *self.network_ingest.lock() = None;
+        *self.active_network_id.lock() = None;
+    }
+
+    pub fn active_network_source_id(&self) -> Option<String> {
+        self.active_network_id.lock().clone()
+    }
+
+    pub fn network_ingest_counters(&self) -> Option<crate::network_iq::NetworkIngestCounters> {
+        self.network_ingest
+            .lock()
+            .as_ref()
+            .map(|ingest| ingest.counters())
+    }
+
+    pub fn connect_network_source(
+        &self,
+        source: &crate::db::NetworkIqSource,
+    ) -> anyhow::Result<()> {
+        if source.port <= 0 || source.port > u16::MAX as i64 {
+            anyhow::bail!("network source port must be between 1 and 65535");
+        }
+        self.stop_network_ingest();
+        #[cfg(feature = "soapysdr")]
+        self.hardware.lock().take();
+        *self.last_key.lock() = Some(format!("network:{}", source.id));
+        let ingest = match source.kind.as_str() {
+            "raw_udp" => crate::network_iq::PsiqUdpIngest::start(
+                &source.host,
+                source.port as u16,
+                262_144,
+            )?,
+            other => anyhow::bail!(
+                "network kind {other} is registered but ingest adapter is not available yet"
+            ),
+        };
+        let sample_rate = ingest.sample_rate_hz();
+        let center = ingest.center_freq_hz();
+        *self.network_ingest.lock() = Some(ingest);
+        *self.active_network_id.lock() = Some(source.id.clone());
+        let mut status = self.state.lock();
+        status.connected = true;
+        status.lifecycle = DeviceLifecycle::Streaming;
+        status.driver = source.kind.clone();
+        status.label = source.label.clone();
+        status.sample_rate = sample_rate.max(1);
+        status.bandwidth_hz = sample_rate.max(1);
+        status.center_freq_hz = center;
+        status.gain = "network".into();
+        Ok(())
     }
 
     pub fn set_frequency(&self, freq: u64) -> anyhow::Result<()> {
@@ -1307,6 +1366,18 @@ impl DeviceLayer {
     }
 
     pub fn read_iq(&self, count: usize) -> anyhow::Result<Vec<Complex<f32>>> {
+        if let Some(ingest) = self.network_ingest.lock().clone() {
+            let result = ingest.read(count);
+            let sample_rate = ingest.sample_rate_hz();
+            let center = ingest.center_freq_hz();
+            {
+                let mut status = self.state.lock();
+                status.sample_rate = sample_rate.max(1);
+                status.bandwidth_hz = sample_rate.max(1);
+                status.center_freq_hz = center;
+            }
+            return self.observe_read(count, result);
+        }
         #[cfg(feature = "soapysdr")]
         {
             let mut hardware = self.hardware.lock();

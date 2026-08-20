@@ -11,12 +11,12 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Feature | Status | Surface | Required | Open gate / acceptance criterion |
 |---|---|---|:---:|---|
 | Receiver session recovery | Fixture verified | normal | yes | Retune recovers in 700 ms and USB recovery in 20 s without restarting the service. |
-| Multi-device registry and allocator | Planned | expert | yes | Discover, select, allocate, and independently recover two simultaneous receivers. |
+| Multi-device registry and allocator | Beta | expert | yes | Discover, select, allocate, and independently recover two simultaneous receivers. |
 | Versioned RadioDevice contract | Beta | expert | yes | Every control and capability is reported at runtime and unsupported controls are rejected. |
 | Profiles, bookmarks and bandplans | Beta | normal | yes | Persistence, backup, profile application, capability rejection, and multi-client consistency pass API and browser tests. |
 | Independent LAN listener sessions | Beta | expert | yes | At least three browsers maintain independent viewport and VFO state while shared hardware retunes remain revision-safe. |
 | Listening mode presets | Beta | normal | no | Capability-aware one-tap presets tune the shared hardware window and suggest decoder packs without silent substitution. |
-| Network IQ source registry | Beta | expert | no | Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2 as planned sources until ingest adapters ship. |
+| Network IQ source registry | Beta | expert | no | Persisted RTL-TCP, SpyServer, raw UDP, and KA9Q registry entries surface in devices v2; raw_udp PSIQ sources are selectable through v2 device select. |
 
 ## Hardware
 
@@ -29,7 +29,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | PlutoSDR and libiio | Planned | expert | no | libiio adapter tests and a physical PlutoSDR eight-hour run. |
 | USRP and UHD | Planned | expert | no | UHD adapter tests and a physical USRP eight-hour run. |
 | bladeRF, Lime, RX888, Fobos, FUNcube and Hydra | Planned | expert | no | Per-family capability audit, integration fixture, and physical-device certification before promotion. |
-| KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ | Planned | expert | no | Versioned network-source adapter with loss, reconnect, and timestamp tests. |
+| KA9Q, RTL-TCP, SpyServer, KiwiSDR and external IQ | Beta | expert | no | Versioned network-source adapter with loss, reconnect, and timestamp tests. |
 
 ## Media
 
@@ -62,7 +62,7 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | Capacitor iOS and Android clients | Planned | hidden | no | Background audio, lock-screen controls, notifications, credentials, discovery, and deep links pass device tests. |
 | Spectrum occupancy heatmap | Beta | normal | no | Rolling frequency/time heatmap renders from persisted 15-minute occupancy buckets with selectable 6–48 h windows. |
 | Decoder event browser alerts | Beta | normal | no | User-gesture permission, protocol filters, and normalized DecodedMessage notifications while the PWA remains open or backgrounded via the service worker. |
-| Cross-protocol activity timeline | Beta | normal | no | Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering. |
+| Cross-protocol activity timeline | Beta | normal | no | Merged decoded messages and signal events render in a selectable 6–48 h window with protocol filtering and frequency/time correlation groups. |
 
 ## Decoder
 

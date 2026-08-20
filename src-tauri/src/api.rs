@@ -72,6 +72,7 @@ pub async fn serve(cfg: ServeConfig, state: Arc<AppState>) -> anyhow::Result<()>
         .route("/v2/system/health", get(system_health_v2))
         .route("/v2/features", get(feature_status_v2))
         .route("/v2/devices", get(devices_v2))
+        .route("/v2/devices/:id/select", post(device_select_v2))
         .route("/v2/devices/:id/capabilities", get(device_capabilities_v2))
         .route("/v2/receivers", get(receivers_v2))
         .route("/v2/receivers/:id/tune", post(receiver_tune_v2))
@@ -896,19 +897,127 @@ async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
         }));
     }
     for source in s.0.db.list_network_iq_sources().unwrap_or_default() {
+        let active = s
+            .0
+            .device
+            .active_network_source_id()
+            .is_some_and(|active_id| active_id == source.id);
+        let adapter_ready = source.kind == "raw_udp";
         discovered.push(json!({
             "id": source.id,
             "driver": source.kind,
             "label": source.label,
             "connection": format!("{}:{}", source.host, source.port),
-            "active": source.enabled,
-            "lifecycle": if source.enabled { "registered" } else { "planned" },
-            "certification": "planned",
+            "active": active,
+            "lifecycle": if active { "streaming" } else if source.enabled { "registered" } else { "planned" },
+            "certification": if adapter_ready { "development" } else { "planned" },
             "network_source": true,
-            "missing_gate": "network-source adapter with loss, reconnect, and timestamp tests"
+            "adapter_ready": adapter_ready,
+            "missing_gate": if adapter_ready {
+                serde_json::Value::Null
+            } else {
+                json!("network-source adapter with loss, reconnect, and timestamp tests")
+            },
+            "ingest_counters": if active {
+                json!(s.0.device.network_ingest_counters())
+            } else {
+                serde_json::Value::Null
+            }
         }));
     }
     Json(json!({"contract_version": 2, "active_device_id": active_id, "devices": discovered}))
+}
+
+#[derive(Deserialize)]
+struct DeviceSelectV2Req {
+    command_id: String,
+    expected_revision: u64,
+}
+
+async fn device_select_v2(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<DeviceSelectV2Req>,
+) -> impl IntoResponse {
+    if let Some(cached) = cached_command(&s, &req.command_id) {
+        return (StatusCode::OK, Json(cached)).into_response();
+    }
+    if req.expected_revision != s.0.receiver_session.lock().revision {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"stale revision","expected_revision":req.expected_revision})),
+        )
+            .into_response();
+    }
+    if let Err(response) = hardware_reconfigure_allowed(&s, "device-select") {
+        return response.into_response();
+    }
+
+    if let Some(source) = s.0.db.get_network_iq_source(&id).unwrap_or(None) {
+        if source.kind != "raw_udp" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("network kind {} is registered but ingest adapter is not available yet", source.kind),
+                    "missing_gate": "network-source adapter with loss, reconnect, and timestamp tests"
+                })),
+            )
+                .into_response();
+        }
+        if let Err(error) = s.0.device.connect_network_source(&source) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+        let _ = s.0.db.set_active_network_source(&id);
+        s.0.start_default_monitor();
+        let status = s.0.device.status();
+        let result = json!({
+            "ok": true,
+            "device_id": id,
+            "kind": "network",
+            "status": status,
+            "ingest_counters": s.0.device.network_ingest_counters(),
+        });
+        remember_command(&s, req.command_id, result.clone());
+        return (StatusCode::OK, Json(result)).into_response();
+    }
+
+    let discovered = crate::device::DeviceLayer::discover();
+    let local = discovered.iter().find(|device| device.hardware_key == id || device.key == id);
+    if let Some(device) = local {
+        if let Err(error) = s.0.device.connect(&device.key) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+        let _ = s.0.db.clear_active_network_sources();
+        let mut cfg = s.0.config.write();
+        cfg.device.last_device_key = device.key.clone();
+        cfg.device.last_device_label = device.label.clone();
+        let _ = cfg.save(&s.0.data_dir);
+        drop(cfg);
+        s.0.start_default_monitor();
+        let status = s.0.device.status();
+        let result = json!({
+            "ok": true,
+            "device_id": id,
+            "kind": "local",
+            "status": status,
+        });
+        remember_command(&s, req.command_id, result.clone());
+        return (StatusCode::OK, Json(result)).into_response();
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error":"device not found","device_id":id})),
+    )
+        .into_response()
 }
 
 async fn device_capabilities_v2(
@@ -1932,7 +2041,9 @@ async fn device_disconnect(State(s): State<ApiState>) -> impl IntoResponse {
 async fn device_status(State(s): State<ApiState>) -> impl IntoResponse {
     let status = s.0.device.status();
     let usable_span_hz = status.bandwidth_hz.min(status.sample_rate);
-    let input_source = if status.driver == "mock" {
+    let input_source = if s.0.device.active_network_source_id().is_some() {
+        "network"
+    } else if status.driver == "mock" {
         "mock"
     } else {
         "hardware"
