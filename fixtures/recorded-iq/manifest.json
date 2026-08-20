@@ -286,6 +286,36 @@
         "info_contains": "56789"
       },
       "sha256": "2c7100dba851c94fa011b41a3cbbc40fd62f324630430edda2bf0c7dd9dd9051"
+    },
+    {
+      "id": "radiosonde-rs41-pulse",
+      "protocol": "radiosonde",
+      "file": "radiosonde-rs41-pulse.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "radiosonde",
+        "icao": null,
+        "mmsi": null,
+        "source": "PULSE001",
+        "info_contains": "checksum_valid=true"
+      },
+      "sha256": "5c60b2afa59cbb7d379986a61374ae9913219097120cea20303845329698cc7c"
+    },
+    {
+      "id": "goes-lrit-info",
+      "protocol": "goes",
+      "file": "goes-lrit-info.iq.json",
+      "kind": "iq",
+      "expected": {
+        "message_count_min": 1,
+        "protocol": "goes",
+        "icao": null,
+        "mmsi": null,
+        "source": "GOES-19",
+        "info_contains": "LRIT-INFO"
+      },
+      "sha256": "6e11ccacc1e6715f61f2211ba51e5903b9c20a8bf67be1ed66a67f7a0a0d6745"
     }
   ]
 }

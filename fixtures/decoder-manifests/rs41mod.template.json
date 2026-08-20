@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "rs41mod",
+  "name": "rs41mod RS41 radiosonde",
+  "version": "1.0.0",
+  "executable": "rs41mod",
+  "executable_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "arguments": [],
+  "input": {
+    "kind": "mono_pcm",
+    "sample_rate_hz": 48000,
+    "bandwidth_hz": 20000,
+    "sample_format": "s16le",
+    "owns_tuner": false
+  },
+  "resources": {
+    "memory_mb": 128,
+    "cpu_percent": 40,
+    "maximum_instances": 1,
+    "restart_limit": 3
+  },
+  "health_command": ["--help"],
+  "output_schema": "radiosonde.telemetry.v1",
+  "parameters": [],
+  "signer": "REPLACE_WITH_ADMIN_SIGNER",
+  "signature_ed25519_base64": ""
+}

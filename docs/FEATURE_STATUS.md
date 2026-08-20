@@ -79,6 +79,8 @@ Beta items are intentionally visible in the normal UI when useful, but the UI mu
 | rtl_433, ACARS, VDL2, paging and UAT | Beta | normal | no | Per-protocol recorded-IQ fixtures and normalized events. |
 | FT8, WSPR, JS8, CW, RTTY, NAVTEX, SSTV and WEFAX | Beta | normal | no | Per-protocol recorded-IQ/audio fixtures and normalized events. |
 | Trunk talkgroup watchlist follower | Beta | normal | no | Persisted watchlist filters P25 TSBK grants when watchlist-only mode is enabled; encrypted calls remain labeled only. |
+| GOES LRIT/HRIT product identification | Fixture verified | normal | no | Recorded BPSK CADU IQ recovers goes.product.v1 with CRC-32; gallery lists only valid decoded products, never configured output paths. SatDump image reconstruction remains sidecar-only. |
+| Radiosonde GFSK telemetry | Fixture verified | normal | no | Recorded 4800 baud GFSK IQ recovers checksum-valid radiosonde.telemetry.v1; map/table show valid frames only. Live Vaisala RS41 FEC remains the rs41mod sidecar. |
 
 ## Packaging
 

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "satdump",
+  "name": "SatDump GOES HRIT/LRIT",
+  "version": "1.2.2",
+  "executable": "satdump",
+  "executable_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "arguments": ["pipeline", "goes_hrit", "-", "2400000", "goes-out", "--baseband_format", "cf32"],
+  "input": {
+    "kind": "iq",
+    "sample_rate_hz": 2400000,
+    "bandwidth_hz": 1500000,
+    "sample_format": "cf32",
+    "owns_tuner": false
+  },
+  "resources": {
+    "memory_mb": 1024,
+    "cpu_percent": 80,
+    "maximum_instances": 1,
+    "restart_limit": 3
+  },
+  "health_command": ["--version"],
+  "output_schema": "goes.product.v1",
+  "parameters": [
+    { "id": "pipeline", "kind": "string", "required": true, "default": "goes_hrit" },
+    { "id": "output_dir", "kind": "path", "required": true, "default": "goes-out" }
+  ],
+  "signer": "REPLACE_WITH_ADMIN_SIGNER",
+  "signature_ed25519_base64": ""
+}

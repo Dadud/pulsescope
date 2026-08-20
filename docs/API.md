@@ -199,8 +199,18 @@ mode; a VFO still inside the window is untouched.
 | GET    | `/gps/status`              |
 | POST   | `/glonass/enable`          |
 | GET    | `/glonass/status`          |
-| POST   | `/goes_lrit/enable`        |
-| GET    | `/goes_lrit/status`        |
+| POST   | `/goes_lrit/enable`        | persist enable flag; native CADU identification is fixture-verified |
+| GET    | `/goes_lrit/status`        | native CADU availability; `image_pipeline` stays false until SatDump hardware |
+| GET    | `/goes_lrit/products`      | checksum-valid `goes.product.v1` events only; never lists `output_image_dir` |
+| POST   | `/goes_lrit/clear`         | delete persisted GOES products |
+| GET    | `/goes_lrit/check`         | POST also accepted |
+| GET    | `/radiosonde/status`       | native GFSK availability plus optional rs41mod path |
+| POST   | `/radiosonde/enable`       | persist enable flag and spawn rs41mod stdin audio sidecar when installed |
+| GET    | `/radiosonde/telemetry`    | checksum-valid radiosonde frames |
+| POST   | `/radiosonde/clear`        | delete persisted radiosonde telemetry |
+| GET    | `/scan/goes`               | snapshot BPSK CADU decode on the live IQ ring |
+| GET    | `/scan/radiosonde`         | snapshot GFSK radiosonde decode on the live IQ ring |
+| GET    | `/protocols/slices`        | `{slices:[...]}` with `available` only after recorded-IQ e2e |
 | GET    | `/hd_radio/check`          | POST also accepted; reports nrsc5 path. `available: false` until OFDM IQ e2e |
 | GET    | `/hd_radio/messages`       | persisted `hd_radio` events |
 | GET    | `/hd_radio/status`         | enabled/config plus install state |
