@@ -21,6 +21,8 @@ HTTP/WS/WebRTC <-> Svelte Receiver and Monitor workspaces
 
 `RadioDevice` publishes stable identity, RF ranges, antennas, formats, rates, bandwidths, stream MTU, named gains, settings, and counters. `HardwareWindow` is the single actual capture state for a tuner. Capture reads MTU-sized blocks into bounded independent consumers; a decoder or browser cannot stall capture, FFT, or audio.
 
+Network IQ ingest occupies that same window. `raw_udp` consumes PulseScope PSIQ packets; `rtl_tcp` and `spyserver` are TCP clients that forward live frequency and sample-rate commands; `ka9q` receives RTP v2 or raw s16le IQ over UDP and joins IPv4/IPv6 multicast groups when the registered host is a multicast address. PSIQ center/rate come from packet metadata. KA9Q is receive-only, so operator retune updates display state only. Queues are bounded and drop oldest samples. KiwiSDR is not implemented.
+
 Frequency, profile, rate, and bandwidth changes are atomic. Desired state is never reported as actual until driver readback succeeds. Hotplug moves through detected, probing, configuring, streaming, degraded, recovering, and ready.
 
 ## Receiver and media

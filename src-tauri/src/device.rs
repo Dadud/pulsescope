@@ -1120,23 +1120,14 @@ impl DeviceLayer {
         let center_freq_hz = current.center_freq_hz;
         let sample_rate_hz = current.sample_rate;
         drop(current);
-        let ingest = match source.kind.as_str() {
-            "raw_udp" => crate::network_iq::NetworkIqIngest::PsiqUdp(
-                crate::network_iq::PsiqUdpIngest::start(&source.host, source.port as u16, 262_144)?,
-            ),
-            "rtl_tcp" => crate::network_iq::NetworkIqIngest::RtlTcp(
-                crate::network_iq::RtlTcpIngest::connect(
-                    &source.host,
-                    source.port as u16,
-                    262_144,
-                    center_freq_hz,
-                    sample_rate_hz,
-                )?,
-            ),
-            other => anyhow::bail!(
-                "network kind {other} is registered but ingest adapter is not available yet"
-            ),
-        };
+        let ingest = crate::network_iq::NetworkIqIngest::connect(
+            &source.kind,
+            &source.host,
+            source.port as u16,
+            262_144,
+            center_freq_hz,
+            sample_rate_hz,
+        )?;
         let sample_rate = ingest.sample_rate_hz();
         let center = ingest.center_freq_hz();
         *self.network_ingest.lock() = Some(ingest);
@@ -1165,6 +1156,9 @@ impl DeviceLayer {
         if let Some(hardware) = self.hardware.lock().as_mut() {
             hardware.set_frequency(freq)?;
         }
+        if let Some(ingest) = self.network_ingest.lock().as_ref() {
+            ingest.tune(Some(freq), None)?;
+        }
         self.state.lock().center_freq_hz = freq;
         self.counters.retunes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1187,6 +1181,9 @@ impl DeviceLayer {
         #[cfg(feature = "soapysdr")]
         if let Some(hardware) = self.hardware.lock().as_mut() {
             hardware.set_rate(rate)?;
+        }
+        if let Some(ingest) = self.network_ingest.lock().as_ref() {
+            ingest.tune(None, Some(rate))?;
         }
         self.state.lock().sample_rate = rate;
         Ok(())

@@ -985,10 +985,11 @@ async fn devices_v2(State(s): State<ApiState>) -> impl IntoResponse {
             "certification": if adapter_ready { "development" } else { "planned" },
             "network_source": true,
             "adapter_ready": adapter_ready,
+            "implemented_kinds": crate::network_iq::implemented_network_kinds(),
             "missing_gate": if adapter_ready {
                 serde_json::Value::Null
             } else {
-                json!("network-source adapter with loss, reconnect, and timestamp tests")
+                json!("KiwiSDR adapter and physical network-iq soak remain open")
             },
             "ingest_counters": if active {
                 json!(s.0.device.network_ingest_counters())
@@ -1033,7 +1034,7 @@ async fn device_select_v2(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": format!("network kind {} is registered but ingest adapter is not available yet", source.kind),
-                    "missing_gate": "network-source adapter with loss, reconnect, and timestamp tests"
+                    "missing_gate": "KiwiSDR adapter and physical network-iq soak remain open"
                 })),
             )
                 .into_response();
@@ -1784,7 +1785,8 @@ async fn network_sources_v2(State(s): State<ApiState>) -> impl IntoResponse {
     Json(json!({
         "contract_version": 2,
         "sources": s.0.db.list_network_iq_sources().unwrap_or_default(),
-        "missing_gate": "network-source adapter with loss, reconnect, and timestamp tests",
+        "implemented_kinds": crate::network_iq::implemented_network_kinds(),
+        "missing_gate": "KiwiSDR adapter and physical network-iq soak remain open",
     }))
 }
 
