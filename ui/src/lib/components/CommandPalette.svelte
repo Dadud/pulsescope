@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { allNavItems, isRouteActive } from '$lib/navigation';
+  import { navSections, isRouteActive, type NavItem } from '$lib/navigation';
 
   let {
     open = false,
@@ -15,17 +15,29 @@
   let selectedIndex = $state(0);
   let inputEl: HTMLInputElement | undefined = $state();
 
-  const filtered = $derived(
-    query.trim()
-      ? allNavItems.filter((item) => {
-          const needle = query.trim().toLowerCase();
-          return (
-            item.label.toLowerCase().includes(needle) ||
-            (item.description?.toLowerCase().includes(needle) ?? false) ||
-            item.href.toLowerCase().includes(needle)
-          );
-        })
-      : allNavItems
+  type PaletteRow = { kind: 'item'; item: NavItem } | { kind: 'heading'; id: string; label: string };
+
+  const rows = $derived.by((): PaletteRow[] => {
+    const needle = query.trim().toLowerCase();
+    const out: PaletteRow[] = [];
+    for (const section of navSections) {
+      const items = needle
+        ? section.items.filter(
+            (item) =>
+              item.label.toLowerCase().includes(needle) ||
+              (item.description?.toLowerCase().includes(needle) ?? false) ||
+              item.href.toLowerCase().includes(needle),
+          )
+        : section.items;
+      if (items.length === 0) continue;
+      out.push({ kind: 'heading', id: section.id, label: section.label });
+      for (const item of items) out.push({ kind: 'item', item });
+    }
+    return out;
+  });
+
+  const itemRows = $derived(
+    rows.filter((row): row is Extract<PaletteRow, { kind: 'item' }> => row.kind === 'item'),
   );
 
   $effect(() => {
@@ -37,7 +49,7 @@
   });
 
   $effect(() => {
-    if (selectedIndex >= filtered.length) selectedIndex = Math.max(0, filtered.length - 1);
+    if (selectedIndex >= itemRows.length) selectedIndex = Math.max(0, itemRows.length - 1);
   });
 
   function close() {
@@ -54,7 +66,7 @@
     switch (event.key) {
       case 'ArrowDown':
         event.preventDefault();
-        selectedIndex = Math.min(filtered.length - 1, selectedIndex + 1);
+        selectedIndex = Math.min(itemRows.length - 1, selectedIndex + 1);
         break;
       case 'ArrowUp':
         event.preventDefault();
@@ -62,7 +74,7 @@
         break;
       case 'Enter':
         event.preventDefault();
-        if (filtered[selectedIndex]) navigate(filtered[selectedIndex].href);
+        if (itemRows[selectedIndex]) navigate(itemRows[selectedIndex].item.href);
         break;
       case 'Escape':
         event.preventDefault();
@@ -73,6 +85,10 @@
 
   function onBackdropClick(event: MouseEvent) {
     if (event.target === event.currentTarget) close();
+  }
+
+  function itemIndex(href: string): number {
+    return itemRows.findIndex((row) => row.item.href === href);
   }
 </script>
 
@@ -91,22 +107,27 @@
         aria-label="Search destinations"
       />
       <ul class="palette-list" role="listbox">
-        {#each filtered as item, i (item.href)}
-          <li>
-            <button
-              type="button"
-              class:selected={i === selectedIndex}
-              class:current={isRouteActive(currentRoute, item.href)}
-              onclick={() => navigate(item.href)}
-              role="option"
-              aria-selected={i === selectedIndex}
-            >
-              <span class="palette-label">{item.label}</span>
-              {#if item.description}
-                <span class="palette-desc">{item.description}</span>
-              {/if}
-            </button>
-          </li>
+        {#each rows as row (row.kind === 'heading' ? row.id : row.item.href)}
+          {#if row.kind === 'heading'}
+            <li class="palette-heading">{row.label}</li>
+          {:else}
+            {@const i = itemIndex(row.item.href)}
+            <li>
+              <button
+                type="button"
+                class:selected={i === selectedIndex}
+                class:current={isRouteActive(currentRoute, row.item.href)}
+                onclick={() => navigate(row.item.href)}
+                role="option"
+                aria-selected={i === selectedIndex}
+              >
+                <span class="palette-label">{row.item.label}</span>
+                {#if row.item.description}
+                  <span class="palette-desc">{row.item.description}</span>
+                {/if}
+              </button>
+            </li>
+          {/if}
         {:else}
           <li class="palette-empty">No matches</li>
         {/each}
@@ -153,13 +174,21 @@
     max-height: 360px;
     overflow-y: auto;
   }
+  .palette-heading {
+    padding: 10px 12px 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+  }
   .palette-list li button {
     width: 100%;
     text-align: left;
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 10px 12px;
+    padding: 8px 12px;
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;

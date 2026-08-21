@@ -5,7 +5,7 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
   import DecoderAlertBridge from '$lib/components/DecoderAlertBridge.svelte';
-  import { normalizeRoute } from '$lib/navigation';
+  import { normalizeRoute, navItemForRoute } from '$lib/navigation';
 
   let { children } = $props();
 
@@ -41,6 +41,7 @@
   });
 
   const isScanner = $derived(normalizeRoute(currentRoute) === '/');
+  const pageItem = $derived(navItemForRoute(currentRoute));
 </script>
 
 <svelte:head>
@@ -70,10 +71,13 @@
     >☰</button>
     <div class="topbar-title">
       {#if isScanner}
-        <span class="page-title">Scanner</span>
+        <span class="page-title">Receiver</span>
         <span class="page-subtitle">Live spectrum · waterfall · VFOs</span>
       {:else}
-        <span class="page-title">{currentRoute.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') ?? 'PulseScope'}</span>
+        <span class="page-title">{pageItem?.label ?? currentRoute.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') ?? 'PulseScope'}</span>
+        {#if pageItem?.description}
+          <span class="page-subtitle">{pageItem.description}</span>
+        {/if}
       {/if}
     </div>
     <div class="topbar-actions">

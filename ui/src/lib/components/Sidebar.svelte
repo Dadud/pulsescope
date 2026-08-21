@@ -1,7 +1,12 @@
 <script lang="ts">
   import { browser } from '$app/environment';
   import { page } from '$app/state';
-  import { navSections, isRouteActive } from '$lib/navigation';
+  import {
+    primaryNavItems,
+    secondaryNavSections,
+    isRouteActive,
+    secondarySectionIdForRoute,
+  } from '$lib/navigation';
 
   let {
     collapsed = false,
@@ -16,23 +21,36 @@
   } = $props();
 
   let currentRoute = $state('/');
+  /** User toggles override auto-open for the current route's group. */
+  let userOpen = $state<Record<string, boolean>>({});
 
   $effect(() => {
     if (!browser) return;
     const sync = () => {
       const hash = window.location.hash.slice(1) || '/';
       currentRoute = hash.startsWith('/') ? hash : `/${hash}`;
+      userOpen = {};
     };
     sync();
     window.addEventListener('hashchange', sync);
-    // SvelteKit hash router may update pathname without hashchange in some cases.
     const path = page.url.pathname;
     if (path && path !== '/') currentRoute = path;
     return () => window.removeEventListener('hashchange', sync);
   });
 
+  const routeSectionId = $derived(secondarySectionIdForRoute(currentRoute));
+
   function linkActive(href: string): boolean {
     return isRouteActive(currentRoute, href);
+  }
+
+  function sectionOpen(id: string): boolean {
+    if (Object.hasOwn(userOpen, id)) return userOpen[id];
+    return routeSectionId === id;
+  }
+
+  function toggleSection(id: string) {
+    userOpen = { ...userOpen, [id]: !sectionOpen(id) };
   }
 </script>
 
@@ -54,26 +72,67 @@
   </div>
 
   <nav class="sidebar-nav">
-    {#each navSections as section (section.id)}
-      <div class="nav-section">
-        {#if !collapsed}<div class="section-label">{section.label}</div>{/if}
-        <ul>
-          {#each section.items as item (item.href)}
-            <li>
-              <a
-                href={item.href}
-                class:active={linkActive(item.href)}
-                title={collapsed ? item.label : item.description ?? item.label}
-              >
-                {#if collapsed}
-                  <span class="nav-abbr">{item.label.slice(0, 2)}</span>
-                {:else}
+    <ul class="nav-list primary">
+      {#each primaryNavItems as item (item.href)}
+        <li>
+          <a
+            href={item.href}
+            class:active={linkActive(item.href)}
+            aria-current={linkActive(item.href) ? 'page' : undefined}
+            title={collapsed ? item.label : item.description ?? item.label}
+          >
+            {#if collapsed}
+              <span class="nav-abbr">{item.label.slice(0, 2)}</span>
+            {:else}
+              {item.label}
+            {/if}
+          </a>
+        </li>
+      {/each}
+    </ul>
+
+    {#each secondaryNavSections as section (section.id)}
+      {@const open = sectionOpen(section.id)}
+      {@const containsCurrent = routeSectionId === section.id}
+      <div class="nav-group" class:open class:current={containsCurrent}>
+        <button
+          type="button"
+          class="group-toggle"
+          aria-expanded={open}
+          aria-controls={`nav-group-${section.id}`}
+          title={collapsed ? section.label : undefined}
+          onclick={() => {
+            if (collapsed) {
+              onToggleCollapse?.();
+              userOpen = { ...userOpen, [section.id]: true };
+              return;
+            }
+            toggleSection(section.id);
+          }}
+        >
+          {#if collapsed}
+            <span class="nav-abbr">{section.label.slice(0, 2)}</span>
+          {:else}
+            <span class="group-label">{section.label}</span>
+            <span class="group-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
+          {/if}
+        </button>
+        {#if open && !collapsed}
+          <ul class="nav-list nested" id={`nav-group-${section.id}`}>
+            {#each section.items as item (item.href)}
+              <li>
+                <a
+                  href={item.href}
+                  class:active={linkActive(item.href)}
+                  aria-current={linkActive(item.href) ? 'page' : undefined}
+                  title={item.description ?? item.label}
+                >
                   {item.label}
-                {/if}
-              </a>
-            </li>
-          {/each}
-        </ul>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </div>
     {/each}
   </nav>
@@ -82,7 +141,7 @@
     {#if onOpenCommandPalette}
       <button type="button" class="palette-btn" onclick={onOpenCommandPalette} title="Quick jump (Ctrl+K)">
         {#if collapsed}⌘{/if}
-        {#if !collapsed}<span>Quick jump</span><kbd>Ctrl K</kbd>{/if}
+        {#if !collapsed}<span>Jump to page</span><kbd>Ctrl K</kbd>{/if}
       </button>
     {/if}
   </div>
@@ -92,8 +151,8 @@
   .sidebar {
     display: flex;
     flex-direction: column;
-    width: 220px;
-    min-width: 220px;
+    width: 204px;
+    min-width: 204px;
     background: var(--bg-elev);
     border-right: 1px solid var(--line);
     height: 100%;
@@ -139,40 +198,63 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 8px 6px;
+    padding: 8px 6px 12px;
   }
-  .nav-section + .nav-section { margin-top: 10px; }
-  .section-label {
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--fg-dim);
-    padding: 2px 8px 4px;
-  }
-  .nav-section ul {
+  .nav-list {
     list-style: none;
     margin: 0;
     padding: 0;
   }
-  .nav-section a {
-    display: block;
+  .nav-list a,
+  .group-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
     color: var(--fg-dim);
     text-decoration: none;
-    padding: 6px 10px;
+    padding: 7px 10px;
     border-radius: 6px;
     font-size: 13px;
+    line-height: 1.2;
     border: 1px solid transparent;
+    background: transparent;
     white-space: nowrap;
+    text-align: left;
   }
-  .nav-section a:hover {
+  .nav-list a:hover,
+  .group-toggle:hover {
     background: var(--bg-elev-2);
     color: var(--fg);
   }
-  .nav-section a.active {
+  .nav-list a.active {
     background: var(--bg-elev-2);
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .nav-list.nested a {
+    padding-left: 16px;
+    font-size: 12.5px;
+  }
+  .nav-group {
+    margin-top: 8px;
+  }
+  .group-toggle {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    cursor: pointer;
+  }
+  .nav-group.current .group-toggle {
+    color: var(--fg);
+  }
+  .group-label { min-width: 0; }
+  .group-chevron {
+    font-size: 10px;
+    color: var(--fg-dim);
   }
   .nav-abbr {
     font-size: 11px;
