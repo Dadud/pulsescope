@@ -1,4 +1,4 @@
-/** Sidebar shows primary workspaces; secondary destinations sit in collapsible groups. */
+/** Sidebar navigation: every category is collapsed until clicked (current route opens its group). */
 export type NavItem = {
   label: string;
   href: string;
@@ -11,17 +11,17 @@ export type NavSection = {
   items: NavItem[];
 };
 
-/** Always-visible workspaces. Keep this short so the sidebar stays scannable. */
-export const primaryNavItems: NavItem[] = [
-  { label: 'Receiver', href: '#/', description: 'Spectrum, waterfall, VFOs, tuning' },
-  { label: 'Monitor', href: '#/monitor', description: 'System health and decoder jobs' },
-  { label: 'Activity', href: '#/activity', description: 'Cross-protocol RF timeline' },
-  { label: 'Recording', href: '#/recording', description: 'IQ capture, transcription, annotations' },
-  { label: 'Settings', href: '#/settings', description: 'Device, receiver, scanner, audio' },
-];
-
-/** Collapsed-by-default groups. The group containing the current route opens itself. */
-export const secondaryNavSections: NavSection[] = [
+export const navSections: NavSection[] = [
+  {
+    id: 'workspaces',
+    label: 'Workspaces',
+    items: [
+      { label: 'Receiver', href: '#/', description: 'Spectrum, waterfall, VFOs, tuning' },
+      { label: 'Monitor', href: '#/monitor', description: 'System health and decoder jobs' },
+      { label: 'Activity', href: '#/activity', description: 'Cross-protocol RF timeline' },
+      { label: 'Recording', href: '#/recording', description: 'IQ capture, transcription, annotations' },
+    ],
+  },
   {
     id: 'signals',
     label: 'Signals',
@@ -42,6 +42,7 @@ export const secondaryNavSections: NavSection[] = [
     id: 'setup',
     label: 'Setup',
     items: [
+      { label: 'Settings', href: '#/settings', description: 'Device, receiver, scanner, audio' },
       { label: 'Profiles', href: '#/profiles', description: 'Hardware profiles and bookmarks' },
       { label: 'Blacklist', href: '#/blacklist', description: 'Frequency exclusion list' },
       { label: 'Cases', href: '#/cases', description: 'Investigation case management' },
@@ -55,16 +56,8 @@ export const secondaryNavSections: NavSection[] = [
   },
 ];
 
-export const navSections: NavSection[] = [
-  { id: 'workspaces', label: 'Workspaces', items: primaryNavItems },
-  ...secondaryNavSections,
-];
-
 /** All navigable destinations for the command palette. */
-export const allNavItems: NavItem[] = [
-  ...primaryNavItems,
-  ...secondaryNavSections.flatMap((section) => section.items),
-];
+export const allNavItems: NavItem[] = navSections.flatMap((section) => section.items);
 
 /** Normalize hash route for active-state comparison. */
 export function normalizeRoute(hashOrPath: string): string {
@@ -81,8 +74,8 @@ export function navItemForRoute(current: string): NavItem | undefined {
   return allNavItems.find((item) => isRouteActive(current, item.href));
 }
 
-export function secondarySectionIdForRoute(current: string): string | null {
-  for (const section of secondaryNavSections) {
+export function sectionIdForRoute(current: string): string | null {
+  for (const section of navSections) {
     if (section.items.some((item) => isRouteActive(current, item.href))) {
       return section.id;
     }

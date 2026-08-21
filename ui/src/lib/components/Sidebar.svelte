@@ -1,12 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/environment';
   import { page } from '$app/state';
-  import {
-    primaryNavItems,
-    secondaryNavSections,
-    isRouteActive,
-    secondarySectionIdForRoute,
-  } from '$lib/navigation';
+  import { navSections, isRouteActive, sectionIdForRoute } from '$lib/navigation';
 
   let {
     collapsed = false,
@@ -38,7 +33,7 @@
     return () => window.removeEventListener('hashchange', sync);
   });
 
-  const routeSectionId = $derived(secondarySectionIdForRoute(currentRoute));
+  const routeSectionId = $derived(sectionIdForRoute(currentRoute));
 
   function linkActive(href: string): boolean {
     return isRouteActive(currentRoute, href);
@@ -51,6 +46,15 @@
 
   function toggleSection(id: string) {
     userOpen = { ...userOpen, [id]: !sectionOpen(id) };
+  }
+
+  function onCategoryClick(id: string) {
+    if (collapsed) {
+      onToggleCollapse?.();
+      userOpen = { ...userOpen, [id]: true };
+      return;
+    }
+    toggleSection(id);
   }
 </script>
 
@@ -71,27 +75,8 @@
   {/if}
   </div>
 
-  <nav class="sidebar-nav">
-    <ul class="nav-list primary">
-      {#each primaryNavItems as item (item.href)}
-        <li>
-          <a
-            href={item.href}
-            class:active={linkActive(item.href)}
-            aria-current={linkActive(item.href) ? 'page' : undefined}
-            title={collapsed ? item.label : item.description ?? item.label}
-          >
-            {#if collapsed}
-              <span class="nav-abbr">{item.label.slice(0, 2)}</span>
-            {:else}
-              {item.label}
-            {/if}
-          </a>
-        </li>
-      {/each}
-    </ul>
-
-    {#each secondaryNavSections as section (section.id)}
+  <nav class="sidebar-nav" aria-label="Categories">
+    {#each navSections as section (section.id)}
       {@const open = sectionOpen(section.id)}
       {@const containsCurrent = routeSectionId === section.id}
       <div class="nav-group" class:open class:current={containsCurrent}>
@@ -100,15 +85,8 @@
           class="group-toggle"
           aria-expanded={open}
           aria-controls={`nav-group-${section.id}`}
-          title={collapsed ? section.label : undefined}
-          onclick={() => {
-            if (collapsed) {
-              onToggleCollapse?.();
-              userOpen = { ...userOpen, [section.id]: true };
-              return;
-            }
-            toggleSection(section.id);
-          }}
+          title={collapsed ? `${section.label} — click to expand` : undefined}
+          onclick={() => onCategoryClick(section.id)}
         >
           {#if collapsed}
             <span class="nav-abbr">{section.label.slice(0, 2)}</span>
@@ -233,27 +211,34 @@
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }
+  .nav-list.nested {
+    margin: 2px 0 0;
+    padding-left: 4px;
+  }
   .nav-list.nested a {
-    padding-left: 16px;
+    padding-left: 14px;
     font-size: 12.5px;
   }
-  .nav-group {
-    margin-top: 8px;
+  .nav-group + .nav-group {
+    margin-top: 4px;
   }
   .group-toggle {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--fg-dim);
+    letter-spacing: 0.04em;
+    color: var(--fg);
     cursor: pointer;
   }
+  .nav-group.open .group-toggle {
+    background: var(--bg-elev-2);
+    border-color: var(--line);
+  }
   .nav-group.current .group-toggle {
-    color: var(--fg);
+    color: var(--accent);
   }
   .group-label { min-width: 0; }
   .group-chevron {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--fg-dim);
   }
   .nav-abbr {
